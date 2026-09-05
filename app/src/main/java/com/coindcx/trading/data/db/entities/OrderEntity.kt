@@ -15,7 +15,8 @@ data class OrderEntity(
     val price: Double?,
     val totalQuantity: Double,
     val filledQuantity: Double = 0.0,
-    val status: String, // PENDING, UNKNOWN, FILLED, CANCELLED, REJECTED
+    val status: String, // PENDING, SUBMITTED, FILLED, CANCELLED, REJECTED
+    val rejectionReason: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

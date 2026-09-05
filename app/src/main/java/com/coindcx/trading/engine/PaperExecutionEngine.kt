@@ -1,42 +1,51 @@
 package com.coindcx.trading.engine
 
 import android.content.Context
+import com.coindcx.trading.data.api.CoinDCXApiService
 import com.coindcx.trading.data.api.models.FuturesPosition
 import com.coindcx.trading.data.db.AppDatabase
 import com.coindcx.trading.data.db.entities.OrderEntity
 import com.coindcx.trading.data.db.entities.SystemLogEntity
 import com.coindcx.trading.data.db.entities.TradeEntity
 import com.coindcx.trading.engine.currency.CurrencyConverter
+import com.coindcx.trading.engine.paper.PaperAccountManager
+import com.coindcx.trading.engine.paper.PaperAnalyticsEngine
+import com.coindcx.trading.engine.paper.PaperPositionManager
+import com.coindcx.trading.engine.paper.PaperPositionManager.Companion.calculateEstimatedLiquidation
 import java.util.UUID
 
 class PaperExecutionEngine(
     private val context: Context,
     private val db: AppDatabase,
-    private val currencyConverter: CurrencyConverter
+    private val currencyConverter: CurrencyConverter,
+    private val apiService: CoinDCXApiService
 ) : ExecutionEngine {
 
     override val isPaperTrading: Boolean = true
-    private val slippageRate = 0.0005 // 0.05% estimated slippage
-    private val feeRate = 0.0005      // 0.05% standard taker fee
 
-    private val initialBalanceInr = 10_000.0
+    val accountManager = PaperAccountManager(context, db)
+    val positionManager = PaperPositionManager(apiService, db, accountManager)
+    val analyticsEngine = PaperAnalyticsEngine(db, accountManager)
+
+    var onTradeClosed: ((Double) -> Unit)? = null
+
+    init {
+        positionManager.onTradeClosed = { _, netPnl ->
+            onTradeClosed?.invoke(netPnl)
+        }
+    }
 
     override suspend fun getAvailableBalanceInr(): Double {
-        val openTrades = db.tradeDao().getOpenTrades()
-        val lockedMarginInr = openTrades.sumOf { it.allocatedMarginInr }
-
-        // Fetch closed trades for realized P&L & fees
-        val closedTrades = db.tradeDao().getTradesSince(0).filter { it.status == "CLOSED" }
-        val cumulativeRealizedPnlInr = closedTrades.sumOf { it.realizedPnl ?: 0.0 }
-        val totalFeesInr = db.tradeDao().getTradesSince(0).sumOf { it.fees }
-
-        val calculated = initialBalanceInr + cumulativeRealizedPnlInr - totalFeesInr - lockedMarginInr
-        return calculated.coerceAtLeast(0.0)
+        return accountManager.getAccountSummary().availableBalanceInr
     }
 
     override suspend fun getActivePosition(pair: String): FuturesPosition? {
-        val openTrade = db.tradeDao().getOpenTrades().find { it.pair == pair } ?: return null
-        val isLong = openTrade.side == "LONG"
+        val currentSessionId = accountManager.getCurrentSessionId()
+        val openTrade = db.tradeDao().getTradesForSession(currentSessionId)
+            .find { it.status == "OPEN" && it.pair == pair } ?: return null
+        val isLong = openTrade.side.equals("LONG", ignoreCase = true)
+        val currentPrice = openTrade.currentPrice ?: openTrade.entryPrice
+
         return FuturesPosition(
             id = openTrade.clientOrderId,
             pair = openTrade.pair,
@@ -44,27 +53,29 @@ class PaperExecutionEngine(
             inactivePosBuy = 0.0,
             inactivePosSell = 0.0,
             avgPrice = openTrade.entryPrice,
-            liquidationPrice = 0.0,
+            liquidationPrice = openTrade.estimatedLiquidationPrice ?: 0.0,
             lockedMargin = openTrade.allocatedMarginInr,
             lockedUserMargin = openTrade.allocatedMarginInr,
             lockedOrderMargin = 0.0,
             takeProfitTrigger = openTrade.takeProfit,
             stopLossTrigger = openTrade.stopLoss,
             leverage = openTrade.leverage.toDouble(),
-            maintenanceMargin = 0.0,
-            markPrice = openTrade.entryPrice,
+            maintenanceMargin = PaperPositionManager.getMaintenanceMargin(openTrade.leverage) * openTrade.notionalValueInr,
+            markPrice = currentPrice,
             marginType = "ISOLATED",
             settlementCurrencyAvgPrice = openTrade.entryPrice,
-            cumulativeFundingFee = 0.0,
+            cumulativeFundingFee = openTrade.fundingFees,
             marginCurrencyShortName = "INR",
             updatedAt = openTrade.entryTime
         )
     }
 
     override suspend fun getAllOpenPositions(): List<FuturesPosition> {
-        val openTrades = db.tradeDao().getOpenTrades()
+        val currentSessionId = accountManager.getCurrentSessionId()
+        val openTrades = db.tradeDao().getTradesForSession(currentSessionId).filter { it.status == "OPEN" }
         return openTrades.map { trade ->
-            val isLong = trade.side == "LONG"
+            val isLong = trade.side.equals("LONG", ignoreCase = true)
+            val currentPrice = trade.currentPrice ?: trade.entryPrice
             FuturesPosition(
                 id = trade.clientOrderId,
                 pair = trade.pair,
@@ -72,18 +83,18 @@ class PaperExecutionEngine(
                 inactivePosBuy = 0.0,
                 inactivePosSell = 0.0,
                 avgPrice = trade.entryPrice,
-                liquidationPrice = 0.0,
+                liquidationPrice = trade.estimatedLiquidationPrice ?: 0.0,
                 lockedMargin = trade.allocatedMarginInr,
                 lockedUserMargin = trade.allocatedMarginInr,
                 lockedOrderMargin = 0.0,
                 takeProfitTrigger = trade.takeProfit,
                 stopLossTrigger = trade.stopLoss,
                 leverage = trade.leverage.toDouble(),
-                maintenanceMargin = 0.0,
-                markPrice = trade.entryPrice,
+                maintenanceMargin = PaperPositionManager.getMaintenanceMargin(trade.leverage) * trade.notionalValueInr,
+                markPrice = currentPrice,
                 marginType = "ISOLATED",
                 settlementCurrencyAvgPrice = trade.entryPrice,
-                cumulativeFundingFee = 0.0,
+                cumulativeFundingFee = trade.fundingFees,
                 marginCurrencyShortName = "INR",
                 updatedAt = trade.entryTime
             )
@@ -92,11 +103,13 @@ class PaperExecutionEngine(
 
     override suspend fun refreshExchangeState(): Result<ExchangeStateSnapshot> {
         return try {
-            val balanceInr = getAvailableBalanceInr()
+            // Run batched position monitor to refresh prices, pnl, funding
+            positionManager.updateOpenPositions()
+            val summary = accountManager.getAccountSummary()
             val positions = getAllOpenPositions()
             Result.success(
                 ExchangeStateSnapshot(
-                    availableBalanceInr = balanceInr,
+                    availableBalanceInr = summary.availableBalanceInr,
                     openPositions = positions,
                     timestamp = System.currentTimeMillis()
                 )
@@ -106,26 +119,12 @@ class PaperExecutionEngine(
         }
     }
 
-    suspend fun checkPaperStopLossAndTakeProfit(pair: String, currentPrice: Double) {
-        val openTrades = db.tradeDao().getOpenTrades().filter { it.pair == pair }
-        for (trade in openTrades) {
-            val isLong = trade.side == "LONG"
-            val sl = trade.stopLoss
-            val tp = trade.takeProfit
-            if (isLong) {
-                if (sl != null && currentPrice <= sl) {
-                    exitPosition(pair, currentPrice, "Paper Stop-Loss triggered (Price: ₹$currentPrice <= SL: ₹$sl)")
-                } else if (tp != null && currentPrice >= tp) {
-                    exitPosition(pair, currentPrice, "Paper Take-Profit triggered (Price: ₹$currentPrice >= TP: ₹$tp)")
-                }
-            } else {
-                if (sl != null && currentPrice >= sl) {
-                    exitPosition(pair, currentPrice, "Paper Stop-Loss triggered (Price: ₹$currentPrice >= SL: ₹$sl)")
-                } else if (tp != null && currentPrice <= tp) {
-                    exitPosition(pair, currentPrice, "Paper Take-Profit triggered (Price: ₹$currentPrice <= TP: ₹$tp)")
-                }
-            }
-        }
+    suspend fun checkPaperStopLossAndTakeProfit(
+        @Suppress("UNUSED_PARAMETER") pair: String? = null,
+        @Suppress("UNUSED_PARAMETER") currentPrice: Double? = null
+    ) {
+        // Handled centrally via positionManager.updateOpenPositions()
+        positionManager.updateOpenPositions()
     }
 
     override suspend fun executeSignal(
@@ -135,25 +134,51 @@ class PaperExecutionEngine(
         marginInr: Double,
         leverage: Int
     ): ExecutionResult {
+        val currentSession = accountManager.getCurrentSessionId()
         val clientOrderId = "paper_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
 
         val isBuy = signal.action == SignalAction.ENTER_LONG
         val side = if (isBuy) "LONG" else "SHORT"
 
-        // Apply slippage
+        // 1. Explicit Order Placement (State: SUBMITTED)
+        val initialOrder = OrderEntity(
+            clientOrderId = clientOrderId,
+            exchangeOrderId = "sim_$clientOrderId",
+            pair = pair,
+            side = side,
+            orderType = "market_order",
+            price = currentPrice,
+            totalQuantity = 0.0,
+            filledQuantity = 0.0,
+            status = "SUBMITTED"
+        )
+        db.orderDao().insert(initialOrder)
+
+        // 2. Simulate Fill (State: FILLED with slippage + fees)
         val fillPrice = if (isBuy) {
-            currentPrice * (1.0 + slippageRate)
+            currentPrice * (1.0 + PaperPositionManager.SLIPPAGE_RATE)
         } else {
-            currentPrice * (1.0 - slippageRate)
+            currentPrice * (1.0 - PaperPositionManager.SLIPPAGE_RATE)
         }
 
-        // Convert INR margin to crypto quantity
         val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, fillPrice)
         val quantity = rawQty.coerceAtLeast(0.001)
 
         val notionalInr = marginInr * leverage
-        val entryFeeInr = notionalInr * feeRate
+        val entryFeeInr = notionalInr * PaperPositionManager.TAKER_FEE_RATE
+        val estLiq = calculateEstimatedLiquidation(side, fillPrice, leverage)
 
+        db.orderDao().update(
+            initialOrder.copy(
+                price = fillPrice,
+                totalQuantity = quantity,
+                filledQuantity = quantity,
+                status = "FILLED",
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+
+        // 3. Create Open Position in Holding (State: OPEN)
         val trade = TradeEntity(
             pair = pair,
             side = side,
@@ -169,36 +194,37 @@ class PaperExecutionEngine(
             clientOrderId = clientOrderId,
             status = "OPEN",
             entryTime = System.currentTimeMillis(),
-            strategyName = StrategyRegistry.activeStrategy.name
+            strategyName = StrategyRegistry.activeStrategy.name,
+            signalPrice = currentPrice,
+            orderPrice = currentPrice,
+            currentPrice = fillPrice,
+            notionalValueInr = notionalInr,
+            estimatedLiquidationPrice = estLiq,
+            grossPnl = 0.0,
+            fundingFees = 0.0,
+            slippageRate = PaperPositionManager.SLIPPAGE_RATE,
+            roiPercent = 0.0,
+            timeframe = "15m",
+            sessionId = currentSession
         )
 
         db.tradeDao().insert(trade)
 
-        db.orderDao().insert(
-            OrderEntity(
-                clientOrderId = clientOrderId,
-                exchangeOrderId = "sim_${clientOrderId}",
-                pair = pair,
-                side = side,
-                orderType = "limit_order",
-                price = fillPrice,
-                totalQuantity = quantity,
-                filledQuantity = quantity,
-                status = "FILLED"
-            )
-        )
+        // Record initial equity snapshot
+        accountManager.recordEquitySnapshot()
 
         db.systemLogDao().insert(
             SystemLogEntity(
                 level = "INFO",
                 tag = "PAPER_TRADE",
-                message = "Simulated $side $pair (Margin: ₹%.0f, Lev: ${leverage}x, Qty: $quantity) @ $fillPrice. ${signal.reason}".format(marginInr)
+                message = "Simulated $side $pair (Margin: ₹%.0f, Lev: ${leverage}x, Qty: $quantity) @ $fillPrice. EstLiq: $estLiq. ${signal.reason}"
+                    .format(marginInr)
             )
         )
 
         return ExecutionResult.Success(
             orderId = clientOrderId,
-            message = "Simulated $side fill on $pair with ₹%.0f margin".format(marginInr)
+            message = "Simulated $side fill on $pair with ₹%.0f margin @ $fillPrice".format(marginInr)
         )
     }
 
@@ -207,55 +233,18 @@ class PaperExecutionEngine(
         currentPrice: Double,
         reason: String
     ): ExecutionResult {
-        val openTrades = db.tradeDao().getOpenTrades().filter { it.pair == pair }
+        val currentSession = accountManager.getCurrentSessionId()
+        val openTrades = db.tradeDao().getTradesForSession(currentSession)
+            .filter { it.status == "OPEN" && it.pair == pair }
+
         if (openTrades.isEmpty()) {
             return ExecutionResult.Failed("No open paper trades found for $pair")
         }
 
         for (trade in openTrades) {
-            val isLong = trade.side == "LONG"
-            val exitFillPrice = if (isLong) {
-                currentPrice * (1.0 - slippageRate)
-            } else {
-                currentPrice * (1.0 + slippageRate)
-            }
-
-            val notionalInr = trade.allocatedMarginInr * trade.leverage
-            val exitFeeInr = notionalInr * feeRate
-            val totalFeesInr = trade.fees + exitFeeInr
-
-            // Calculate percentage return on notional
-            val pnlPct = if (isLong) {
-                (exitFillPrice - trade.entryPrice) / trade.entryPrice
-            } else {
-                (trade.entryPrice - exitFillPrice) / trade.entryPrice
-            }
-
-            val realizedPnlInr = (notionalInr * pnlPct) - totalFeesInr
-
-            db.tradeDao().update(
-                trade.copy(
-                    exitPrice = exitFillPrice,
-                    fees = totalFeesInr,
-                    realizedPnl = realizedPnlInr,
-                    status = "CLOSED",
-                    exitTime = System.currentTimeMillis(),
-                    exitReason = reason
-                )
-            )
-
-            db.systemLogDao().insert(
-                SystemLogEntity(
-                    level = if (realizedPnlInr >= 0) "INFO" else "WARN",
-                    tag = "PAPER_EXIT",
-                    message = "Simulated exit $pair @ $exitFillPrice. P&L: ₹%.2f. Reason: %s".format(realizedPnlInr, reason)
-                )
-            )
-            onTradeClosed?.invoke(realizedPnlInr)
+            positionManager.closePositionManually(trade.id, reason)
         }
 
         return ExecutionResult.Success("closed_all", "Closed ${openTrades.size} paper positions for $pair")
     }
-
-    var onTradeClosed: ((Double) -> Unit)? = null
 }

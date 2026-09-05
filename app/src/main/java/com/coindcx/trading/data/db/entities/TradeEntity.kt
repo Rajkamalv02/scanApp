@@ -26,5 +26,20 @@ data class TradeEntity(
     val entryTime: Long = System.currentTimeMillis(),
     val exitTime: Long? = null,
     val strategyName: String,
-    val exitReason: String? = null
+    val exitReason: String? = null,
+
+    // Institutional Paper Simulation Lifecycle Fields
+    val signalPrice: Double = 0.0,
+    val orderPrice: Double? = null,
+    val currentPrice: Double? = null,
+    val notionalValueInr: Double = 0.0,
+    val estimatedLiquidationPrice: Double? = null,
+    val grossPnl: Double? = null,
+    val fundingFees: Double = 0.0,
+    val slippageRate: Double = 0.0005,
+    val roiPercent: Double? = null,
+    val durationMillis: Long? = null,
+    val timeframe: String = "15m",
+    val tradeResult: String? = null, // "WIN", "LOSS", "BREAKEVEN"
+    val sessionId: String = "session_default"
 )

@@ -56,9 +56,13 @@ class TradingForegroundService : Service() {
         const val ACTION_UPDATE_CONFIG = "com.coindcx.trading.ACTION_UPDATE_CONFIG"
         const val ACTION_CLOSE_POSITION = "com.coindcx.trading.ACTION_CLOSE_POSITION"
         const val ACTION_REFRESH_EXCHANGE = "com.coindcx.trading.ACTION_REFRESH_EXCHANGE"
+        const val ACTION_RESET_PAPER = "com.coindcx.trading.ACTION_RESET_PAPER"
         const val EXTRA_IS_PAPER = "EXTRA_IS_PAPER"
         const val EXTRA_PAIR = "EXTRA_PAIR"
+        const val EXTRA_RESET_BALANCE = "EXTRA_RESET_BALANCE"
     }
+
+    private var positionMonitorJob: kotlinx.coroutines.Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -66,7 +70,7 @@ class TradingForegroundService : Service() {
         configRepo = TradingConfigRepository.getInstance(applicationContext)
         currencyConverter = CurrencyConverter(ApiClient.apiService)
         orderManager = OrderManager(ApiClient.apiService, db.orderDao())
-        paperEngine = PaperExecutionEngine(applicationContext, db, currencyConverter)
+        paperEngine = PaperExecutionEngine(applicationContext, db, currencyConverter, ApiClient.apiService)
         liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter)
         scannerEngine = MarketScannerEngine(ApiClient.apiService)
         ranker = OpportunityRanker()
@@ -78,12 +82,14 @@ class TradingForegroundService : Service() {
             serviceScope.launch {
                 val bal = executionEngine.getAvailableBalanceInr()
                 riskManager.recordTradeResult(pnl, bal)
+                refreshPaperState()
             }
         }
 
         StrategyRegistry.init(applicationContext)
         createNotificationChannel()
         acquireWakeLock()
+        startPositionMonitorLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -199,6 +205,20 @@ class TradingForegroundService : Service() {
                         }
                     } finally {
                         MarketScanState.setRefreshingExchange(false)
+                    }
+                }
+            }
+            ACTION_RESET_PAPER -> {
+                val resetBalance = intent.getDoubleExtra(
+                    EXTRA_RESET_BALANCE,
+                    com.coindcx.trading.engine.paper.PaperAccountManager.DEFAULT_STARTING_BALANCE
+                )
+                serviceScope.launch {
+                    paperEngine.accountManager.resetAccount(resetBalance)
+                    refreshPaperState()
+                    val syncRes = executionEngine.refreshExchangeState()
+                    if (syncRes.isSuccess) {
+                        MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
                     }
                 }
             }
@@ -466,16 +486,10 @@ class TradingForegroundService : Service() {
                 MarketScanState.updateExchangeSnapshot(postSync.getOrThrow())
             }
 
-            // 8. Monitor Paper SL/TP for open positions
+            // 8. Monitor Paper Positions & Refresh State
             if (executionEngine is PaperExecutionEngine) {
-                val openTrades = db.tradeDao().getOpenTrades()
-                for (t in openTrades) {
-                    val candleResp = ApiClient.apiService.getCandles(t.pair, config.timeframe)
-                    val currentPrice = candleResp.body()?.lastOrNull()?.close
-                    if (currentPrice != null) {
-                        paperEngine.checkPaperStopLossAndTakeProfit(t.pair, currentPrice)
-                    }
-                }
+                paperEngine.positionManager.updateOpenPositions()
+                refreshPaperState()
             }
 
             val executedCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED }
@@ -554,9 +568,39 @@ class TradingForegroundService : Service() {
         manager.notify(NOTIFICATION_ID, notification)
     }
 
+    private fun startPositionMonitorLoop() {
+        positionMonitorJob?.cancel()
+        positionMonitorJob = serviceScope.launch {
+            while (isActive) {
+                try {
+                    if (executionEngine is PaperExecutionEngine) {
+                        val updated = paperEngine.positionManager.updateOpenPositions()
+                        refreshPaperState()
+                        if (updated > 0) {
+                            val syncRes = executionEngine.refreshExchangeState()
+                            if (syncRes.isSuccess) {
+                                MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+                delay(7000) // Batched check every 7 seconds
+            }
+        }
+    }
+
+    private suspend fun refreshPaperState() {
+        try {
+            val summary = paperEngine.accountManager.getAccountSummary()
+            val report = paperEngine.analyticsEngine.computeAnalytics(summary.sessionId)
+            MarketScanState.updatePaperState(summary, report)
+        } catch (_: Exception) {}
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         isTradingActive = false
+        positionMonitorJob?.cancel()
         serviceScope.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
     }

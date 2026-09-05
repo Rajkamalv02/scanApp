@@ -20,10 +20,14 @@ import com.coindcx.trading.data.api.ApiClient
 import com.coindcx.trading.data.api.models.FuturesPosition
 import com.coindcx.trading.data.config.TradingConfigRepository
 import com.coindcx.trading.data.db.AppDatabase
+import com.coindcx.trading.data.db.entities.OrderEntity
 import com.coindcx.trading.data.db.entities.SystemLogEntity
 import com.coindcx.trading.data.db.entities.TradeEntity
 import com.coindcx.trading.databinding.ActivityMainBinding
 import com.coindcx.trading.databinding.ItemActivePositionBinding
+import com.coindcx.trading.databinding.ItemPaperClosedBinding
+import com.coindcx.trading.databinding.ItemPaperHoldingBinding
+import com.coindcx.trading.databinding.ItemPaperPendingBinding
 import com.coindcx.trading.databinding.ItemRankedOpportunityBinding
 import com.coindcx.trading.engine.PnlEngine
 import com.coindcx.trading.engine.Strategy
@@ -50,6 +54,10 @@ class MainActivity : AppCompatActivity() {
     private val allocationEngine by lazy { AllocationEngine() }
 
     private var isUserSwitchingMode = true
+    private var currentPortfolioTab = 0 // 0 = Holding, 1 = Pending, 2 = Closed
+    private var cachedHoldingTrades: List<TradeEntity> = emptyList()
+    private var cachedPendingOrders: List<OrderEntity> = emptyList()
+    private var cachedClosedTrades: List<TradeEntity> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +70,7 @@ class MainActivity : AppCompatActivity() {
         setupStrategySelector()
         setupExecutionModeToggle()
         setupButtons()
+        setupPaperAccountControls()
 
         observeMarketScanState()
         observePaperTrades()
@@ -362,6 +371,65 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupPaperAccountControls() {
+        binding.btnResetPaperAccount.setOnClickListener {
+            val selectedBalance = when (binding.chipGroupPaperCapital.checkedChipId) {
+                R.id.chipPaper1k -> 1000.0
+                R.id.chipPaper2k -> 2000.0
+                R.id.chipPaper3k -> 3000.0
+                R.id.chipPaper5k -> 5000.0
+                R.id.chipPaper10k -> 10000.0
+                else -> 5000.0
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle("Reset Paper Trading Account")
+                .setMessage("Are you sure you want to reset the paper trading account?\n\nThis will:\n• Close all active paper positions\n• Start a new session with ₹%.0f starting capital\n• Safely archive previous trade history".format(selectedBalance))
+                .setPositiveButton("Reset") { _, _ ->
+                    sendServiceIntent(TradingForegroundService.ACTION_RESET_PAPER) {
+                        putExtra(TradingForegroundService.EXTRA_RESET_BALANCE, selectedBalance)
+                    }
+                    Toast.makeText(this, "Paper account reset to ₹%.0f".format(selectedBalance), Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        binding.btnTabHolding.setOnClickListener {
+            currentPortfolioTab = 0
+            updatePortfolioTabUi()
+            renderPortfolio()
+        }
+
+        binding.btnTabPending.setOnClickListener {
+            currentPortfolioTab = 1
+            updatePortfolioTabUi()
+            renderPortfolio()
+        }
+
+        binding.btnTabClosed.setOnClickListener {
+            currentPortfolioTab = 2
+            updatePortfolioTabUi()
+            renderPortfolio()
+        }
+    }
+
+    private fun updatePortfolioTabUi() {
+        val activeBg = getColor(R.color.surface_elevated)
+        val inactiveBg = getColor(android.R.color.transparent)
+        val activeText = getColor(R.color.accent_blue)
+        val inactiveText = getColor(R.color.text_secondary)
+
+        binding.btnTabHolding.backgroundTintList = android.content.res.ColorStateList.valueOf(if (currentPortfolioTab == 0) activeBg else inactiveBg)
+        binding.btnTabHolding.setTextColor(if (currentPortfolioTab == 0) activeText else inactiveText)
+
+        binding.btnTabPending.backgroundTintList = android.content.res.ColorStateList.valueOf(if (currentPortfolioTab == 1) activeBg else inactiveBg)
+        binding.btnTabPending.setTextColor(if (currentPortfolioTab == 1) activeText else inactiveText)
+
+        binding.btnTabClosed.backgroundTintList = android.content.res.ColorStateList.valueOf(if (currentPortfolioTab == 2) activeBg else inactiveBg)
+        binding.btnTabClosed.setTextColor(if (currentPortfolioTab == 2) activeText else inactiveText)
+    }
+
     private fun observeMarketScanState() {
         lifecycleScope.launch {
             MarketScanState.isScanning.collectLatest { scanning ->
@@ -565,30 +633,198 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun observePaperTrades() {
-        // Observe paper trade history & open holdings
+        // 1. Observe Paper Account Summary
         lifecycleScope.launch {
-            db.tradeDao().getAllTradesFlow().collectLatest { trades ->
-                val openTrades = trades.filter { it.status == "OPEN" }
-                val closedTrades = trades.filter { it.status == "CLOSED" }
-                val totalRealizedPnl = closedTrades.sumOf { it.realizedPnl ?: 0.0 }
-                val totalFees = trades.sumOf { it.fees }
+            MarketScanState.paperAccountSummary.collectLatest { summary ->
+                if (summary != null) {
+                    val sessionNum = summary.sessionId.removePrefix("session_")
+                    val displaySession = if (sessionNum.length > 8) "SESSION: " + sessionNum.takeLast(6) else "SESSION: ${summary.sessionId}"
+                    binding.tvPaperSessionBadge.text = displaySession
+                    binding.tvPaperTotalEquity.text = "₹ %.2f".format(summary.totalEquityInr)
+                    binding.tvPaperTotalReturn.text = "%+.2f%%".format(summary.totalReturnPct)
+                    binding.tvPaperTotalReturn.setTextColor(
+                        getColor(if (summary.totalReturnPct >= 0) R.color.accent_green else R.color.accent_red)
+                    )
+                    binding.tvPaperAvailableBalance.text = "Available: ₹ %.2f".format(summary.availableBalanceInr)
+                    binding.tvPaperUsedMargin.text = "Margin: ₹ %.2f".format(summary.usedMarginInr)
+                    binding.tvPaperUnrealizedPnl.text = "Unrealized: %+.2f".format(summary.unrealizedPnlInr)
+                    binding.tvPaperUnrealizedPnl.setTextColor(
+                        getColor(if (summary.unrealizedPnlInr >= 0) R.color.accent_green else R.color.accent_red)
+                    )
+                }
+            }
+        }
 
-                withContext(Dispatchers.Main) {
-                    binding.tvPaperOpenCount.text = "${openTrades.size} Open Trades"
-                    binding.tvPaperTotalTrades.text = "${closedTrades.size} Completed"
-                    binding.tvPaperRealizedPnl.text = "P&L: ₹ %.2f".format(totalRealizedPnl)
-                    binding.tvPaperFees.text = "Est Fees: ₹ %.2f".format(totalFees)
+        // 2. Observe Performance Analytics
+        lifecycleScope.launch {
+            MarketScanState.paperAnalyticsReport.collectLatest { report ->
+                if (report != null) {
+                    binding.tvAnalyticsWinRate.text = "%.1f%% (%d/%d)".format(report.winRatePct, report.winCount, report.totalTrades)
+                    binding.tvAnalyticsProfitFactor.text = "%.2f".format(report.profitFactor)
+                    binding.tvAnalyticsMaxDrawdown.text = "%.1f%%".format(report.maxDrawdownPct)
+                    binding.tvAnalyticsAvgDuration.text = "Avg Hold: %dm".format(report.avgDurationMinutes)
+                    binding.tvAnalyticsAvgWinLoss.text = "Avg W: ₹%.0f | L: ₹%.0f".format(report.avgWinInr, report.avgLossInr)
+                    binding.tvAnalyticsConsecutive.text = "Streak: %dW / %dL".format(report.maxConsecutiveWins, report.maxConsecutiveLosses)
+                }
+            }
+        }
 
-                    if (totalRealizedPnl >= 0) {
-                        binding.tvPaperRealizedPnl.setTextColor(getColor(R.color.accent_green))
-                    } else {
-                        binding.tvPaperRealizedPnl.setTextColor(getColor(R.color.accent_red))
+        // 3. Observe Open Holding Trades
+        lifecycleScope.launch {
+            db.tradeDao().getOpenTradesFlow().collectLatest { openTrades ->
+                cachedHoldingTrades = openTrades
+                binding.btnTabHolding.text = "HOLDING (${openTrades.size})"
+                if (currentPortfolioTab == 0) {
+                    renderPortfolio()
+                }
+                // Also update exchange live positions card if in paper mode
+                if (!binding.switchLiveMode.isChecked) {
+                    renderPaperOpenPositions(openTrades)
+                }
+            }
+        }
+
+        // 4. Observe Pending Orders
+        lifecycleScope.launch {
+            db.orderDao().getPendingOrdersFlow().collectLatest { pendingOrders ->
+                cachedPendingOrders = pendingOrders
+                binding.btnTabPending.text = "PENDING (${pendingOrders.size})"
+                if (currentPortfolioTab == 1) {
+                    renderPortfolio()
+                }
+            }
+        }
+
+        // 5. Observe Closed Trades History
+        lifecycleScope.launch {
+            db.tradeDao().getClosedTradesFlow().collectLatest { closedTrades ->
+                cachedClosedTrades = closedTrades
+                binding.btnTabClosed.text = "CLOSED (${closedTrades.size})"
+                if (currentPortfolioTab == 2) {
+                    renderPortfolio()
+                }
+            }
+        }
+    }
+
+    private fun renderPortfolio() {
+        val container = binding.containerPaperPortfolio
+        container.removeAllViews()
+        val inflater = LayoutInflater.from(this)
+
+        when (currentPortfolioTab) {
+            0 -> {
+                // HOLDING
+                if (cachedHoldingTrades.isEmpty()) {
+                    binding.tvPaperPortfolioPlaceholder.text = "No holding positions currently active."
+                    container.addView(binding.tvPaperPortfolioPlaceholder)
+                    return
+                }
+
+                for (trade in cachedHoldingTrades) {
+                    val itemBinding = ItemPaperHoldingBinding.inflate(inflater, container, false)
+                    val symbol = trade.pair.removePrefix("B-").removeSuffix("_USDT")
+                    itemBinding.tvHoldingPair.text = "$symbol Futures"
+                    itemBinding.tvHoldingSide.text = trade.side
+                    itemBinding.tvHoldingLev.text = "${trade.leverage}x"
+
+                    val isLong = trade.side.equals("LONG", ignoreCase = true)
+                    itemBinding.tvHoldingSide.setTextColor(getColor(if (isLong) R.color.accent_green else R.color.accent_red))
+
+                    val mark = trade.currentPrice ?: trade.entryPrice
+                    itemBinding.tvHoldingPrices.text = "$%.2f → $%.2f".format(trade.entryPrice, mark)
+
+                    val pnl = trade.unrealizedPnl ?: 0.0
+                    val roi = trade.roiPercent ?: 0.0
+                    itemBinding.tvHoldingPnl.text = "%+₹%.2f (%+.1f%%)".format(pnl, roi)
+                    itemBinding.tvHoldingPnl.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
+
+                    val slText = if (trade.stopLoss != null) "$%.2f".format(trade.stopLoss) else "None"
+                    val tpText = if (trade.takeProfit != null) "$%.2f".format(trade.takeProfit) else "None"
+                    itemBinding.tvHoldingSlTp.text = "SL: $slText | TP: $tpText"
+
+                    val estLiq = trade.estimatedLiquidationPrice ?: 0.0
+                    itemBinding.tvHoldingEstLiq.text = "EST. LIQ: $%.2f".format(estLiq)
+
+                    val notional = if (trade.notionalValueInr > 0) trade.notionalValueInr else trade.allocatedMarginInr * trade.leverage
+                    itemBinding.tvHoldingMargin.text = "Margin: ₹%.0f | Notional: ₹%.0f".format(trade.allocatedMarginInr, notional)
+                    itemBinding.tvHoldingFunding.text = "Funding: ₹%.2f (UTC)".format(trade.fundingFees)
+
+                    itemBinding.btnHoldingClose.setOnClickListener {
+                        sendServiceIntent(TradingForegroundService.ACTION_CLOSE_POSITION) {
+                            putExtra(TradingForegroundService.EXTRA_PAIR, trade.pair)
+                        }
+                        Toast.makeText(this, "Closing ${trade.pair}...", Toast.LENGTH_SHORT).show()
                     }
 
-                    // If in paper mode, populate active positions container
-                    if (!binding.switchLiveMode.isChecked) {
-                        renderPaperOpenPositions(openTrades)
+                    container.addView(itemBinding.root)
+                }
+            }
+            1 -> {
+                // PENDING
+                if (cachedPendingOrders.isEmpty()) {
+                    binding.tvPaperPortfolioPlaceholder.text = "No pending or submitted orders in queue."
+                    container.addView(binding.tvPaperPortfolioPlaceholder)
+                    return
+                }
+
+                val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                for (order in cachedPendingOrders) {
+                    val itemBinding = ItemPaperPendingBinding.inflate(inflater, container, false)
+                    val symbol = order.pair.removePrefix("B-").removeSuffix("_USDT")
+                    itemBinding.tvPendingPair.text = "$symbol Futures"
+                    itemBinding.tvPendingSide.text = order.side
+                    itemBinding.tvPendingSide.setTextColor(getColor(if (order.side == "LONG") R.color.accent_green else R.color.accent_red))
+
+                    itemBinding.tvPendingStatus.text = order.status
+                    val priceStr = if (order.price != null && order.price > 0) "$%.2f".format(order.price) else "Market"
+                    itemBinding.tvPendingPriceQty.text = "Price: $priceStr | Qty: %.4f".format(order.totalQuantity)
+                    itemBinding.tvPendingTime.text = sdf.format(java.util.Date(order.createdAt))
+
+                    container.addView(itemBinding.root)
+                }
+            }
+            2 -> {
+                // CLOSED
+                if (cachedClosedTrades.isEmpty()) {
+                    binding.tvPaperPortfolioPlaceholder.text = "No closed trades recorded in this session yet."
+                    container.addView(binding.tvPaperPortfolioPlaceholder)
+                    return
+                }
+
+                for (trade in cachedClosedTrades) {
+                    val itemBinding = ItemPaperClosedBinding.inflate(inflater, container, false)
+                    val symbol = trade.pair.removePrefix("B-").removeSuffix("_USDT")
+                    itemBinding.tvClosedPair.text = "$symbol Futures"
+                    itemBinding.tvClosedSide.text = trade.side
+                    val isLong = trade.side.equals("LONG", ignoreCase = true)
+                    itemBinding.tvClosedSide.setTextColor(getColor(if (isLong) R.color.accent_green else R.color.accent_red))
+
+                    val result = trade.tradeResult ?: if ((trade.realizedPnl ?: 0.0) >= 0) "WIN" else "LOSS"
+                    itemBinding.tvClosedResultBadge.text = result
+                    when (result) {
+                        "WIN" -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_green))
+                        "LOSS" -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_red))
+                        else -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_amber))
                     }
+
+                    val pnl = trade.realizedPnl ?: 0.0
+                    val roi = trade.roiPercent ?: 0.0
+                    itemBinding.tvClosedPnl.text = "%+₹%.2f (%+.1f%%)".format(pnl, roi)
+                    itemBinding.tvClosedPnl.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
+
+                    val exitPrice = trade.exitPrice ?: trade.entryPrice
+                    itemBinding.tvClosedPrices.text = "$%.2f → $%.2f".format(trade.entryPrice, exitPrice)
+
+                    val durSec = if (trade.durationMillis != null) trade.durationMillis / 1000 else 0
+                    val durMins = durSec / 60
+                    val durSecRem = durSec % 60
+                    itemBinding.tvClosedDuration.text = "Duration: %dm %02ds".format(durMins, durSecRem)
+
+                    itemBinding.tvClosedExitReason.text = "Reason: ${trade.exitReason ?: "Closed"}"
+                    itemBinding.tvClosedFees.text = "Fees: ₹%.2f".format(trade.fees + trade.fundingFees)
+
+                    container.addView(itemBinding.root)
                 }
             }
         }

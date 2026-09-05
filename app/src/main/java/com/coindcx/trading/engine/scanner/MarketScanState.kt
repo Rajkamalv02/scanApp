@@ -37,6 +37,12 @@ object MarketScanState {
     private val _executionAuditMap = MutableStateFlow<Map<String, TradeExecutionAudit>>(emptyMap())
     val executionAuditMap: StateFlow<Map<String, TradeExecutionAudit>> = _executionAuditMap.asStateFlow()
 
+    private val _paperAccountSummary = MutableStateFlow<com.coindcx.trading.engine.paper.PaperAccountSummary?>(null)
+    val paperAccountSummary: StateFlow<com.coindcx.trading.engine.paper.PaperAccountSummary?> = _paperAccountSummary.asStateFlow()
+
+    private val _paperAnalyticsReport = MutableStateFlow<com.coindcx.trading.engine.paper.PaperAnalyticsReport?>(null)
+    val paperAnalyticsReport: StateFlow<com.coindcx.trading.engine.paper.PaperAnalyticsReport?> = _paperAnalyticsReport.asStateFlow()
+
     fun update(
         opportunities: List<MarketOpportunity>,
         allocation: AllocationResult,
@@ -46,6 +52,14 @@ object MarketScanState {
         _latestAllocation.value = allocation
         _scanCycleCount.value = cycle
         _lastScanTimestamp.value = System.currentTimeMillis()
+    }
+
+    fun updatePaperState(
+        summary: com.coindcx.trading.engine.paper.PaperAccountSummary?,
+        report: com.coindcx.trading.engine.paper.PaperAnalyticsReport?
+    ) {
+        if (summary != null) _paperAccountSummary.value = summary
+        if (report != null) _paperAnalyticsReport.value = report
     }
 
     fun setScanning(scanning: Boolean) {
