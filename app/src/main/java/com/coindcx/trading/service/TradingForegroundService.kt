@@ -8,9 +8,17 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.coindcx.trading.data.api.ApiClient
+import com.coindcx.trading.data.config.TradingConfigRepository
 import com.coindcx.trading.data.db.AppDatabase
 import com.coindcx.trading.data.db.entities.SystemLogEntity
 import com.coindcx.trading.engine.*
+import com.coindcx.trading.engine.allocation.AllocationEngine
+import com.coindcx.trading.engine.currency.CurrencyConverter
+import com.coindcx.trading.engine.scanner.MarketOpportunity
+import com.coindcx.trading.engine.scanner.MarketScanState
+import com.coindcx.trading.engine.scanner.MarketScannerEngine
+import com.coindcx.trading.engine.scanner.OpportunityLifecycle
+import com.coindcx.trading.engine.scanner.OpportunityRanker
 import com.coindcx.trading.ui.MainActivity
 import kotlinx.coroutines.*
 
@@ -21,14 +29,18 @@ class TradingForegroundService : Service() {
     private var isTradingActive = false
 
     private val db by lazy { AppDatabase.getInstance(this) }
-    private val riskManager by lazy { RiskManager() }
-    private val orderManager by lazy { OrderManager(ApiClient.apiService, db.orderDao()) }
+    private val configRepo by lazy { TradingConfigRepository.getInstance(this) }
+    private val currencyConverter by lazy { CurrencyConverter(ApiClient.apiService) }
 
-    private val paperEngine by lazy { PaperExecutionEngine(db) }
-    private val liveEngine by lazy { LiveExecutionEngine(orderManager, ApiClient.apiService) }
+    private val orderManager by lazy { OrderManager(ApiClient.apiService, db.orderDao()) }
+    private val paperEngine by lazy { PaperExecutionEngine(this, db, currencyConverter) }
+    private val liveEngine by lazy { LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter) }
+
+    private val scannerEngine by lazy { MarketScannerEngine(ApiClient.apiService) }
+    private val ranker by lazy { OpportunityRanker() }
+    private val allocator by lazy { AllocationEngine() }
 
     private var executionEngine: ExecutionEngine = paperEngine
-    private val targetPair = "B-BTC_USDT"
 
     companion object {
         const val CHANNEL_ID = "trading_bot_channel"
@@ -37,6 +49,7 @@ class TradingForegroundService : Service() {
         const val ACTION_STOP = "com.coindcx.trading.ACTION_STOP"
         const val ACTION_SET_MODE = "com.coindcx.trading.ACTION_SET_MODE"
         const val ACTION_SET_STRATEGY = "com.coindcx.trading.ACTION_SET_STRATEGY"
+        const val ACTION_TRIGGER_SCAN = "com.coindcx.trading.ACTION_TRIGGER_SCAN"
         const val EXTRA_IS_PAPER = "EXTRA_IS_PAPER"
     }
 
@@ -80,13 +93,18 @@ class TradingForegroundService : Service() {
                 updateNotification("Strategy Updated", "${StrategyRegistry.activeStrategy.name} ($modeLabel)")
                 serviceScope.launch {
                     db.systemLogDao().insert(
-                        SystemLogEntity(level = "INFO", tag = "STRATEGY", message = "Switched active strategy to: ${StrategyRegistry.activeStrategy.name}")
+                        SystemLogEntity(level = "INFO", tag = "STRATEGY", message = "Active strategy: ${StrategyRegistry.activeStrategy.name}")
                     )
+                }
+            }
+            ACTION_TRIGGER_SCAN -> {
+                serviceScope.launch {
+                    performMarketScanAndAllocation()
                 }
             }
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("CoinDCX Trading Bot", "Service running"))
+        startForeground(NOTIFICATION_ID, buildNotification("CoinDCX Trading Bot", "Market Scanner Active"))
         return START_STICKY
     }
 
@@ -96,71 +114,96 @@ class TradingForegroundService : Service() {
                 SystemLogEntity(
                     level = "INFO",
                     tag = "SERVICE",
-                    message = "Trading loop started. Strategy: ${StrategyRegistry.activeStrategy.name} | Mode: ${if (executionEngine.isPaperTrading) "PAPER" else "LIVE"}"
+                    message = "Market Scanning Loop started. Strategy: ${StrategyRegistry.activeStrategy.name} | Mode: ${if (executionEngine.isPaperTrading) "PAPER" else "LIVE"}"
                 )
             )
 
             while (isTradingActive) {
                 try {
-                    evaluateMarketAndTrade()
+                    performMarketScanAndAllocation()
                 } catch (e: Exception) {
                     db.systemLogDao().insert(
-                        SystemLogEntity(level = "ERROR", tag = "ENGINE", message = "Evaluation error: ${e.message}")
+                        SystemLogEntity(level = "ERROR", tag = "SCANNER", message = "Scan cycle error: ${e.message}")
                     )
                 }
-                delay(15_000) // Evaluate every 15 seconds
+                delay(20_000) // Scan market every 20 seconds
             }
         }
     }
 
-    private suspend fun evaluateMarketAndTrade() {
+    private suspend fun performMarketScanAndAllocation() {
+        MarketScanState.setScanning(true)
+        val config = configRepo.configFlow.value
         val activeStrategy = StrategyRegistry.activeStrategy
 
-        // 1. Fetch recent candles
-        val candleResp = ApiClient.apiService.getCandles(targetPair, activeStrategy.defaultTimeframe)
-        if (!candleResp.isSuccessful || candleResp.body().isNullOrEmpty()) {
+        // 1. Check Available Balance in INR
+        val balanceInr = executionEngine.getAvailableBalanceInr()
+
+        // 2. Scan Market Opportunities
+        val rawOpportunities = scannerEngine.scanMarket(config, activeStrategy, executionEngine)
+
+        // 3. Rank Opportunities from #1 to #5
+        val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
+
+        // 4. Dynamic Capital Allocation Engine
+        val allocation = allocator.allocateCapital(balanceInr, config.minMarginPerTradeInr, rankedTop5)
+
+        // 5. Update Reactive State for UI
+        MarketScanState.update(allocation.allRankedOpportunities, allocation)
+        MarketScanState.setScanning(false)
+
+        val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
+
+        // 6. Handle Insufficient Balance Warning
+        if (allocation.isInsufficientBalance) {
+            updateNotification("Bot Active ($modeLabel)", "Insufficient Balance: Available ₹%.2f < ₹%.2f".format(balanceInr, config.minMarginPerTradeInr))
             return
         }
 
-        val candles = candleResp.body()!!
-        val latestCandle = candles.last()
-        val currentPrice = latestCandle.close
-
-        // Check SL/TP if paper trading
-        if (executionEngine is PaperExecutionEngine) {
-            paperEngine.checkPaperStopLossAndTakeProfit(targetPair, currentPrice)
-        }
-
-        // 2. Fetch live or paper active position
-        val activePosition = executionEngine.getActivePosition(targetPair)
-
-        // 3. Strategy Evaluation
-        val signal = activeStrategy.evaluate(candles, activePosition)
-
-        if (signal.action == SignalAction.HOLD) {
-            return
-        }
-
-        // 4. Risk Manager Check
-        val allPositions = if (activePosition != null) listOf(activePosition) else emptyList()
-        val riskResult = riskManager.checkSignal(signal, currentPrice, allPositions)
-
-        when (riskResult) {
-            is RiskCheckResult.Rejected -> {
-                db.systemLogDao().insert(
-                    SystemLogEntity(level = "WARN", tag = "RISK", message = "Signal ${signal.action} rejected: ${riskResult.reason}")
+        // 7. Execute Top N Funded Trades
+        for (opp in allocation.fundedOpportunities) {
+            val existingPos = executionEngine.getActivePosition(opp.pair)
+            if (existingPos == null || !existingPos.isOpen) {
+                val result = executionEngine.executeSignal(
+                    signal = opp.signal,
+                    pair = opp.pair,
+                    currentPrice = opp.currentPrice,
+                    marginInr = opp.allocatedMarginInr,
+                    leverage = config.leverage
                 )
-            }
-            is RiskCheckResult.Approved -> {
-                if (signal.action == SignalAction.EXIT) {
-                    executionEngine.exitPosition(targetPair, currentPrice, signal.reason)
-                } else {
-                    val quantity = riskResult.adjustedQuantity.coerceAtLeast(0.001)
-                    val leverage = riskResult.adjustedLeverage
-                    executionEngine.executeSignal(signal, targetPair, currentPrice, quantity, leverage)
+                when (result) {
+                    is ExecutionResult.Success -> {
+                        db.systemLogDao().insert(
+                            SystemLogEntity(level = "TRADE", tag = "EXEC", message = "Funded Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}): ${result.message}")
+                        )
+                    }
+                    is ExecutionResult.Failed -> {
+                        db.systemLogDao().insert(
+                            SystemLogEntity(level = "ERROR", tag = "EXEC", message = "Failed to execute ${opp.pair}: ${result.error}")
+                        )
+                    }
                 }
             }
         }
+
+        // 8. Monitor Paper SL/TP for open positions
+        if (executionEngine is PaperExecutionEngine) {
+            val openTrades = db.tradeDao().getOpenTrades()
+            for (t in openTrades) {
+                val candleResp = ApiClient.apiService.getCandles(t.pair, config.timeframe)
+                val currentPrice = candleResp.body()?.lastOrNull()?.close
+                if (currentPrice != null) {
+                    paperEngine.checkPaperStopLossAndTakeProfit(t.pair, currentPrice)
+                }
+            }
+        }
+
+        // Update Notification
+        val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
+        updateNotification(
+            "Bot Active ($modeLabel) | Top: $topPick",
+            "Funded: ${allocation.allocatedTradesCount}/${rankedTop5.size} | Rem: ₹%.0f".format(allocation.remainingBalanceInr)
+        )
     }
 
     private fun acquireWakeLock() {
@@ -178,7 +221,7 @@ class TradingForegroundService : Service() {
                 "Trading Bot Background Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps CoinDCX auto-trading bot alive and monitoring market"
+                description = "Keeps CoinDCX auto-trading market scanner alive"
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)

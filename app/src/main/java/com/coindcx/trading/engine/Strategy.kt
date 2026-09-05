@@ -16,7 +16,8 @@ data class Signal(
     val suggestedLeverage: Int = 1,
     val stopLossPrice: Double? = null,
     val takeProfitPrice: Double? = null,
-    val reason: String = ""
+    val reason: String = "",
+    val confidenceScore: Double = 0.0 // 0.0 to 100.0 for ranking
 )
 
 /**

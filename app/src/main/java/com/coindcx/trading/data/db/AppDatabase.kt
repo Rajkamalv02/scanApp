@@ -13,7 +13,7 @@ import com.coindcx.trading.data.db.entities.*
         OrderEntity::class,
         SystemLogEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

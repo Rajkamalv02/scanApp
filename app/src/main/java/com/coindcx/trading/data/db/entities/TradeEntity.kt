@@ -16,9 +16,10 @@ data class TradeEntity(
     val leverage: Int,
     val stopLoss: Double? = null,
     val takeProfit: Double? = null,
-    val fees: Double = 0.0,
-    val realizedPnl: Double? = null,
-    val unrealizedPnl: Double? = null,
+    val fees: Double = 0.0, // in INR
+    val realizedPnl: Double? = null, // in INR
+    val unrealizedPnl: Double? = null, // in INR
+    val allocatedMarginInr: Double = 0.0,
     val exchangePositionId: String? = null,
     val clientOrderId: String,
     val status: String = "OPEN", // "OPEN", "CLOSED"

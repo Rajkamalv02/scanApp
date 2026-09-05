@@ -1,5 +1,7 @@
 package com.coindcx.trading.engine
 
+import com.coindcx.trading.data.api.models.FuturesPosition
+
 sealed class ExecutionResult {
     data class Success(val orderId: String, val message: String) : ExecutionResult()
     data class Failed(val error: String) : ExecutionResult()
@@ -7,18 +9,20 @@ sealed class ExecutionResult {
 
 /**
  * Execution Engine Abstraction
- * Allows seamless switching between simulated paper-trading and real-money live execution.
+ * Supports INR-denominated trading across simulated paper-trading and real-money live execution.
  */
 interface ExecutionEngine {
     val isPaperTrading: Boolean
 
-    suspend fun getActivePosition(pair: String): com.coindcx.trading.data.api.models.FuturesPosition?
+    suspend fun getAvailableBalanceInr(): Double
+
+    suspend fun getActivePosition(pair: String): FuturesPosition?
 
     suspend fun executeSignal(
         signal: Signal,
         pair: String,
         currentPrice: Double,
-        quantity: Double,
+        marginInr: Double,
         leverage: Int
     ): ExecutionResult
 
