@@ -1,0 +1,40 @@
+# Secrets and environment variables
+.env
+*.env
+*.secret
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.venv
+venv/
+ENV/
+
+# Android / Gradle
+.gradle/
+build/
+*/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Android Keystore
+*.jks
+*.keystore
+
+# Local Android SDK configuration
+local.properties
+tools/android-sdk/
+cmdline-tools/
+platform-tools/
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+*.log
