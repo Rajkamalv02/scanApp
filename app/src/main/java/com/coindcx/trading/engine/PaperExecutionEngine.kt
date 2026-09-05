@@ -61,6 +61,51 @@ class PaperExecutionEngine(
         )
     }
 
+    override suspend fun getAllOpenPositions(): List<FuturesPosition> {
+        val openTrades = db.tradeDao().getOpenTrades()
+        return openTrades.map { trade ->
+            val isLong = trade.side == "LONG"
+            FuturesPosition(
+                id = trade.clientOrderId,
+                pair = trade.pair,
+                activePos = if (isLong) trade.quantity else -trade.quantity,
+                inactivePosBuy = 0.0,
+                inactivePosSell = 0.0,
+                avgPrice = trade.entryPrice,
+                liquidationPrice = 0.0,
+                lockedMargin = trade.allocatedMarginInr,
+                lockedUserMargin = trade.allocatedMarginInr,
+                lockedOrderMargin = 0.0,
+                takeProfitTrigger = trade.takeProfit,
+                stopLossTrigger = trade.stopLoss,
+                leverage = trade.leverage.toDouble(),
+                maintenanceMargin = 0.0,
+                markPrice = trade.entryPrice,
+                marginType = "ISOLATED",
+                settlementCurrencyAvgPrice = trade.entryPrice,
+                cumulativeFundingFee = 0.0,
+                marginCurrencyShortName = "INR",
+                updatedAt = trade.entryTime
+            )
+        }
+    }
+
+    override suspend fun refreshExchangeState(): Result<ExchangeStateSnapshot> {
+        return try {
+            val balanceInr = getAvailableBalanceInr()
+            val positions = getAllOpenPositions()
+            Result.success(
+                ExchangeStateSnapshot(
+                    availableBalanceInr = balanceInr,
+                    openPositions = positions,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun checkPaperStopLossAndTakeProfit(pair: String, currentPrice: Double) {
         val openTrades = db.tradeDao().getOpenTrades().filter { it.pair == pair }
         for (trade in openTrades) {

@@ -19,6 +19,7 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_MIN_MARGIN_INR = "min_margin_inr"
         private const val KEY_LEVERAGE = "leverage"
         private const val KEY_TIMEFRAME = "timeframe"
+        private const val KEY_SCAN_INTERVAL = "scan_interval_minutes"
         private const val KEY_MARKET_WIDE = "market_wide"
         private const val KEY_MAX_DAILY_LOSS = "max_daily_loss"
         private const val KEY_FAST_EMA = "fast_ema"
@@ -43,6 +44,7 @@ class TradingConfigRepository(context: Context) {
             minMarginPerTradeInr = prefs.getFloat(KEY_MIN_MARGIN_INR, 500.0f).toDouble(),
             leverage = prefs.getInt(KEY_LEVERAGE, 2),
             timeframe = prefs.getString(KEY_TIMEFRAME, "15m") ?: "15m",
+            scanIntervalMinutes = prefs.getInt(KEY_SCAN_INTERVAL, 15),
             isMarketWideScan = prefs.getBoolean(KEY_MARKET_WIDE, true),
             maxDailyLossInr = prefs.getFloat(KEY_MAX_DAILY_LOSS, 2000.0f).toDouble(),
             fastEmaPeriod = prefs.getInt(KEY_FAST_EMA, 9),
@@ -69,6 +71,12 @@ class TradingConfigRepository(context: Context) {
         val valid = if (timeframe in listOf("1m", "15m", "1h", "1d")) timeframe else "15m"
         prefs.edit().putString(KEY_TIMEFRAME, valid).apply()
         _configFlow.value = _configFlow.value.copy(timeframe = valid)
+    }
+
+    fun updateScanInterval(minutes: Int) {
+        val valid = if (minutes in listOf(1, 5, 15, 30, 60)) minutes else 15
+        prefs.edit().putInt(KEY_SCAN_INTERVAL, valid).apply()
+        _configFlow.value = _configFlow.value.copy(scanIntervalMinutes = valid)
     }
 
     fun updateScanMode(isMarketWide: Boolean) {

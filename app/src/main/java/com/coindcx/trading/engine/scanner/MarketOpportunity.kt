@@ -25,6 +25,8 @@ data class MarketOpportunity(
     val statusMessage: String = ""
 ) {
     val isBuy: Boolean get() = signal.action == SignalAction.ENTER_LONG
+    val isSell: Boolean get() = signal.action == SignalAction.ENTER_SHORT
+    val isEntry: Boolean get() = isBuy || isSell
     val actionLabel: String get() = if (isBuy) "LONG" else "SHORT"
     val assetSymbol: String get() = pair.removePrefix("B-").removeSuffix("_USDT")
 }

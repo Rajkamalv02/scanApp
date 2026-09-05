@@ -130,6 +130,30 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Scan Timeframe: $selectedTimeframe", Toast.LENGTH_SHORT).show()
         }
 
+        // 2b. Automatic Scan Frequency Selection
+        when (config.scanIntervalMinutes) {
+            1 -> binding.chipInterval1m.isChecked = true
+            5 -> binding.chipInterval5m.isChecked = true
+            15 -> binding.chipInterval15m.isChecked = true
+            30 -> binding.chipInterval30m.isChecked = true
+            60 -> binding.chipInterval1h.isChecked = true
+            else -> binding.chipInterval15m.isChecked = true
+        }
+
+        binding.chipGroupScanInterval.setOnCheckedStateChangeListener { _, checkedIds ->
+            val selectedId = checkedIds.firstOrNull() ?: return@setOnCheckedStateChangeListener
+            val minutes = when (selectedId) {
+                R.id.chipInterval1m -> 1
+                R.id.chipInterval5m -> 5
+                R.id.chipInterval15m -> 15
+                R.id.chipInterval30m -> 30
+                R.id.chipInterval1h -> 60
+                else -> 15
+            }
+            configRepo.updateScanInterval(minutes)
+            Toast.makeText(this, "Auto-Scan Interval: ${minutes}m", Toast.LENGTH_SHORT).show()
+        }
+
         // 3. Minimum Margin Allocation Presets
         when (config.minMarginPerTradeInr.toInt()) {
             500 -> binding.chipMargin500.isChecked = true
@@ -292,6 +316,17 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Trading Bot Stopped", Toast.LENGTH_SHORT).show()
         }
 
+        binding.btnRefreshExchange.setOnClickListener {
+            val isPaper = !binding.switchLiveMode.isChecked
+            sendServiceIntent(TradingForegroundService.ACTION_REFRESH_EXCHANGE) {
+                putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
+            }
+            lifecycleScope.launch(Dispatchers.IO) {
+                refreshAccountData()
+            }
+            Toast.makeText(this, "Refreshing Exchange Live Data...", Toast.LENGTH_SHORT).show()
+        }
+
         binding.btnEmergencyStop.setOnClickListener {
             sendServiceIntent(TradingForegroundService.ACTION_STOP)
             binding.tvBotStatus.text = "KILL SWITCH ACTIVE"
@@ -326,6 +361,37 @@ class MainActivity : AppCompatActivity() {
                 binding.progressScanning.visibility = if (scanning) View.VISIBLE else View.GONE
                 if (scanning) {
                     binding.tvBotStatus.text = "SCANNING"
+                    binding.tvNextScanCountdown.text = "Scanning..."
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            MarketScanState.nextScanSecondsRemaining.collectLatest { sec ->
+                if (sec > 0) {
+                    val mins = sec / 60
+                    val remSec = sec % 60
+                    binding.tvNextScanCountdown.text = "Scan in: %02d:%02d".format(mins, remSec)
+                } else if (!MarketScanState.isScanning.value) {
+                    binding.tvNextScanCountdown.text = "Scan in: --"
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            MarketScanState.isRefreshingExchange.collectLatest { refreshing ->
+                binding.progressRefreshExchange.visibility = if (refreshing) View.VISIBLE else View.GONE
+                binding.btnRefreshExchange.isEnabled = !refreshing
+            }
+        }
+
+        lifecycleScope.launch {
+            MarketScanState.lastExchangeRefreshTimestamp.collectLatest { ts ->
+                if (ts > 0) {
+                    val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    binding.tvLastUpdatedTime.text = "Last Synced: ${sdf.format(java.util.Date(ts))}"
+                } else {
+                    binding.tvLastUpdatedTime.text = "Last Synced: Never"
                 }
             }
         }
@@ -355,6 +421,12 @@ class MainActivity : AppCompatActivity() {
                 renderTopOpportunities(opportunities)
             }
         }
+
+        lifecycleScope.launch {
+            MarketScanState.executionAuditMap.collectLatest {
+                renderTopOpportunities(MarketScanState.topOpportunities.value)
+            }
+        }
     }
 
     private fun renderTopOpportunities(opportunities: List<MarketOpportunity>) {
@@ -371,6 +443,7 @@ class MainActivity : AppCompatActivity() {
 
         val inflater = LayoutInflater.from(this)
         val usdtInrRate = 90.0
+        val audits = MarketScanState.executionAuditMap.value
 
         for (opp in opportunities.take(5)) {
             val itemBinding = ItemRankedOpportunityBinding.inflate(inflater, container, false)
@@ -387,26 +460,58 @@ class MainActivity : AppCompatActivity() {
                 itemBinding.tvActionBadge.setTextColor(getColor(R.color.accent_red))
             }
 
-            when (opp.lifecycleState) {
-                OpportunityLifecycle.SELECTED_FOR_TRADE -> {
-                    itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
-                    itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_green))
-                    itemBinding.tvAllocationStatus.text = "SELECTED FOR TRADE (Allocated: ₹%.0f Margin)".format(opp.allocatedMarginInr)
+            // Check if there is an execution audit for this pair
+            val audit = audits[opp.pair]
+            if (audit != null) {
+                when (audit.status) {
+                    com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_green))
+                        itemBinding.tvAllocationStatus.text = "✓ " + audit.reason
+                    }
+                    com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_EXISTING_POSITION -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_amber))
+                        itemBinding.tvAllocationStatus.text = "⚠️ " + audit.reason
+                    }
+                    com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_unfunded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
+                        itemBinding.tvAllocationStatus.text = "⚠️ " + audit.reason
+                    }
+                    com.coindcx.trading.engine.scanner.AuditStatus.FAILED -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_unfunded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
+                        itemBinding.tvAllocationStatus.text = "✗ " + audit.reason
+                    }
+                    else -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.text_secondary))
+                        itemBinding.tvAllocationStatus.text = audit.reason
+                    }
                 }
-                OpportunityLifecycle.UNFUNDED -> {
-                    itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_unfunded)
-                    itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
-                    itemBinding.tvAllocationStatus.text = "RANKED #${opp.rank} - UNFUNDED (Insufficient Balance)"
-                }
-                OpportunityLifecycle.ACTIVE_POSITION -> {
-                    itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
-                    itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_green))
-                    itemBinding.tvAllocationStatus.text = "ACTIVE POSITION ON EXCHANGE"
-                }
-                else -> {
-                    itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
-                    itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.text_secondary))
-                    itemBinding.tvAllocationStatus.text = opp.statusMessage
+            } else {
+                when (opp.lifecycleState) {
+                    OpportunityLifecycle.SELECTED_FOR_TRADE -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_green))
+                        itemBinding.tvAllocationStatus.text = "SELECTED FOR TRADE (Allocated: ₹%.0f Margin)".format(opp.allocatedMarginInr)
+                    }
+                    OpportunityLifecycle.UNFUNDED -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_unfunded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
+                        itemBinding.tvAllocationStatus.text = "RANKED #${opp.rank} - UNFUNDED (Insufficient Balance)"
+                    }
+                    OpportunityLifecycle.ACTIVE_POSITION -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_green))
+                        itemBinding.tvAllocationStatus.text = "ACTIVE POSITION ON EXCHANGE"
+                    }
+                    else -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.text_secondary))
+                        itemBinding.tvAllocationStatus.text = opp.statusMessage
+                    }
                 }
             }
 
@@ -507,6 +612,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun refreshAccountData() {
+        withContext(Dispatchers.Main) {
+            binding.progressRefreshExchange.visibility = View.VISIBLE
+            binding.btnRefreshExchange.isEnabled = false
+        }
         try {
             // 1. Fetch Wallets in INR
             val walletResp = ApiClient.apiService.getFuturesWallets()
@@ -568,10 +677,20 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+
+            withContext(Dispatchers.Main) {
+                val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                binding.tvLastUpdatedTime.text = "Last Synced: ${sdf.format(java.util.Date())}"
+            }
         } catch (e: Exception) {
             db.systemLogDao().insert(
                 SystemLogEntity(level = "WARN", tag = "POLL", message = "Data refresh: ${e.message}")
             )
+        } finally {
+            withContext(Dispatchers.Main) {
+                binding.progressRefreshExchange.visibility = View.GONE
+                binding.btnRefreshExchange.isEnabled = true
+            }
         }
     }
 

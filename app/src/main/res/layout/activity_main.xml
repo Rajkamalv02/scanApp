@@ -428,6 +428,83 @@
                         android:text="1d (Swing)" />
                 </com.google.android.material.chip.ChipGroup>
 
+                <!-- Automatic Scan Frequency / Cycle Interval -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="12dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Automatic Scan Interval"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/tvNextScanCountdown"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/badge_background"
+                        android:paddingStart="8dp"
+                        android:paddingTop="2dp"
+                        android:paddingEnd="8dp"
+                        android:paddingBottom="2dp"
+                        android:text="Scan In: --"
+                        android:textColor="@color/accent_blue"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/chipGroupScanInterval"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    app:singleSelection="true"
+                    app:selectionRequired="true">
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipInterval1m"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="1m" />
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipInterval5m"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="5m" />
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipInterval15m"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:checked="true"
+                        android:text="15m" />
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipInterval30m"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="30m" />
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipInterval1h"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="1h" />
+                </com.google.android.material.chip.ChipGroup>
+
                 <!-- Minimum Margin Presets -->
                 <TextView
                     android:layout_width="wrap_content"
@@ -698,13 +775,63 @@
                 android:orientation="vertical"
                 android:padding="16dp">
 
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="EXCHANGE LIVE POSITIONS"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp"
-                    android:letterSpacing="0.05" />
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="EXCHANGE LIVE POSITIONS"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="12sp"
+                            android:letterSpacing="0.05" />
+
+                        <TextView
+                            android:id="@+id/tvLastUpdatedTime"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Last Synced: Never"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <ProgressBar
+                        android:id="@+id/progressRefreshExchange"
+                        android:layout_width="18dp"
+                        android:layout_height="18dp"
+                        android:layout_marginEnd="8dp"
+                        android:indeterminate="true"
+                        android:indeterminateTint="@color/accent_blue"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnRefreshExchange"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:text="Refresh"
+                        android:textSize="12sp"
+                        android:textColor="@color/accent_blue"
+                        app:strokeColor="@color/accent_blue"
+                        app:strokeWidth="1dp"
+                        app:cornerRadius="8dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp" />
+                </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="match_parent"

@@ -7,6 +7,7 @@ data class TradingConfig(
     val minMarginPerTradeInr: Double = 500.0,
     val leverage: Int = 2,
     val timeframe: String = "15m", // "1m", "15m", "1h", "1d"
+    val scanIntervalMinutes: Int = 15, // 1, 5, 15, 30, 60
     val isMarketWideScan: Boolean = true,
     val selectedPairs: List<String> = listOf(
         "B-BTC_USDT",

@@ -41,9 +41,40 @@ class LiveExecutionEngine(
                 "timestamp" to System.currentTimeMillis()
             )
             val positionsResp = apiService.getPositions(positionsPayload)
-            positionsResp.body()?.find { it.pair == pair && it.isOpen }
+            positionsResp.body()?.find { it.pair == pair && (it.isOpen || it.inactivePosBuy > 0 || it.inactivePosSell > 0) }
         } catch (_: Exception) {
             null
+        }
+    }
+
+    override suspend fun getAllOpenPositions(): List<FuturesPosition> {
+        return try {
+            val positionsPayload = mapOf(
+                "page" to "1",
+                "size" to "50",
+                "margin_currency_short_name" to listOf("USDT"),
+                "timestamp" to System.currentTimeMillis()
+            )
+            val positionsResp = apiService.getPositions(positionsPayload)
+            positionsResp.body()?.filter { it.isOpen || it.inactivePosBuy > 0 || it.inactivePosSell > 0 } ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    override suspend fun refreshExchangeState(): Result<ExchangeStateSnapshot> {
+        return try {
+            val balanceInr = getAvailableBalanceInr()
+            val positions = getAllOpenPositions()
+            Result.success(
+                ExchangeStateSnapshot(
+                    availableBalanceInr = balanceInr,
+                    openPositions = positions,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

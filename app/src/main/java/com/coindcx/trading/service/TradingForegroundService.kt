@@ -48,6 +48,7 @@ class TradingForegroundService : Service() {
         const val ACTION_SET_STRATEGY = "com.coindcx.trading.ACTION_SET_STRATEGY"
         const val ACTION_TRIGGER_SCAN = "com.coindcx.trading.ACTION_TRIGGER_SCAN"
         const val ACTION_CLOSE_POSITION = "com.coindcx.trading.ACTION_CLOSE_POSITION"
+        const val ACTION_REFRESH_EXCHANGE = "com.coindcx.trading.ACTION_REFRESH_EXCHANGE"
         const val EXTRA_IS_PAPER = "EXTRA_IS_PAPER"
         const val EXTRA_PAIR = "EXTRA_PAIR"
     }
@@ -99,6 +100,7 @@ class TradingForegroundService : Service() {
             }
             ACTION_STOP -> {
                 isTradingActive = false
+                MarketScanState.setNextScanSecondsRemaining(0)
                 updateNotification("Bot Stopped", "Scanner & execution loop halted")
                 serviceScope.launch {
                     db.systemLogDao().insert(
@@ -113,6 +115,11 @@ class TradingForegroundService : Service() {
                     db.systemLogDao().insert(
                         SystemLogEntity(level = "INFO", tag = "MODE", message = "Switched execution mode to $modeLabel")
                     )
+                    // Trigger refresh to align state with newly selected engine
+                    val syncRes = executionEngine.refreshExchangeState()
+                    if (syncRes.isSuccess) {
+                        MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                    }
                 }
             }
             ACTION_SET_STRATEGY -> {
@@ -134,12 +141,36 @@ class TradingForegroundService : Service() {
                         db.systemLogDao().insert(
                             SystemLogEntity(level = "TRADE", tag = "MANUAL_CLOSE", message = "Closed $pairToClose: ${res}")
                         )
+                        val syncRes = executionEngine.refreshExchangeState()
+                        if (syncRes.isSuccess) {
+                            MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                        }
                     }
                 }
             }
             ACTION_TRIGGER_SCAN -> {
                 serviceScope.launch {
                     performMarketScanAndAllocation()
+                }
+            }
+            ACTION_REFRESH_EXCHANGE -> {
+                serviceScope.launch {
+                    MarketScanState.setRefreshingExchange(true)
+                    try {
+                        val syncResult = executionEngine.refreshExchangeState()
+                        if (syncResult.isSuccess) {
+                            MarketScanState.updateExchangeSnapshot(syncResult.getOrThrow())
+                            db.systemLogDao().insert(
+                                SystemLogEntity(level = "INFO", tag = "REFRESH", message = "Manual exchange refresh completed successfully.")
+                            )
+                        } else {
+                            db.systemLogDao().insert(
+                                SystemLogEntity(level = "WARN", tag = "REFRESH", message = "Manual refresh failed: ${syncResult.exceptionOrNull()?.message}")
+                            )
+                        }
+                    } finally {
+                        MarketScanState.setRefreshingExchange(false)
+                    }
                 }
             }
         }
@@ -165,8 +196,17 @@ class TradingForegroundService : Service() {
                         SystemLogEntity(level = "ERROR", tag = "SCANNER", message = "Scan cycle error: ${e.message}")
                     )
                 }
-                delay(20_000) // Scan market every 20 seconds
+
+                // Configurable interval countdown (1m, 5m, 15m, 30m, 1h)
+                val intervalMinutes = configRepo.configFlow.value.scanIntervalMinutes
+                var secondsRemaining = intervalMinutes * 60
+                while (isTradingActive && secondsRemaining > 0) {
+                    MarketScanState.setNextScanSecondsRemaining(secondsRemaining)
+                    delay(1000)
+                    secondsRemaining--
+                }
             }
+            MarketScanState.setNextScanSecondsRemaining(0)
         }
     }
 
@@ -174,55 +214,119 @@ class TradingForegroundService : Service() {
         MarketScanState.setScanning(true)
         val config = configRepo.configFlow.value
         val activeStrategy = StrategyRegistry.activeStrategy
+        val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
 
-        // 1. Check Available Balance in INR
-        val balanceInr = executionEngine.getAvailableBalanceInr()
+        // 1. Initial State Sync (Exchange is SSOT)
+        val preSync = executionEngine.refreshExchangeState()
+        if (preSync.isSuccess) {
+            MarketScanState.updateExchangeSnapshot(preSync.getOrThrow())
+        }
+        val initialBalanceInr = executionEngine.getAvailableBalanceInr()
 
-        // 2. Scan Market Opportunities
+        // 2. Scan Futures Market Opportunities
         val rawOpportunities = scannerEngine.scanMarket(config, activeStrategy, executionEngine)
 
         // 3. Rank Opportunities from #1 to #5
         val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
 
-        // 4. Dynamic Capital Allocation Engine
-        val allocation = allocator.allocateCapital(balanceInr, config.minMarginPerTradeInr, rankedTop5)
-
-        // 5. Update Reactive State for UI
+        // 4. Initial Dynamic Allocation
+        val allocation = allocator.allocateCapital(initialBalanceInr, config.minMarginPerTradeInr, rankedTop5)
         MarketScanState.update(allocation.allRankedOpportunities, allocation)
-        MarketScanState.setScanning(false)
 
-        val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
+        // 5. Sequential Just-In-Time Pre-Trade Validation
+        val audits = mutableListOf<com.coindcx.trading.engine.scanner.TradeExecutionAudit>()
 
-        // 6. Handle Insufficient Balance Warning
-        if (allocation.isInsufficientBalance) {
-            updateNotification("Bot Active ($modeLabel)", "Insufficient Balance: Available ₹%.2f < ₹%.2f".format(balanceInr, config.minMarginPerTradeInr))
-            return
-        }
-
-        // 7. Execute Top N Funded Trades
-        for (opp in allocation.fundedOpportunities) {
-            val existingPos = executionEngine.getActivePosition(opp.pair)
-            if (existingPos == null || !existingPos.isOpen) {
-                val result = executionEngine.executeSignal(
-                    signal = opp.signal,
-                    pair = opp.pair,
-                    currentPrice = opp.currentPrice,
-                    marginInr = opp.allocatedMarginInr,
-                    leverage = config.leverage
+        for (opp in rankedTop5) {
+            // Check 1: Mandatory Fresh Balance Check
+            val currentAvailableInr = executionEngine.getAvailableBalanceInr()
+            if (currentAvailableInr < config.minMarginPerTradeInr) {
+                audits.add(
+                    com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                        rank = opp.rank,
+                        pair = opp.pair,
+                        action = opp.actionLabel,
+                        status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
+                        reason = "Skipped — Insufficient available margin (Available: ₹%.2f < ₹%.2f)".format(currentAvailableInr, config.minMarginPerTradeInr)
+                    )
                 )
-                when (result) {
-                    is ExecutionResult.Success -> {
-                        db.systemLogDao().insert(
-                            SystemLogEntity(level = "TRADE", tag = "EXEC", message = "Funded Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}): ${result.message}")
+                continue
+            }
+
+            // Check 2: Mandatory Existing Open Position Check
+            val existingPos = executionEngine.getActivePosition(opp.pair)
+            if (existingPos != null && (existingPos.isOpen || existingPos.inactivePosBuy > 0 || existingPos.inactivePosSell > 0)) {
+                audits.add(
+                    com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                        rank = opp.rank,
+                        pair = opp.pair,
+                        action = opp.actionLabel,
+                        status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_EXISTING_POSITION,
+                        reason = "Skipped — Existing open position (${if (existingPos.isLong) "LONG" else "SHORT"} ${existingPos.leverage.toInt()}x)"
+                    )
+                )
+                continue
+            }
+
+            // Check 3: Check opportunity signal is an entry signal
+            if (!opp.isBuy && !opp.isSell) {
+                continue
+            }
+
+            // Both checks pass -> Execute Order!
+            val marginToAllocate = config.minMarginPerTradeInr
+            val execResult = executionEngine.executeSignal(
+                signal = opp.signal,
+                pair = opp.pair,
+                currentPrice = opp.currentPrice,
+                marginInr = marginToAllocate,
+                leverage = config.leverage
+            )
+
+            when (execResult) {
+                is ExecutionResult.Success -> {
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED,
+                            reason = "Executed — Placed ${opp.actionLabel} with ₹%.0f margin @ ${config.leverage}x".format(marginToAllocate)
                         )
-                    }
-                    is ExecutionResult.Failed -> {
-                        db.systemLogDao().insert(
-                            SystemLogEntity(level = "ERROR", tag = "EXEC", message = "Failed to execute ${opp.pair}: ${result.error}")
-                        )
+                    )
+                    db.systemLogDao().insert(
+                        SystemLogEntity(level = "TRADE", tag = "EXEC", message = "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}): ${execResult.message}")
+                    )
+
+                    // Immediate Post-Order State Sync to reflect deducted balance and added position!
+                    val syncResult = executionEngine.refreshExchangeState()
+                    if (syncResult.isSuccess) {
+                        MarketScanState.updateExchangeSnapshot(syncResult.getOrThrow())
                     }
                 }
+                is ExecutionResult.Failed -> {
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.FAILED,
+                            reason = "Failed — ${execResult.error}"
+                        )
+                    )
+                    db.systemLogDao().insert(
+                        SystemLogEntity(level = "ERROR", tag = "EXEC", message = "Failed to execute ${opp.pair}: ${execResult.error}")
+                    )
+                }
             }
+        }
+
+        // 6. Update Audit Map
+        MarketScanState.updateAudit(audits)
+
+        // 7. Final Post-Execution State Synchronization
+        val postSync = executionEngine.refreshExchangeState()
+        if (postSync.isSuccess) {
+            MarketScanState.updateExchangeSnapshot(postSync.getOrThrow())
         }
 
         // 8. Monitor Paper SL/TP for open positions
@@ -237,11 +341,14 @@ class TradingForegroundService : Service() {
             }
         }
 
+        MarketScanState.setScanning(false)
+
         // Update Notification
         val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
+        val finalBalance = executionEngine.getAvailableBalanceInr()
         updateNotification(
             "Bot Active ($modeLabel) | Top: $topPick",
-            "Funded: ${allocation.allocatedTradesCount}/${rankedTop5.size} | Rem: ₹%.0f".format(allocation.remainingBalanceInr)
+            "Bal: ₹%.0f | Audited ${audits.size} Trades | Scan: ${config.scanIntervalMinutes}m".format(finalBalance)
         )
     }
 
