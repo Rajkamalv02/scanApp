@@ -20,10 +20,17 @@ data class Signal(
 )
 
 /**
- * Pluggable Strategy Interface
- * Pure decision logic — completely decoupled from API execution and database.
+ * Pure, deterministic strategy interface.
+ * Has zero dependency on network, database, or UI.
+ * Signal = f(candles, activePosition)
  */
 interface Strategy {
+    val id: String
     val name: String
-    fun evaluate(candles: List<MarketCandle>, currentPosition: FuturesPosition?): Signal
+    val description: String
+    val parametersSummary: String
+    val requiredCandleCount: Int
+    val defaultTimeframe: String // e.g. "5m"
+
+    fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?): Signal
 }
