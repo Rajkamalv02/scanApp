@@ -400,14 +400,14 @@
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTimeframe1m"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="1m (Scalp)" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTimeframe15m"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:checked="true"
@@ -415,14 +415,14 @@
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTimeframe1h"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="1h (Trend)" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTimeframe1d"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="1d (Swing)" />
@@ -447,7 +447,7 @@
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipMargin500"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:checked="true"
@@ -455,21 +455,21 @@
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipMargin1000"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="₹1,000" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipMargin2500"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="₹2,500" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipMargin5000"
-                        style="@style/Widget.MaterialComponents.Chip.Choice"
+                        style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="₹5,000" />
