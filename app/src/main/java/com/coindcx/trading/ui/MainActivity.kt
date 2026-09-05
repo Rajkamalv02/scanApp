@@ -450,7 +450,16 @@ class MainActivity : AppCompatActivity() {
 
             itemBinding.tvRankBadge.text = "#${opp.rank}"
             itemBinding.tvAssetSymbol.text = opp.assetSymbol + " Futures"
-            itemBinding.tvConfidenceScore.text = "%.0f%%".format(opp.confidenceScore)
+
+            // Quality Badge: Score & Category
+            itemBinding.tvQualityBadge.text = "${opp.qualityCategory.name} ${opp.qualityScore}"
+            val qualityColor = when (opp.qualityCategory) {
+                com.coindcx.trading.engine.scanner.QualityCategory.PRIME -> getColor(R.color.accent_green)
+                com.coindcx.trading.engine.scanner.QualityCategory.ACCEPTABLE -> getColor(R.color.accent_blue)
+                com.coindcx.trading.engine.scanner.QualityCategory.WATCH -> getColor(R.color.accent_amber)
+                com.coindcx.trading.engine.scanner.QualityCategory.REJECT -> getColor(R.color.accent_red)
+            }
+            itemBinding.tvQualityBadge.setTextColor(qualityColor)
 
             if (opp.isBuy) {
                 itemBinding.tvActionBadge.text = "LONG"
@@ -468,6 +477,16 @@ class MainActivity : AppCompatActivity() {
                         itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
                         itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_green))
                         itemBinding.tvAllocationStatus.text = "✓ " + audit.reason
+                    }
+                    com.coindcx.trading.engine.scanner.AuditStatus.REJECTED_LOW_QUALITY -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_unfunded)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
+                        itemBinding.tvAllocationStatus.text = "✗ " + audit.reason
+                    }
+                    com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_amber))
+                        itemBinding.tvAllocationStatus.text = "⚠️ " + audit.reason
                     }
                     com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_EXISTING_POSITION -> {
                         itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
@@ -518,6 +537,7 @@ class MainActivity : AppCompatActivity() {
             itemBinding.tvOpportunityReason.text = "Setup: ${opp.signal.reason}"
             val priceInr = opp.currentPrice * usdtInrRate
             itemBinding.tvPriceInfo.text = "Price: $%.2f (~₹%.2f)".format(opp.currentPrice, priceInr)
+            itemBinding.tvMetricsInfo.text = "Net R:R: %.1fx (fee-adj) | ADX: %.1f".format(opp.netRiskRewardRatio, opp.adxValue)
 
             container.addView(itemBinding.root)
         }

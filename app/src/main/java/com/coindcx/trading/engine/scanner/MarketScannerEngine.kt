@@ -72,12 +72,33 @@ class MarketScannerEngine(
 
             // We only rank valid entry setups
             if (signal.action == SignalAction.ENTER_LONG || signal.action == SignalAction.ENTER_SHORT) {
+                // Fetch Higher-Timeframe (1h) candles for macro trend alignment
+                val htfResp = if (timeframe != "1h" && timeframe != "1d") {
+                    try { apiService.getCandles(pair, "1h") } catch (_: Exception) { null }
+                } else {
+                    candleResp
+                }
+                val htfCandles = if (htfResp?.isSuccessful == true) htfResp.body() else null
+
+                val quality = TradeQualityScorer.evaluateQuality(
+                    candles = candles,
+                    htfCandles = htfCandles,
+                    signal = signal,
+                    currentPrice = currentPrice,
+                    pair = pair
+                )
+
                 MarketOpportunity(
                     pair = pair,
                     signal = signal,
                     currentPrice = currentPrice,
                     confidenceScore = signal.confidenceScore,
-                    lifecycleState = OpportunityLifecycle.SCANNED
+                    lifecycleState = OpportunityLifecycle.SCANNED,
+                    qualityScore = quality.totalScore,
+                    qualityCategory = quality.category,
+                    netRiskRewardRatio = quality.netRiskRewardRatio,
+                    adxValue = quality.adxValue,
+                    rejectionReason = quality.rejectionReason
                 )
             } else {
                 null

@@ -2,6 +2,8 @@ package com.coindcx.trading.engine.scanner
 
 enum class AuditStatus {
     EXECUTED,
+    REJECTED_LOW_QUALITY,
+    SKIPPED_PORTFOLIO_LIMIT,
     SKIPPED_EXISTING_POSITION,
     SKIPPED_INSUFFICIENT_BALANCE,
     UNFUNDED_LIMIT,

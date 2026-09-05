@@ -22,7 +22,12 @@ data class MarketOpportunity(
     val lifecycleState: OpportunityLifecycle = OpportunityLifecycle.SCANNED,
     val allocatedMarginInr: Double = 0.0,
     val estimatedQuantity: Double = 0.0,
-    val statusMessage: String = ""
+    val statusMessage: String = "",
+    val qualityScore: Int = 0,
+    val qualityCategory: QualityCategory = QualityCategory.REJECT,
+    val netRiskRewardRatio: Double = 0.0,
+    val adxValue: Double = 0.0,
+    val rejectionReason: String? = null
 ) {
     val isBuy: Boolean get() = signal.action == SignalAction.ENTER_LONG
     val isSell: Boolean get() = signal.action == SignalAction.ENTER_SHORT

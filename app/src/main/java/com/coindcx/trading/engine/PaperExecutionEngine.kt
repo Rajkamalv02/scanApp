@@ -251,8 +251,11 @@ class PaperExecutionEngine(
                     message = "Simulated exit $pair @ $exitFillPrice. P&L: ₹%.2f. Reason: %s".format(realizedPnlInr, reason)
                 )
             )
+            onTradeClosed?.invoke(realizedPnlInr)
         }
 
         return ExecutionResult.Success("closed_all", "Closed ${openTrades.size} paper positions for $pair")
     }
+
+    var onTradeClosed: ((Double) -> Unit)? = null
 }

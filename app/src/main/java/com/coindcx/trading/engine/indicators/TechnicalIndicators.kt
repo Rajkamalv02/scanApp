@@ -95,4 +95,74 @@ object TechnicalIndicators {
 
         return atr
     }
+
+    /**
+     * Average Directional Index (ADX) using Wilder's exact smoothing.
+     * Evaluates true directional movement (+DM, -DM mutual exclusivity) and trend strength.
+     * Returns latest ADX value (0 to 100).
+     */
+    fun calculateAdx(candles: List<MarketCandle>, period: Int = 14): Double {
+        if (candles.size <= period * 2) return 0.0
+
+        val trList = ArrayList<Double>(candles.size - 1)
+        val plusDmList = ArrayList<Double>(candles.size - 1)
+        val minusDmList = ArrayList<Double>(candles.size - 1)
+
+        for (i in 1 until candles.size) {
+            val current = candles[i]
+            val prev = candles[i - 1]
+
+            val tr = max(
+                current.high - current.low,
+                max(abs(current.high - prev.close), abs(current.low - prev.close))
+            )
+            trList.add(tr)
+
+            val upMove = current.high - prev.high
+            val downMove = prev.low - current.low
+
+            // Wilder's Mutual Exclusivity Rule:
+            if (upMove > downMove && upMove > 0.0) {
+                plusDmList.add(upMove)
+            } else {
+                plusDmList.add(0.0)
+            }
+
+            if (downMove > upMove && downMove > 0.0) {
+                minusDmList.add(downMove)
+            } else {
+                minusDmList.add(0.0)
+            }
+        }
+
+        if (trList.size < period * 2) return 0.0
+
+        // Wilder's smoothing for TR, +DM, -DM
+        var smoothedTr = trList.take(period).sum()
+        var smoothedPlusDm = plusDmList.take(period).sum()
+        var smoothedMinusDm = minusDmList.take(period).sum()
+
+        val dxList = ArrayList<Double>()
+
+        for (i in period until trList.size) {
+            smoothedTr = smoothedTr - (smoothedTr / period) + trList[i]
+            smoothedPlusDm = smoothedPlusDm - (smoothedPlusDm / period) + plusDmList[i]
+            smoothedMinusDm = smoothedMinusDm - (smoothedMinusDm / period) + minusDmList[i]
+
+            val plusDi = if (smoothedTr > 0) (smoothedPlusDm / smoothedTr) * 100.0 else 0.0
+            val minusDi = if (smoothedTr > 0) (smoothedMinusDm / smoothedTr) * 100.0 else 0.0
+
+            val diSum = plusDi + minusDi
+            val dx = if (diSum > 0) (abs(plusDi - minusDi) / diSum) * 100.0 else 0.0
+            dxList.add(dx)
+        }
+
+        if (dxList.size < period) return 0.0
+        var adx = dxList.take(period).average()
+        for (i in period until dxList.size) {
+            adx = (adx * (period - 1) + dxList[i]) / period
+        }
+
+        return adx
+    }
 }
