@@ -77,6 +77,16 @@ class MainActivity : AppCompatActivity() {
         observeSystemLogs()
         checkBatteryOptimization()
         startLivePolling()
+
+        // Auto-resume scanner if bot was active
+        if (configRepo.isBotRunning()) {
+            binding.tvBotStatus.text = "ACTIVE"
+            binding.tvBotStatus.setTextColor(getColor(R.color.accent_green))
+            val isPaper = !binding.switchLiveMode.isChecked
+            sendServiceIntent(TradingForegroundService.ACTION_START) {
+                putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
+            }
+        }
     }
 
     private fun sendServiceIntent(actionName: String, configure: (Intent.() -> Unit)? = null) {
@@ -143,22 +153,24 @@ class MainActivity : AppCompatActivity() {
         // 2b. Automatic Scan Frequency Selection
         when (config.scanIntervalMinutes) {
             1 -> binding.chipInterval1m.isChecked = true
+            2 -> binding.chipInterval2m.isChecked = true
             5 -> binding.chipInterval5m.isChecked = true
             15 -> binding.chipInterval15m.isChecked = true
             30 -> binding.chipInterval30m.isChecked = true
             60 -> binding.chipInterval1h.isChecked = true
-            else -> binding.chipInterval15m.isChecked = true
+            else -> binding.chipInterval2m.isChecked = true
         }
 
         binding.chipGroupScanInterval.setOnCheckedStateChangeListener { _, checkedIds ->
             val selectedId = checkedIds.firstOrNull() ?: return@setOnCheckedStateChangeListener
             val minutes = when (selectedId) {
                 R.id.chipInterval1m -> 1
+                R.id.chipInterval2m -> 2
                 R.id.chipInterval5m -> 5
                 R.id.chipInterval15m -> 15
                 R.id.chipInterval30m -> 30
                 R.id.chipInterval1h -> 60
-                else -> 15
+                else -> 2
             }
             configRepo.updateScanInterval(minutes)
             sendServiceIntent(TradingForegroundService.ACTION_UPDATE_CONFIG)
@@ -308,10 +320,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupButtons() {
         binding.btnStartTrading.setOnClickListener {
             val isPaper = !binding.switchLiveMode.isChecked
+            configRepo.setBotRunning(true)
             sendServiceIntent(TradingForegroundService.ACTION_START) {
                 putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
             }
-            binding.tvBotStatus.text = "SCANNING"
+            binding.tvBotStatus.text = "ACTIVE"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_green))
             Toast.makeText(this, "Market Scanner & Bot Started", Toast.LENGTH_SHORT).show()
 
@@ -321,6 +334,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnStopTrading.setOnClickListener {
+            configRepo.setBotRunning(false)
             sendServiceIntent(TradingForegroundService.ACTION_STOP)
             binding.tvBotStatus.text = "STOPPED"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_amber))
@@ -1023,8 +1037,9 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             db.systemLogDao().getRecentLogsFlow().collectLatest { logs ->
                 if (logs.isNotEmpty()) {
-                    val logText = logs.take(5).joinToString("\n") {
-                        "[${it.level}] ${it.tag}: ${it.message}"
+                    val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    val logText = logs.take(15).joinToString("\n") {
+                        "[${sdf.format(java.util.Date(it.timestamp))}] [${it.level}] ${it.tag}: ${it.message}"
                     }
                     binding.tvRecentLogs.text = logText
                 }

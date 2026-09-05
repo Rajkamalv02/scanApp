@@ -34,11 +34,12 @@ class MarketScannerEngine(
             config.selectedPairs.ifEmpty { liquidMarketWidePairs.take(5) }
         }
 
-        val concurrencySemaphore = Semaphore(4) // Max 4 concurrent network requests
+        val concurrencySemaphore = Semaphore(2) // Max 2 concurrent network requests to prevent 429
 
         val deferredResults = pairsToScan.map { pair ->
             async {
                 concurrencySemaphore.withPermit {
+                    kotlinx.coroutines.delay(50)
                     scanSinglePair(pair, config.timeframe, strategy, executionEngine)
                 }
             }
@@ -70,39 +71,34 @@ class MarketScannerEngine(
 
             val signal = strategy.evaluate(candles, activePosition)
 
-            // We only rank valid entry setups
-            if (signal.action == SignalAction.ENTER_LONG || signal.action == SignalAction.ENTER_SHORT) {
-                // Fetch Higher-Timeframe (1h) candles for macro trend alignment
-                val htfResp = if (timeframe != "1h" && timeframe != "1d") {
-                    try { apiService.getCandles(pair, "1h") } catch (_: Exception) { null }
-                } else {
-                    candleResp
-                }
-                val htfCandles = if (htfResp?.isSuccessful == true) htfResp.body() else null
-
-                val quality = TradeQualityScorer.evaluateQuality(
-                    candles = candles,
-                    htfCandles = htfCandles,
-                    signal = signal,
-                    currentPrice = currentPrice,
-                    pair = pair
-                )
-
-                MarketOpportunity(
-                    pair = pair,
-                    signal = signal,
-                    currentPrice = currentPrice,
-                    confidenceScore = signal.confidenceScore,
-                    lifecycleState = OpportunityLifecycle.SCANNED,
-                    qualityScore = quality.totalScore,
-                    qualityCategory = quality.category,
-                    netRiskRewardRatio = quality.netRiskRewardRatio,
-                    adxValue = quality.adxValue,
-                    rejectionReason = quality.rejectionReason
-                )
+            // Fetch Higher-Timeframe (1h) candles for macro trend alignment
+            val htfResp = if (timeframe != "1h" && timeframe != "1d") {
+                try { apiService.getCandles(pair, "1h") } catch (_: Exception) { null }
             } else {
-                null
+                candleResp
             }
+            val htfCandles = if (htfResp?.isSuccessful == true) htfResp.body() else null
+
+            val quality = TradeQualityScorer.evaluateQuality(
+                candles = candles,
+                htfCandles = htfCandles,
+                signal = signal,
+                currentPrice = currentPrice,
+                pair = pair
+            )
+
+            MarketOpportunity(
+                pair = pair,
+                signal = signal,
+                currentPrice = currentPrice,
+                confidenceScore = signal.confidenceScore,
+                lifecycleState = OpportunityLifecycle.SCANNED,
+                qualityScore = quality.totalScore,
+                qualityCategory = quality.category,
+                netRiskRewardRatio = quality.netRiskRewardRatio,
+                adxValue = quality.adxValue,
+                rejectionReason = quality.rejectionReason
+            )
         } catch (_: Exception) {
             null
         }

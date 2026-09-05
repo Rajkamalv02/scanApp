@@ -329,6 +329,15 @@ class TradingForegroundService : Service() {
             for (opp in rankedTop5) {
                 // Signal Action Check: Must be actionable entry
                 if (!opp.isBuy && !opp.isSell) {
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
+                            reason = "Watching — ${opp.signal.reason} [Score: ${opp.qualityScore}]"
+                        )
+                    )
                     continue
                 }
 

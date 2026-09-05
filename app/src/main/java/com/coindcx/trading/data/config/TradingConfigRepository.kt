@@ -22,6 +22,7 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_SCAN_INTERVAL = "scan_interval_minutes"
         private const val KEY_MARKET_WIDE = "market_wide"
         private const val KEY_MAX_DAILY_LOSS = "max_daily_loss"
+        private const val KEY_BOT_RUNNING = "is_bot_running"
         private const val KEY_FAST_EMA = "fast_ema"
         private const val KEY_SLOW_EMA = "slow_ema"
         private const val KEY_ATR_MULT = "atr_mult"
@@ -44,7 +45,7 @@ class TradingConfigRepository(context: Context) {
             minMarginPerTradeInr = prefs.getFloat(KEY_MIN_MARGIN_INR, 500.0f).toDouble(),
             leverage = prefs.getInt(KEY_LEVERAGE, 2),
             timeframe = prefs.getString(KEY_TIMEFRAME, "15m") ?: "15m",
-            scanIntervalMinutes = prefs.getInt(KEY_SCAN_INTERVAL, 15),
+            scanIntervalMinutes = prefs.getInt(KEY_SCAN_INTERVAL, 2),
             isMarketWideScan = prefs.getBoolean(KEY_MARKET_WIDE, true),
             maxDailyLossInr = prefs.getFloat(KEY_MAX_DAILY_LOSS, 2000.0f).toDouble(),
             fastEmaPeriod = prefs.getInt(KEY_FAST_EMA, 9),
@@ -54,6 +55,12 @@ class TradingConfigRepository(context: Context) {
             rsiOversold = prefs.getFloat(KEY_RSI_OVERSOLD, 30.0f).toDouble(),
             rsiOverbought = prefs.getFloat(KEY_RSI_OVERBOUGHT, 70.0f).toDouble()
         )
+    }
+
+    fun isBotRunning(): Boolean = prefs.getBoolean(KEY_BOT_RUNNING, false)
+
+    fun setBotRunning(running: Boolean) {
+        prefs.edit().putBoolean(KEY_BOT_RUNNING, running).apply()
     }
 
     fun updateMinMargin(marginInr: Double) {
@@ -74,7 +81,7 @@ class TradingConfigRepository(context: Context) {
     }
 
     fun updateScanInterval(minutes: Int) {
-        val valid = if (minutes in listOf(1, 5, 15, 30, 60)) minutes else 15
+        val valid = if (minutes in listOf(1, 2, 5, 15, 30, 60)) minutes else 2
         prefs.edit().putInt(KEY_SCAN_INTERVAL, valid).apply()
         _configFlow.value = _configFlow.value.copy(scanIntervalMinutes = valid)
     }

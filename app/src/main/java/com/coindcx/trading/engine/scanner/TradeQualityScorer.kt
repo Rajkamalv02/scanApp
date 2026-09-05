@@ -93,20 +93,25 @@ object TradeQualityScorer {
         }
 
         // 5. Fee-Adjusted Net Risk-to-Reward (Max 10 pts)
+        val isEntry = signal.action == SignalAction.ENTER_LONG || signal.action == SignalAction.ENTER_SHORT
         var netRr = 0.0
-        val rrScore = if (signal.takeProfitPrice != null && signal.stopLossPrice != null && currentPrice > 0.0) {
-            netRr = calculateNetRiskReward(currentPrice, signal.takeProfitPrice, signal.stopLossPrice)
+        val rrScore = if (isEntry) {
+            if (signal.takeProfitPrice != null && signal.stopLossPrice != null && currentPrice > 0.0) {
+                netRr = calculateNetRiskReward(currentPrice, signal.takeProfitPrice, signal.stopLossPrice)
 
-            if (netRr < 1.5) {
-                fatalRejectionReason = "Net R:R %.2f < 1.5 after fees".format(netRr)
+                if (netRr < 1.5) {
+                    fatalRejectionReason = "Net R:R %.2f < 1.5 after fees".format(netRr)
+                    0
+                } else when {
+                    netRr >= 2.0 -> 10
+                    else -> 6
+                }
+            } else {
+                fatalRejectionReason = "Missing Stop-Loss or Take-Profit targets"
                 0
-            } else when {
-                netRr >= 2.0 -> 10
-                else -> 6
             }
         } else {
-            fatalRejectionReason = "Missing Stop-Loss or Take-Profit targets"
-            0
+            5 // Baseline allocation for watch candidates
         }
 
         // 6. Price Extension / Pullback Quality (Max 10 pts) - Gap-free

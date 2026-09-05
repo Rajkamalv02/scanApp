@@ -9,7 +9,9 @@ class OpportunityRanker {
     fun rankOpportunities(opportunities: List<MarketOpportunity>): List<MarketOpportunity> {
         return opportunities
             .sortedWith(
-                compareByDescending<MarketOpportunity> { it.qualityScore }
+                compareByDescending<MarketOpportunity> { it.isEntry }
+                    .thenByDescending { it.qualityScore }
+                    .thenByDescending { it.netRiskRewardRatio }
                     .thenByDescending { it.confidenceScore }
             )
             .take(5)

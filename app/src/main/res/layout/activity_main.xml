@@ -476,6 +476,14 @@
                         android:text="1m" />
 
                     <com.google.android.material.chip.Chip
+                        android:id="@+id/chipInterval2m"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:checked="true"
+                        android:text="2m" />
+
+                    <com.google.android.material.chip.Chip
                         android:id="@+id/chipInterval5m"
                         style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
@@ -487,7 +495,6 @@
                         style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:checked="true"
                         android:text="15m" />
 
                     <com.google.android.material.chip.Chip

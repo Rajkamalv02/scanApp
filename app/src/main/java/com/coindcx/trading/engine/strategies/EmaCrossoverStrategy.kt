@@ -171,6 +171,24 @@ class EmaCrossoverStrategy(
             }
         }
 
-        return Signal(SignalAction.HOLD, reason = "No confluence signal detected", confidenceScore = 15.0)
+        if (isBullishTrend) {
+            val score = if (isVolumeSurge) 65.0 else 55.0
+            return Signal(
+                action = SignalAction.HOLD,
+                reason = "Bullish Trend ($fastPeriod > $slowPeriod EMA, Price > $baselinePeriod EMA). Awaiting trigger",
+                confidenceScore = score
+            )
+        }
+
+        if (isBearishTrend) {
+            val score = if (isVolumeSurge) 65.0 else 55.0
+            return Signal(
+                action = SignalAction.HOLD,
+                reason = "Bearish Trend ($fastPeriod < $slowPeriod EMA, Price < $baselinePeriod EMA). Awaiting trigger",
+                confidenceScore = score
+            )
+        }
+
+        return Signal(SignalAction.HOLD, reason = "Consolidation / Chop (No clear trend)", confidenceScore = 25.0)
     }
 }
