@@ -95,3 +95,22 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }
+
+afterEvaluate {
+    tasks.findByName("assembleDebug")?.doLast {
+        val vName = android.defaultConfig.versionName ?: "1.0.0"
+        val archiveDir = File("D:/Projects/scanAppApk/$vName")
+        if (!archiveDir.exists()) {
+            archiveDir.mkdirs()
+        }
+        val builtApk = File(layout.buildDirectory.get().asFile, "outputs/apk/debug/app-debug.apk")
+        if (builtApk.exists()) {
+            val destApk = File(archiveDir, "scanApp-v$vName.apk")
+            val destDebugApk = File(archiveDir, "app-debug.apk")
+            builtApk.copyTo(destApk, overwrite = true)
+            builtApk.copyTo(destDebugApk, overwrite = true)
+            println(">>> [AUTO-ARCHIVE] Copied APK to ${destApk.absolutePath}")
+        }
+    }
+}
+
