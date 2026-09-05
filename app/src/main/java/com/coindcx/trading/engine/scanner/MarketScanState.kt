@@ -25,6 +25,9 @@ object MarketScanState {
     private val _lastScanTimestamp = MutableStateFlow(0L)
     val lastScanTimestamp: StateFlow<Long> = _lastScanTimestamp.asStateFlow()
 
+    private val _scanCycleCount = MutableStateFlow(0)
+    val scanCycleCount: StateFlow<Int> = _scanCycleCount.asStateFlow()
+
     private val _lastExchangeRefreshTimestamp = MutableStateFlow(0L)
     val lastExchangeRefreshTimestamp: StateFlow<Long> = _lastExchangeRefreshTimestamp.asStateFlow()
 
@@ -36,10 +39,12 @@ object MarketScanState {
 
     fun update(
         opportunities: List<MarketOpportunity>,
-        allocation: AllocationResult
+        allocation: AllocationResult,
+        cycle: Int = _scanCycleCount.value
     ) {
         _topOpportunities.value = opportunities
         _latestAllocation.value = allocation
+        _scanCycleCount.value = cycle
         _lastScanTimestamp.value = System.currentTimeMillis()
     }
 
@@ -61,11 +66,11 @@ object MarketScanState {
     }
 
     fun updateAudit(audits: List<TradeExecutionAudit>) {
-        val current = _executionAuditMap.value.toMutableMap()
+        val newMap = mutableMapOf<String, TradeExecutionAudit>()
         for (a in audits) {
-            current[a.pair] = a
+            newMap[a.pair] = a
         }
-        _executionAuditMap.value = current
+        _executionAuditMap.value = newMap
     }
 
     fun clearAudits() {

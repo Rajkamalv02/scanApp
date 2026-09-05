@@ -642,20 +642,55 @@
             android:gravity="center_vertical"
             android:layout_marginBottom="8dp">
 
-            <TextView
+            <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="TOP 5 RANKED FUTURES"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                android:letterSpacing="0.05" />
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="TOP 5 RANKED FUTURES"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp"
+                    android:letterSpacing="0.05"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvLastScanTime"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Last Scan: Never"
+                    android:textColor="@color/accent_blue"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
 
             <ProgressBar
                 android:id="@+id/progressScanning"
                 android:layout_width="16dp"
                 android:layout_height="16dp"
+                android:layout_marginEnd="8dp"
                 android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnScanNow"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:backgroundTint="@color/surface_elevated"
+                android:text="SCAN NOW"
+                android:textColor="@color/accent_blue"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                app:cornerRadius="6dp"
+                app:strokeColor="@color/border_subtle"
+                app:strokeWidth="1dp" />
         </LinearLayout>
 
         <!-- Dynamic Container for the Top 5 Ranked Opportunities -->

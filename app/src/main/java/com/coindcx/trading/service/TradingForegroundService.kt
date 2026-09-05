@@ -40,6 +40,11 @@ class TradingForegroundService : Service() {
     private lateinit var executionEngine: ExecutionEngine
     private lateinit var riskManager: RiskManager
 
+    private var scanCycleCounter = 0
+    private val scanMutex = kotlinx.coroutines.sync.Mutex()
+    @Volatile
+    private var countdownResetRequested = false
+
     companion object {
         const val CHANNEL_ID = "trading_bot_channel"
         const val NOTIFICATION_ID = 1001
@@ -48,6 +53,7 @@ class TradingForegroundService : Service() {
         const val ACTION_SET_MODE = "com.coindcx.trading.ACTION_SET_MODE"
         const val ACTION_SET_STRATEGY = "com.coindcx.trading.ACTION_SET_STRATEGY"
         const val ACTION_TRIGGER_SCAN = "com.coindcx.trading.ACTION_TRIGGER_SCAN"
+        const val ACTION_UPDATE_CONFIG = "com.coindcx.trading.ACTION_UPDATE_CONFIG"
         const val ACTION_CLOSE_POSITION = "com.coindcx.trading.ACTION_CLOSE_POSITION"
         const val ACTION_REFRESH_EXCHANGE = "com.coindcx.trading.ACTION_REFRESH_EXCHANGE"
         const val EXTRA_IS_PAPER = "EXTRA_IS_PAPER"
@@ -105,10 +111,16 @@ class TradingForegroundService : Service() {
                     startTradingLoop()
                     val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
                     updateNotification("Bot Active ($modeLabel)", "Strategy: ${StrategyRegistry.activeStrategy.name}")
+                } else {
+                    countdownResetRequested = true
+                    serviceScope.launch {
+                        performMarketScanAndAllocation()
+                    }
                 }
             }
             ACTION_STOP -> {
                 isTradingActive = false
+                countdownResetRequested = true
                 MarketScanState.setNextScanSecondsRemaining(0)
                 updateNotification("Bot Stopped", "Scanner & execution loop halted")
                 serviceScope.launch {
@@ -134,6 +146,7 @@ class TradingForegroundService : Service() {
             ACTION_SET_STRATEGY -> {
                 val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
                 updateNotification("Strategy Updated", "${StrategyRegistry.activeStrategy.name} ($modeLabel)")
+                countdownResetRequested = true
                 serviceScope.launch {
                     db.systemLogDao().insert(
                         SystemLogEntity(level = "INFO", tag = "STRATEGY", message = "Active strategy: ${StrategyRegistry.activeStrategy.name}")
@@ -158,9 +171,16 @@ class TradingForegroundService : Service() {
                 }
             }
             ACTION_TRIGGER_SCAN -> {
+                countdownResetRequested = true
                 serviceScope.launch {
+                    db.systemLogDao().insert(
+                        SystemLogEntity(level = "INFO", tag = "SCANNER", message = "Manual scan requested by user.")
+                    )
                     performMarketScanAndAllocation()
                 }
+            }
+            ACTION_UPDATE_CONFIG -> {
+                countdownResetRequested = true
             }
             ACTION_REFRESH_EXCHANGE -> {
                 serviceScope.launch {
@@ -206,10 +226,19 @@ class TradingForegroundService : Service() {
                     )
                 }
 
-                // Configurable interval countdown (1m, 5m, 15m, 30m, 1h)
-                val intervalMinutes = configRepo.configFlow.value.scanIntervalMinutes
-                var secondsRemaining = intervalMinutes * 60
-                while (isTradingActive && secondsRemaining > 0) {
+                countdownResetRequested = false
+                var activeIntervalMinutes = configRepo.configFlow.value.scanIntervalMinutes
+                var secondsRemaining = activeIntervalMinutes * 60
+
+                while (isTradingActive && secondsRemaining > 0 && !countdownResetRequested) {
+                    val currentInterval = configRepo.configFlow.value.scanIntervalMinutes
+                    if (currentInterval != activeIntervalMinutes) {
+                        activeIntervalMinutes = currentInterval
+                        secondsRemaining = (currentInterval * 60).coerceAtMost(secondsRemaining)
+                        db.systemLogDao().insert(
+                            SystemLogEntity(level = "INFO", tag = "CONFIG", message = "Auto-scan countdown adjusted to ${currentInterval}m interval.")
+                        )
+                    }
                     MarketScanState.setNextScanSecondsRemaining(secondsRemaining)
                     delay(1000)
                     secondsRemaining--
@@ -220,231 +249,264 @@ class TradingForegroundService : Service() {
     }
 
     private suspend fun performMarketScanAndAllocation() {
-        MarketScanState.setScanning(true)
-        val config = configRepo.configFlow.value
-        val activeStrategy = StrategyRegistry.activeStrategy
-        val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
+        if (!scanMutex.tryLock()) {
+            return // Skip concurrent execution if a scan is already running
+        }
+        try {
+            MarketScanState.setScanning(true)
+            scanCycleCounter++
+            val cycle = scanCycleCounter
+            val config = configRepo.configFlow.value
+            val activeStrategy = StrategyRegistry.activeStrategy
+            val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
 
-        // Circuit Breaker Check: Daily drawdown cap (4% loss limit)
-        if (riskManager.isCircuitBreakerTripped()) {
             db.systemLogDao().insert(
-                SystemLogEntity(level = "WARN", tag = "RISK", message = "Trading cycle skipped: Daily drawdown circuit breaker tripped (4% loss limit reached).")
+                SystemLogEntity(
+                    level = "INFO",
+                    tag = "SCANNER",
+                    message = "Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with ${activeStrategy.name}..."
+                )
             )
-            MarketScanState.setScanning(false)
-            return
-        }
 
-        val isCooldown = riskManager.isCooldownActive()
-        if (isCooldown) {
-            val remainingMins = riskManager.getCooldownRemainingMinutes()
-            db.systemLogDao().insert(
-                SystemLogEntity(level = "WARN", tag = "RISK", message = "Execution paused: 90m cooldown active ($remainingMins min remaining) after consecutive losses.")
-            )
-        }
-
-        // 1. Initial State Sync (Exchange is SSOT)
-        val preSync = executionEngine.refreshExchangeState()
-        if (preSync.isSuccess) {
-            MarketScanState.updateExchangeSnapshot(preSync.getOrThrow())
-        }
-        val initialBalanceInr = executionEngine.getAvailableBalanceInr()
-
-        // 2. Scan Futures Market Opportunities
-        val rawOpportunities = scannerEngine.scanMarket(config, activeStrategy, executionEngine)
-
-        // 3. Rank Opportunities from #1 to #5
-        val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
-
-        // 4. Initial Dynamic Allocation
-        val allocation = allocator.allocateCapital(initialBalanceInr, config.minMarginPerTradeInr, rankedTop5)
-        MarketScanState.update(allocation.allRankedOpportunities, allocation)
-
-        // 5. Sequential Just-In-Time Pre-Trade Validation with In-Memory Counters
-        val inMemoryOpenPositions = executionEngine.getAllOpenPositions().toMutableList()
-        var inMemoryAvailableBalance = initialBalanceInr
-        val audits = mutableListOf<com.coindcx.trading.engine.scanner.TradeExecutionAudit>()
-
-        for (opp in rankedTop5) {
-            // Signal Action Check: Must be actionable entry
-            if (!opp.isBuy && !opp.isSell) {
-                continue
+            // Circuit Breaker Check: Daily drawdown cap (4% loss limit)
+            if (riskManager.isCircuitBreakerTripped()) {
+                db.systemLogDao().insert(
+                    SystemLogEntity(level = "WARN", tag = "RISK", message = "Scan #$cycle skipped: Daily drawdown circuit breaker tripped (4% loss limit reached).")
+                )
+                return
             }
 
-            // Circuit Breaker / Cooldown Gate
+            val isCooldown = riskManager.isCooldownActive()
             if (isCooldown) {
-                audits.add(
-                    com.coindcx.trading.engine.scanner.TradeExecutionAudit(
-                        rank = opp.rank,
-                        pair = opp.pair,
-                        action = opp.actionLabel,
-                        status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
-                        reason = "Skipped — Cooldown active (${riskManager.getCooldownRemainingMinutes()}m remaining after consecutive losses)"
-                    )
+                val remainingMins = riskManager.getCooldownRemainingMinutes()
+                db.systemLogDao().insert(
+                    SystemLogEntity(level = "WARN", tag = "RISK", message = "Scan #$cycle: Execution paused (90m cooldown active, $remainingMins min remaining).")
                 )
-                continue
             }
 
-            // Gate 1: Quality Score Rubric Gate (Reject < 70)
-            if (opp.qualityScore < 70) {
-                audits.add(
-                    com.coindcx.trading.engine.scanner.TradeExecutionAudit(
-                        rank = opp.rank,
-                        pair = opp.pair,
-                        action = opp.actionLabel,
-                        status = com.coindcx.trading.engine.scanner.AuditStatus.REJECTED_LOW_QUALITY,
-                        reason = "Rejected — Quality Score ${opp.qualityScore}/100 < 70 (${opp.qualityCategory}). ${opp.rejectionReason ?: "Insufficient confluence"}"
-                    )
-                )
-                continue
+            // 1. Initial State Sync (Exchange is SSOT)
+            val preSync = executionEngine.refreshExchangeState()
+            if (preSync.isSuccess) {
+                MarketScanState.updateExchangeSnapshot(preSync.getOrThrow())
             }
+            val initialBalanceInr = executionEngine.getAvailableBalanceInr()
 
-            // Gate 2: Portfolio Exposure & BTC Correlation Check (Max 3 total, Max 2 Long/Short, No 2 alt Longs without BTC)
-            val portfolioCheck = riskManager.checkPortfolioAndCorrelation(
-                candidatePair = opp.pair,
-                isBuy = opp.isBuy,
-                activePositions = inMemoryOpenPositions
-            )
-            if (portfolioCheck is RiskCheckResult.Rejected) {
-                audits.add(
-                    com.coindcx.trading.engine.scanner.TradeExecutionAudit(
-                        rank = opp.rank,
-                        pair = opp.pair,
-                        action = opp.actionLabel,
-                        status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
-                        reason = "Skipped — ${portfolioCheck.reason}"
-                    )
-                )
-                continue
-            }
+            // 2. Scan Futures Market Opportunities
+            val rawOpportunities = scannerEngine.scanMarket(config, activeStrategy, executionEngine)
 
-            // Gate 3: Volatility-Adjusted Risk Parity Sizing (1% account risk / SL distance %)
-            val slPrice = opp.signal.stopLossPrice ?: (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
-            val marginToAllocate = riskManager.calculateRiskSizedMargin(
-                balanceInr = inMemoryAvailableBalance,
-                entryPrice = opp.currentPrice,
-                stopLossPrice = slPrice,
-                leverage = config.leverage,
-                minMarginInr = config.minMarginPerTradeInr
-            )
+            // 3. Rank Opportunities from #1 to #5
+            val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
 
-            // Gate 4: Fresh In-Memory Balance Check
-            if (inMemoryAvailableBalance < marginToAllocate) {
-                audits.add(
-                    com.coindcx.trading.engine.scanner.TradeExecutionAudit(
-                        rank = opp.rank,
-                        pair = opp.pair,
-                        action = opp.actionLabel,
-                        status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
-                        reason = "Skipped — Insufficient balance (Available: ₹%.2f < Sized Margin: ₹%.2f)".format(inMemoryAvailableBalance, marginToAllocate)
-                    )
-                )
-                continue
-            }
+            // 4. Initial Dynamic Allocation
+            val allocation = allocator.allocateCapital(initialBalanceInr, config.minMarginPerTradeInr, rankedTop5)
+            MarketScanState.update(allocation.allRankedOpportunities, allocation, cycle)
 
-            // All gates passed -> Execute Order!
-            val execResult = executionEngine.executeSignal(
-                signal = opp.signal,
-                pair = opp.pair,
-                currentPrice = opp.currentPrice,
-                marginInr = marginToAllocate,
-                leverage = config.leverage
-            )
+            // 5. Sequential Just-In-Time Pre-Trade Validation with In-Memory Counters
+            val inMemoryOpenPositions = executionEngine.getAllOpenPositions().toMutableList()
+            var inMemoryAvailableBalance = initialBalanceInr
+            val audits = mutableListOf<com.coindcx.trading.engine.scanner.TradeExecutionAudit>()
 
-            when (execResult) {
-                is ExecutionResult.Success -> {
-                    // Synchronously update in-memory counters to eliminate race conditions for subsequent candidates!
-                    inMemoryAvailableBalance = (inMemoryAvailableBalance - marginToAllocate).coerceAtLeast(0.0)
-                    inMemoryOpenPositions.add(
-                        com.coindcx.trading.data.api.models.FuturesPosition(
-                            id = execResult.orderId,
-                            pair = opp.pair,
-                            activePos = if (opp.isBuy) 1.0 else -1.0,
-                            inactivePosBuy = 0.0,
-                            inactivePosSell = 0.0,
-                            avgPrice = opp.currentPrice,
-                            liquidationPrice = 0.0,
-                            lockedMargin = marginToAllocate,
-                            lockedUserMargin = marginToAllocate,
-                            lockedOrderMargin = 0.0,
-                            takeProfitTrigger = opp.signal.takeProfitPrice,
-                            stopLossTrigger = opp.signal.stopLossPrice,
-                            leverage = config.leverage.toDouble(),
-                            maintenanceMargin = null,
-                            markPrice = opp.currentPrice,
-                            marginType = "ISOLATED",
-                            settlementCurrencyAvgPrice = null,
-                            cumulativeFundingFee = null,
-                            marginCurrencyShortName = "INR",
-                            updatedAt = System.currentTimeMillis()
-                        )
-                    )
+            for (opp in rankedTop5) {
+                // Signal Action Check: Must be actionable entry
+                if (!opp.isBuy && !opp.isSell) {
+                    continue
+                }
 
+                // Circuit Breaker / Cooldown Gate
+                if (isCooldown) {
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
                             pair = opp.pair,
                             action = opp.actionLabel,
-                            status = com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED,
-                            reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ ${config.leverage}x".format(marginToAllocate)
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
+                            reason = "Skipped — Cooldown active (${riskManager.getCooldownRemainingMinutes()}m remaining after consecutive losses)"
                         )
                     )
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "TRADE", tag = "EXEC", message = "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}): ${execResult.message}")
-                    )
+                    continue
+                }
 
-                    // Immediate Post-Order State Sync to reflect deducted balance and added position!
-                    val syncResult = executionEngine.refreshExchangeState()
-                    if (syncResult.isSuccess) {
-                        MarketScanState.updateExchangeSnapshot(syncResult.getOrThrow())
+                // Gate 1: Quality Score Rubric Gate (Reject < 70)
+                if (opp.qualityScore < 70) {
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.REJECTED_LOW_QUALITY,
+                            reason = "Rejected — Quality Score ${opp.qualityScore}/100 < 70 (${opp.qualityCategory}). ${opp.rejectionReason ?: "Insufficient confluence"}"
+                        )
+                    )
+                    continue
+                }
+
+                // Gate 2: Portfolio Exposure & BTC Correlation Check (Max 3 total, Max 2 Long/Short, No 2 alt Longs without BTC)
+                val portfolioCheck = riskManager.checkPortfolioAndCorrelation(
+                    candidatePair = opp.pair,
+                    isBuy = opp.isBuy,
+                    activePositions = inMemoryOpenPositions
+                )
+                if (portfolioCheck is RiskCheckResult.Rejected) {
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
+                            reason = "Skipped — ${portfolioCheck.reason}"
+                        )
+                    )
+                    continue
+                }
+
+                // Gate 3: Volatility-Adjusted Risk Parity Sizing (1% account risk / SL distance %)
+                val slPrice = opp.signal.stopLossPrice ?: (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
+                val marginToAllocate = riskManager.calculateRiskSizedMargin(
+                    balanceInr = inMemoryAvailableBalance,
+                    entryPrice = opp.currentPrice,
+                    stopLossPrice = slPrice,
+                    leverage = config.leverage,
+                    minMarginInr = config.minMarginPerTradeInr
+                )
+
+                // Gate 4: Fresh In-Memory Balance Check
+                if (inMemoryAvailableBalance < marginToAllocate) {
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
+                            reason = "Skipped — Insufficient balance (Available: ₹%.2f < Sized Margin: ₹%.2f)".format(inMemoryAvailableBalance, marginToAllocate)
+                        )
+                    )
+                    continue
+                }
+
+                // All gates passed -> Execute Order!
+                val execResult = executionEngine.executeSignal(
+                    signal = opp.signal,
+                    pair = opp.pair,
+                    currentPrice = opp.currentPrice,
+                    marginInr = marginToAllocate,
+                    leverage = config.leverage
+                )
+
+                when (execResult) {
+                    is ExecutionResult.Success -> {
+                        // Synchronously update in-memory counters to eliminate race conditions for subsequent candidates!
+                        inMemoryAvailableBalance = (inMemoryAvailableBalance - marginToAllocate).coerceAtLeast(0.0)
+                        inMemoryOpenPositions.add(
+                            com.coindcx.trading.data.api.models.FuturesPosition(
+                                id = execResult.orderId,
+                                pair = opp.pair,
+                                activePos = if (opp.isBuy) 1.0 else -1.0,
+                                inactivePosBuy = 0.0,
+                                inactivePosSell = 0.0,
+                                avgPrice = opp.currentPrice,
+                                liquidationPrice = 0.0,
+                                lockedMargin = marginToAllocate,
+                                lockedUserMargin = marginToAllocate,
+                                lockedOrderMargin = 0.0,
+                                takeProfitTrigger = opp.signal.takeProfitPrice,
+                                stopLossTrigger = opp.signal.stopLossPrice,
+                                leverage = config.leverage.toDouble(),
+                                maintenanceMargin = null,
+                                markPrice = opp.currentPrice,
+                                marginType = "ISOLATED",
+                                settlementCurrencyAvgPrice = null,
+                                cumulativeFundingFee = null,
+                                marginCurrencyShortName = "INR",
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+
+                        audits.add(
+                            com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                                rank = opp.rank,
+                                pair = opp.pair,
+                                action = opp.actionLabel,
+                                status = com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED,
+                                reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ ${config.leverage}x".format(marginToAllocate)
+                            )
+                        )
+                        db.systemLogDao().insert(
+                            SystemLogEntity(level = "TRADE", tag = "EXEC", message = "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}): ${execResult.message}")
+                        )
+
+                        // Immediate Post-Order State Sync to reflect deducted balance and added position!
+                        val syncResult = executionEngine.refreshExchangeState()
+                        if (syncResult.isSuccess) {
+                            MarketScanState.updateExchangeSnapshot(syncResult.getOrThrow())
+                        }
+                    }
+                    is ExecutionResult.Failed -> {
+                        audits.add(
+                            com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                                rank = opp.rank,
+                                pair = opp.pair,
+                                action = opp.actionLabel,
+                                status = com.coindcx.trading.engine.scanner.AuditStatus.FAILED,
+                                reason = "Failed — ${execResult.error}"
+                            )
+                        )
+                        db.systemLogDao().insert(
+                            SystemLogEntity(level = "ERROR", tag = "EXEC", message = "Failed to execute ${opp.pair}: ${execResult.error}")
+                        )
                     }
                 }
-                is ExecutionResult.Failed -> {
-                    audits.add(
-                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
-                            rank = opp.rank,
-                            pair = opp.pair,
-                            action = opp.actionLabel,
-                            status = com.coindcx.trading.engine.scanner.AuditStatus.FAILED,
-                            reason = "Failed — ${execResult.error}"
-                        )
-                    )
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "ERROR", tag = "EXEC", message = "Failed to execute ${opp.pair}: ${execResult.error}")
-                    )
+            }
+
+            // 6. Update Audit Map
+            MarketScanState.updateAudit(audits)
+
+            // 7. Final Post-Execution State Synchronization
+            val postSync = executionEngine.refreshExchangeState()
+            if (postSync.isSuccess) {
+                MarketScanState.updateExchangeSnapshot(postSync.getOrThrow())
+            }
+
+            // 8. Monitor Paper SL/TP for open positions
+            if (executionEngine is PaperExecutionEngine) {
+                val openTrades = db.tradeDao().getOpenTrades()
+                for (t in openTrades) {
+                    val candleResp = ApiClient.apiService.getCandles(t.pair, config.timeframe)
+                    val currentPrice = candleResp.body()?.lastOrNull()?.close
+                    if (currentPrice != null) {
+                        paperEngine.checkPaperStopLossAndTakeProfit(t.pair, currentPrice)
+                    }
                 }
             }
+
+            val executedCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED }
+            val rejectedCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.REJECTED_LOW_QUALITY }
+            val skippedLimitCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT }
+            val skippedExistingCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_EXISTING_POSITION }
+            val skippedBalanceCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE }
+
+            db.systemLogDao().insert(
+                SystemLogEntity(
+                    level = "INFO",
+                    tag = "SCANNER",
+                    message = "Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Ranked Top ${rankedTop5.size}. Executed: $executedCount | Filtered: $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance."
+                )
+            )
+
+            // Update Notification
+            val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
+            val finalBalance = executionEngine.getAvailableBalanceInr()
+            updateNotification(
+                "Bot Active ($modeLabel) | Top: $topPick",
+                "Cycle #$cycle | Bal: ₹%.0f | Audited ${audits.size} | Next: ${config.scanIntervalMinutes}m".format(finalBalance)
+            )
+        } catch (e: Exception) {
+            db.systemLogDao().insert(
+                SystemLogEntity(level = "ERROR", tag = "SCANNER", message = "Scan cycle #$scanCycleCounter error: ${e.message}")
+            )
+        } finally {
+            MarketScanState.setScanning(false)
+            scanMutex.unlock()
         }
-
-        // 6. Update Audit Map
-        MarketScanState.updateAudit(audits)
-
-        // 7. Final Post-Execution State Synchronization
-        val postSync = executionEngine.refreshExchangeState()
-        if (postSync.isSuccess) {
-            MarketScanState.updateExchangeSnapshot(postSync.getOrThrow())
-        }
-
-        // 8. Monitor Paper SL/TP for open positions
-        if (executionEngine is PaperExecutionEngine) {
-            val openTrades = db.tradeDao().getOpenTrades()
-            for (t in openTrades) {
-                val candleResp = ApiClient.apiService.getCandles(t.pair, config.timeframe)
-                val currentPrice = candleResp.body()?.lastOrNull()?.close
-                if (currentPrice != null) {
-                    paperEngine.checkPaperStopLossAndTakeProfit(t.pair, currentPrice)
-                }
-            }
-        }
-
-        MarketScanState.setScanning(false)
-
-        // Update Notification
-        val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
-        val finalBalance = executionEngine.getAvailableBalanceInr()
-        updateNotification(
-            "Bot Active ($modeLabel) | Top: $topPick",
-            "Bal: ₹%.0f | Audited ${audits.size} Trades | Scan: ${config.scanIntervalMinutes}m".format(finalBalance)
-        )
     }
 
     private fun acquireWakeLock() {

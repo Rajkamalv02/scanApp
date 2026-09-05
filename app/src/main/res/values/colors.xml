@@ -9,6 +9,7 @@
     <color name="accent_amber">#F59E0B</color>
     <color name="accent_blue">#3B82F6</color>
     <color name="border_subtle">#334155</color>
+    <color name="surface_elevated">#334155</color>
     <color name="text_primary">#F8FAFC</color>
     <color name="text_secondary">#94A3B8</color>
 </resources>

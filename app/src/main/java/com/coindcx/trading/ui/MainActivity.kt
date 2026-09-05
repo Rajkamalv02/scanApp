@@ -37,6 +37,7 @@ import com.coindcx.trading.service.TradingForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -151,6 +152,7 @@ class MainActivity : AppCompatActivity() {
                 else -> 15
             }
             configRepo.updateScanInterval(minutes)
+            sendServiceIntent(TradingForegroundService.ACTION_UPDATE_CONFIG)
             Toast.makeText(this, "Auto-Scan Interval: ${minutes}m", Toast.LENGTH_SHORT).show()
         }
 
@@ -327,6 +329,11 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Refreshing Exchange Live Data...", Toast.LENGTH_SHORT).show()
         }
 
+        binding.btnScanNow.setOnClickListener {
+            sendServiceIntent(TradingForegroundService.ACTION_TRIGGER_SCAN)
+            Toast.makeText(this, "Manual scan requested...", Toast.LENGTH_SHORT).show()
+        }
+
         binding.btnEmergencyStop.setOnClickListener {
             sendServiceIntent(TradingForegroundService.ACTION_STOP)
             binding.tvBotStatus.text = "KILL SWITCH ACTIVE"
@@ -374,6 +381,20 @@ class MainActivity : AppCompatActivity() {
                     binding.tvNextScanCountdown.text = "Scan in: %02d:%02d".format(mins, remSec)
                 } else if (!MarketScanState.isScanning.value) {
                     binding.tvNextScanCountdown.text = "Scan in: --"
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            combine(
+                MarketScanState.lastScanTimestamp,
+                MarketScanState.scanCycleCount
+            ) { ts, cycle -> Pair(ts, cycle) }.collectLatest { (ts, cycle) ->
+                if (ts > 0) {
+                    val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    binding.tvLastScanTime.text = "Last Scan: ${sdf.format(java.util.Date(ts))} (Cycle #$cycle)"
+                } else {
+                    binding.tvLastScanTime.text = "Last Scan: Never"
                 }
             }
         }
