@@ -28,19 +28,16 @@ class TradingForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var isTradingActive = false
 
-    private val db by lazy { AppDatabase.getInstance(this) }
-    private val configRepo by lazy { TradingConfigRepository.getInstance(this) }
-    private val currencyConverter by lazy { CurrencyConverter(ApiClient.apiService) }
-
-    private val orderManager by lazy { OrderManager(ApiClient.apiService, db.orderDao()) }
-    private val paperEngine by lazy { PaperExecutionEngine(this, db, currencyConverter) }
-    private val liveEngine by lazy { LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter) }
-
-    private val scannerEngine by lazy { MarketScannerEngine(ApiClient.apiService) }
-    private val ranker by lazy { OpportunityRanker() }
-    private val allocator by lazy { AllocationEngine() }
-
-    private var executionEngine: ExecutionEngine = paperEngine
+    private lateinit var db: AppDatabase
+    private lateinit var configRepo: TradingConfigRepository
+    private lateinit var currencyConverter: CurrencyConverter
+    private lateinit var orderManager: OrderManager
+    private lateinit var paperEngine: PaperExecutionEngine
+    private lateinit var liveEngine: LiveExecutionEngine
+    private lateinit var scannerEngine: MarketScannerEngine
+    private lateinit var ranker: OpportunityRanker
+    private lateinit var allocator: AllocationEngine
+    private lateinit var executionEngine: ExecutionEngine
 
     companion object {
         const val CHANNEL_ID = "trading_bot_channel"
@@ -50,17 +47,42 @@ class TradingForegroundService : Service() {
         const val ACTION_SET_MODE = "com.coindcx.trading.ACTION_SET_MODE"
         const val ACTION_SET_STRATEGY = "com.coindcx.trading.ACTION_SET_STRATEGY"
         const val ACTION_TRIGGER_SCAN = "com.coindcx.trading.ACTION_TRIGGER_SCAN"
+        const val ACTION_CLOSE_POSITION = "com.coindcx.trading.ACTION_CLOSE_POSITION"
         const val EXTRA_IS_PAPER = "EXTRA_IS_PAPER"
+        const val EXTRA_PAIR = "EXTRA_PAIR"
     }
 
     override fun onCreate() {
         super.onCreate()
-        StrategyRegistry.init(this)
+        db = AppDatabase.getInstance(applicationContext)
+        configRepo = TradingConfigRepository.getInstance(applicationContext)
+        currencyConverter = CurrencyConverter(ApiClient.apiService)
+        orderManager = OrderManager(ApiClient.apiService, db.orderDao())
+        paperEngine = PaperExecutionEngine(applicationContext, db, currencyConverter)
+        liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter)
+        scannerEngine = MarketScannerEngine(ApiClient.apiService)
+        ranker = OpportunityRanker()
+        allocator = AllocationEngine()
+        executionEngine = paperEngine
+
+        StrategyRegistry.init(applicationContext)
         createNotificationChannel()
         acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Ensure foreground notification immediately for Android 8+ requirement
+        val initialNotification = buildNotification("CoinDCX Trading Bot", "Market Scanner Service Running")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                initialNotification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, initialNotification)
+        }
+
         if (intent?.hasExtra(EXTRA_IS_PAPER) == true) {
             val isPaper = intent.getBooleanExtra(EXTRA_IS_PAPER, true)
             executionEngine = if (isPaper) paperEngine else liveEngine
@@ -77,7 +99,12 @@ class TradingForegroundService : Service() {
             }
             ACTION_STOP -> {
                 isTradingActive = false
-                updateNotification("Bot Paused", "Execution loop halted")
+                updateNotification("Bot Stopped", "Scanner & execution loop halted")
+                serviceScope.launch {
+                    db.systemLogDao().insert(
+                        SystemLogEntity(level = "INFO", tag = "SERVICE", message = "Trading Bot Stopped by user.")
+                    )
+                }
             }
             ACTION_SET_MODE -> {
                 val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
@@ -97,6 +124,19 @@ class TradingForegroundService : Service() {
                     )
                 }
             }
+            ACTION_CLOSE_POSITION -> {
+                val pairToClose = intent.getStringExtra(EXTRA_PAIR)
+                if (!pairToClose.isNullOrBlank()) {
+                    serviceScope.launch {
+                        val candleResp = ApiClient.apiService.getCandles(pairToClose, "1m")
+                        val currentPrice = candleResp.body()?.lastOrNull()?.close ?: 0.0
+                        val res = executionEngine.exitPosition(pairToClose, currentPrice, "Manual close requested by user")
+                        db.systemLogDao().insert(
+                            SystemLogEntity(level = "TRADE", tag = "MANUAL_CLOSE", message = "Closed $pairToClose: ${res}")
+                        )
+                    }
+                }
+            }
             ACTION_TRIGGER_SCAN -> {
                 serviceScope.launch {
                     performMarketScanAndAllocation()
@@ -104,7 +144,6 @@ class TradingForegroundService : Service() {
             }
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("CoinDCX Trading Bot", "Market Scanner Active"))
         return START_STICKY
     }
 

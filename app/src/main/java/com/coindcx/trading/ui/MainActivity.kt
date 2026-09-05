@@ -11,17 +11,19 @@ import android.view.LayoutInflater
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.coindcx.trading.R
 import com.coindcx.trading.data.api.ApiClient
+import com.coindcx.trading.data.api.models.FuturesPosition
 import com.coindcx.trading.data.config.TradingConfigRepository
 import com.coindcx.trading.data.db.AppDatabase
 import com.coindcx.trading.data.db.entities.SystemLogEntity
+import com.coindcx.trading.data.db.entities.TradeEntity
 import com.coindcx.trading.databinding.ActivityMainBinding
+import com.coindcx.trading.databinding.ItemActivePositionBinding
 import com.coindcx.trading.databinding.ItemRankedOpportunityBinding
 import com.coindcx.trading.engine.PnlEngine
 import com.coindcx.trading.engine.Strategy
@@ -32,7 +34,6 @@ import com.coindcx.trading.engine.scanner.MarketOpportunity
 import com.coindcx.trading.engine.scanner.MarketScanState
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
 import com.coindcx.trading.service.TradingForegroundService
-import com.google.android.material.slider.Slider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -66,6 +67,22 @@ class MainActivity : AppCompatActivity() {
         observeSystemLogs()
         checkBatteryOptimization()
         startLivePolling()
+    }
+
+    private fun sendServiceIntent(actionName: String, configure: (Intent.() -> Unit)? = null) {
+        val intent = Intent(this, TradingForegroundService::class.java).apply {
+            action = actionName
+            configure?.invoke(this)
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Service command: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun setupTradingControls() {
@@ -192,12 +209,7 @@ class MainActivity : AppCompatActivity() {
                 if (selected.id != StrategyRegistry.activeStrategy.id) {
                     StrategyRegistry.selectStrategy(this@MainActivity, selected.id)
                     updateStrategyInfo(selected)
-
-                    val intent = Intent(this@MainActivity, TradingForegroundService::class.java).apply {
-                        action = TradingForegroundService.ACTION_SET_STRATEGY
-                    }
-                    startService(intent)
-
+                    sendServiceIntent(TradingForegroundService.ACTION_SET_STRATEGY)
                     Toast.makeText(this@MainActivity, "Strategy switched to ${selected.name}", Toast.LENGTH_SHORT).show()
                 } else {
                     updateStrategyInfo(selected)
@@ -253,52 +265,38 @@ class MainActivity : AppCompatActivity() {
             binding.tvModeWarning.setTextColor(getColor(R.color.text_secondary))
         }
 
-        val intent = Intent(this, TradingForegroundService::class.java).apply {
-            action = TradingForegroundService.ACTION_SET_MODE
+        sendServiceIntent(TradingForegroundService.ACTION_SET_MODE) {
             putExtra(TradingForegroundService.EXTRA_IS_PAPER, !isLive)
         }
-        startService(intent)
     }
 
     private fun setupButtons() {
         binding.btnStartTrading.setOnClickListener {
             val isPaper = !binding.switchLiveMode.isChecked
-            val intent = Intent(this, TradingForegroundService::class.java).apply {
-                action = TradingForegroundService.ACTION_START
+            sendServiceIntent(TradingForegroundService.ACTION_START) {
                 putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
             }
             binding.tvBotStatus.text = "SCANNING"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_green))
-            Toast.makeText(this, "Market Scanner & Bot Service Started", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Market Scanner & Bot Started", Toast.LENGTH_SHORT).show()
 
             lifecycleScope.launch(Dispatchers.IO) {
                 refreshAccountData()
             }
         }
 
-        binding.btnPauseTrading.setOnClickListener {
-            val intent = Intent(this, TradingForegroundService::class.java).apply {
-                action = TradingForegroundService.ACTION_STOP
-            }
-            startService(intent)
-            binding.tvBotStatus.text = "PAUSED"
+        binding.btnStopTrading.setOnClickListener {
+            sendServiceIntent(TradingForegroundService.ACTION_STOP)
+            binding.tvBotStatus.text = "STOPPED"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_amber))
-            Toast.makeText(this, "Trading Bot Paused", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Trading Bot Stopped", Toast.LENGTH_SHORT).show()
         }
 
         binding.btnEmergencyStop.setOnClickListener {
-            val intent = Intent(this, TradingForegroundService::class.java).apply {
-                action = TradingForegroundService.ACTION_STOP
-            }
-            startService(intent)
+            sendServiceIntent(TradingForegroundService.ACTION_STOP)
             binding.tvBotStatus.text = "KILL SWITCH ACTIVE"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_red))
-            Toast.makeText(this, "EMERGENCY STOP: Cancelling orders...", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "EMERGENCY STOP: Cancelling open orders...", Toast.LENGTH_LONG).show()
 
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
@@ -323,14 +321,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun observeMarketScanState() {
-        // 1. Observe Scanning indicator
         lifecycleScope.launch {
             MarketScanState.isScanning.collectLatest { scanning ->
                 binding.progressScanning.visibility = if (scanning) View.VISIBLE else View.GONE
+                if (scanning) {
+                    binding.tvBotStatus.text = "SCANNING"
+                }
             }
         }
 
-        // 2. Observe Allocation Results
         lifecycleScope.launch {
             MarketScanState.latestAllocation.collectLatest { allocation ->
                 if (allocation != null) {
@@ -351,7 +350,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 3. Observe Top 5 Opportunities Board
         lifecycleScope.launch {
             MarketScanState.topOpportunities.collectLatest { opportunities ->
                 renderTopOpportunities(opportunities)
@@ -421,16 +419,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun observePaperTrades() {
+        // Observe paper trade history & open holdings
         lifecycleScope.launch {
             db.tradeDao().getAllTradesFlow().collectLatest { trades ->
-                val openCount = trades.count { it.status == "OPEN" }
-                val closedCount = trades.count { it.status == "CLOSED" }
-                val totalRealizedPnl = trades.filter { it.status == "CLOSED" }.sumOf { it.realizedPnl ?: 0.0 }
+                val openTrades = trades.filter { it.status == "OPEN" }
+                val closedTrades = trades.filter { it.status == "CLOSED" }
+                val totalRealizedPnl = closedTrades.sumOf { it.realizedPnl ?: 0.0 }
                 val totalFees = trades.sumOf { it.fees }
 
                 withContext(Dispatchers.Main) {
-                    binding.tvPaperOpenCount.text = "$openCount Open Trades"
-                    binding.tvPaperTotalTrades.text = "$closedCount Completed"
+                    binding.tvPaperOpenCount.text = "${openTrades.size} Open Trades"
+                    binding.tvPaperTotalTrades.text = "${closedTrades.size} Completed"
                     binding.tvPaperRealizedPnl.text = "P&L: ₹ %.2f".format(totalRealizedPnl)
                     binding.tvPaperFees.text = "Est Fees: ₹ %.2f".format(totalFees)
 
@@ -439,8 +438,60 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         binding.tvPaperRealizedPnl.setTextColor(getColor(R.color.accent_red))
                     }
+
+                    // If in paper mode, populate active positions container
+                    if (!binding.switchLiveMode.isChecked) {
+                        renderPaperOpenPositions(openTrades)
+                    }
                 }
             }
+        }
+    }
+
+    private fun renderPaperOpenPositions(openTrades: List<TradeEntity>) {
+        val container = binding.containerActivePositions
+        container.removeAllViews()
+
+        if (openTrades.isEmpty()) {
+            binding.tvNoPositionsPlaceholder.visibility = View.VISIBLE
+            container.addView(binding.tvNoPositionsPlaceholder)
+            return
+        }
+
+        binding.tvNoPositionsPlaceholder.visibility = View.GONE
+        val inflater = LayoutInflater.from(this)
+
+        for (trade in openTrades) {
+            val itemBinding = ItemActivePositionBinding.inflate(inflater, container, false)
+            val symbol = trade.pair.removePrefix("B-").removeSuffix("_USDT")
+            itemBinding.tvPosSymbol.text = "$symbol Futures"
+            itemBinding.tvPosSideLeverage.text = "${trade.side} ${trade.leverage}x"
+
+            if (trade.side == "LONG") {
+                itemBinding.tvPosSideLeverage.setTextColor(getColor(R.color.accent_green))
+            } else {
+                itemBinding.tvPosSideLeverage.setTextColor(getColor(R.color.accent_red))
+            }
+
+            val pnl = trade.unrealizedPnl ?: 0.0
+            itemBinding.tvPosPnlInr.text = if (pnl >= 0) "+₹%.2f".format(pnl) else "-₹%.2f".format(-pnl)
+            itemBinding.tvPosPnlInr.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
+
+            itemBinding.tvPosEntryPrice.text = "Entry: $%.2f".format(trade.entryPrice)
+            itemBinding.tvPosMargin.text = "Margin: ₹%.0f".format(trade.allocatedMarginInr)
+
+            val slText = if (trade.stopLoss != null) "$%.2f".format(trade.stopLoss) else "None"
+            val tpText = if (trade.takeProfit != null) "$%.2f".format(trade.takeProfit) else "None"
+            itemBinding.tvPosTargets.text = "SL: $slText | TP: $tpText"
+
+            itemBinding.btnPosClose.setOnClickListener {
+                sendServiceIntent(TradingForegroundService.ACTION_CLOSE_POSITION) {
+                    putExtra(TradingForegroundService.EXTRA_PAIR, trade.pair)
+                }
+                Toast.makeText(this, "Closing ${trade.pair}...", Toast.LENGTH_SHORT).show()
+            }
+
+            container.addView(itemBinding.root)
         }
     }
 
@@ -450,7 +501,7 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.IO) {
                     refreshAccountData()
                 }
-                delay(10_000) // Refresh account balance every 10 seconds
+                delay(10_000)
             }
         }
     }
@@ -511,12 +562,64 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         binding.tvUnrealizedPnl.setTextColor(getColor(R.color.accent_red))
                     }
+
+                    if (binding.switchLiveMode.isChecked) {
+                        renderLiveOpenPositions(openPositions)
+                    }
                 }
             }
         } catch (e: Exception) {
             db.systemLogDao().insert(
                 SystemLogEntity(level = "WARN", tag = "POLL", message = "Data refresh: ${e.message}")
             )
+        }
+    }
+
+    private fun renderLiveOpenPositions(openPositions: List<FuturesPosition>) {
+        val container = binding.containerActivePositions
+        container.removeAllViews()
+
+        if (openPositions.isEmpty()) {
+            binding.tvNoPositionsPlaceholder.visibility = View.VISIBLE
+            container.addView(binding.tvNoPositionsPlaceholder)
+            return
+        }
+
+        binding.tvNoPositionsPlaceholder.visibility = View.GONE
+        val inflater = LayoutInflater.from(this)
+
+        for (pos in openPositions) {
+            val itemBinding = ItemActivePositionBinding.inflate(inflater, container, false)
+            val symbol = pos.pair.removePrefix("B-").removeSuffix("_USDT")
+            itemBinding.tvPosSymbol.text = "$symbol Futures"
+            itemBinding.tvPosSideLeverage.text = "${if (pos.isLong) "LONG" else "SHORT"} ${pos.leverage.toInt()}x"
+
+            if (pos.isLong) {
+                itemBinding.tvPosSideLeverage.setTextColor(getColor(R.color.accent_green))
+            } else {
+                itemBinding.tvPosSideLeverage.setTextColor(getColor(R.color.accent_red))
+            }
+
+            val pnlUsdt = PnlEngine.calculateUnrealizedPnl(pos)
+            val pnlInr = pnlUsdt * 90.0
+            itemBinding.tvPosPnlInr.text = if (pnlInr >= 0) "+₹%.2f".format(pnlInr) else "-₹%.2f".format(-pnlInr)
+            itemBinding.tvPosPnlInr.setTextColor(getColor(if (pnlInr >= 0) R.color.accent_green else R.color.accent_red))
+
+            itemBinding.tvPosEntryPrice.text = "Entry: $%.2f".format(pos.avgPrice)
+            itemBinding.tvPosMargin.text = "Margin: ₹%.0f".format(pos.lockedMargin * 90.0)
+
+            val slText = if (pos.stopLossTrigger != null) "$%.2f".format(pos.stopLossTrigger) else "None"
+            val tpText = if (pos.takeProfitTrigger != null) "$%.2f".format(pos.takeProfitTrigger) else "None"
+            itemBinding.tvPosTargets.text = "SL: $slText | TP: $tpText"
+
+            itemBinding.btnPosClose.setOnClickListener {
+                sendServiceIntent(TradingForegroundService.ACTION_CLOSE_POSITION) {
+                    putExtra(TradingForegroundService.EXTRA_PAIR, pos.pair)
+                }
+                Toast.makeText(this, "Closing live position on ${pos.pair}...", Toast.LENGTH_SHORT).show()
+            }
+
+            container.addView(itemBinding.root)
         }
     }
 

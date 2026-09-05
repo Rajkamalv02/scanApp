@@ -19,7 +19,6 @@ class PaperExecutionEngine(
     private val slippageRate = 0.0005 // 0.05% estimated slippage
     private val feeRate = 0.0005      // 0.05% standard taker fee
 
-    private val prefs = context.getSharedPreferences("paper_trading_prefs", Context.MODE_PRIVATE)
     private val initialBalanceInr = 10_000.0
 
     override suspend fun getAvailableBalanceInr(): Double {

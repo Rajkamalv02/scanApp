@@ -15,9 +15,9 @@ class RsiMeanReversionStrategy(
 ) : Strategy {
 
     override val id: String = "rsi_mean_reversion"
-    override val name: String = "RSI Mean Reversion"
-    override val description: String = "Scans extreme RSI extensions (oversold <$oversoldThreshold, overbought >$overboughtThreshold) for high-probability mean reversion setups."
-    override val parametersSummary: String = "Period: $rsiPeriod | Oversold: $oversoldThreshold | Overbought: $overboughtThreshold | Lev: ${defaultLeverage}x"
+    override val name: String = "RSI Reversal Confluence"
+    override val description: String = "Scans extreme RSI extensions (<$oversoldThreshold / >$overboughtThreshold) requiring candlestick reversal confirmation and volume absorption."
+    override val parametersSummary: String = "Period: $rsiPeriod | Oversold: $oversoldThreshold | Overbought: $overboughtThreshold | Confirmed Reversal"
     override val requiredCandleCount: Int = 50
     override val defaultTimeframe: String = "15m"
 
@@ -29,50 +29,83 @@ class RsiMeanReversionStrategy(
         val closePrices = candles.map { it.close }
         val rsi = TechnicalIndicators.calculateRsi(closePrices, rsiPeriod)
         val currentPrice = closePrices.last()
+        val latestCandle = candles.last()
+        val prevCandle = candles[candles.size - 2]
         val atr = TechnicalIndicators.calculateAtr(candles, 14)
+
+        // Volume momentum
+        val avgVolume = candles.takeLast(20).map { it.volume }.average()
+        val isVolumeSurge = latestCandle.volume >= avgVolume * 1.15
 
         // Exit management for open positions
         if (activePosition != null && activePosition.isOpen) {
             if (activePosition.isLong && rsi >= overboughtThreshold) {
-                return Signal(SignalAction.EXIT, reason = "RSI reached overbought (%.1f >= %.1f)".format(rsi, overboughtThreshold), confidenceScore = 85.0)
+                return Signal(SignalAction.EXIT, reason = "RSI overbought target reached (%.1f >= %.1f)".format(rsi, overboughtThreshold), confidenceScore = 88.0)
             }
             if (activePosition.isShort && rsi <= oversoldThreshold) {
-                return Signal(SignalAction.EXIT, reason = "RSI reached oversold (%.1f <= %.1f)".format(rsi, oversoldThreshold), confidenceScore = 85.0)
+                return Signal(SignalAction.EXIT, reason = "RSI oversold target reached (%.1f <= %.1f)".format(rsi, oversoldThreshold), confidenceScore = 88.0)
             }
             return Signal(SignalAction.HOLD, reason = "Position active; RSI is %.1f".format(rsi), confidenceScore = 40.0)
         }
 
-        // Entry signals
+        // 1. Oversold Reversal (Bullish Long)
         if (rsi <= oversoldThreshold) {
-            val depth = (oversoldThreshold - rsi).coerceAtLeast(0.0)
-            val score = (72.0 + depth * 2.2).coerceIn(60.0, 99.0)
+            // Reversal Confirmation: Current candle closes green (buyers step in)
+            val isBullishReversal = latestCandle.close > latestCandle.open && latestCandle.close >= prevCandle.close
 
-            val stopLoss = currentPrice - (atr * 1.5)
-            val takeProfit = currentPrice + (atr * 2.5)
-            return Signal(
-                action = SignalAction.ENTER_LONG,
-                suggestedLeverage = defaultLeverage,
-                stopLossPrice = stopLoss,
-                takeProfitPrice = takeProfit,
-                reason = "RSI Extreme Oversold (%.1f <= %.1f)".format(rsi, oversoldThreshold),
-                confidenceScore = score
-            )
+            if (isBullishReversal) {
+                val depth = (oversoldThreshold - rsi).coerceAtLeast(0.0)
+                var score = 70.0 + (depth * 2.5) // Deeper oversold = higher confidence
+                if (isVolumeSurge) score += 15.0
+
+                val finalScore = score.coerceIn(65.0, 98.0)
+                val stopLoss = currentPrice - (atr * 1.5)
+                val takeProfit = currentPrice + (atr * 2.5) // 1:1.6+ R:R
+                return Signal(
+                    action = SignalAction.ENTER_LONG,
+                    suggestedLeverage = defaultLeverage,
+                    stopLossPrice = stopLoss,
+                    takeProfitPrice = takeProfit,
+                    reason = "RSI Oversold (%.1f) + Bullish Reversal Candle Confirmation".format(rsi),
+                    confidenceScore = finalScore
+                )
+            } else {
+                return Signal(
+                    action = SignalAction.HOLD,
+                    reason = "RSI Oversold (%.1f) but waiting for green reversal candle confirmation".format(rsi),
+                    confidenceScore = 45.0
+                )
+            }
         }
 
+        // 2. Overbought Reversal (Bearish Short)
         if (rsi >= overboughtThreshold) {
-            val depth = (rsi - overboughtThreshold).coerceAtLeast(0.0)
-            val score = (72.0 + depth * 2.2).coerceIn(60.0, 99.0)
+            // Reversal Confirmation: Current candle closes red (sellers reject high)
+            val isBearishReversal = latestCandle.close < latestCandle.open && latestCandle.close <= prevCandle.close
 
-            val stopLoss = currentPrice + (atr * 1.5)
-            val takeProfit = currentPrice - (atr * 2.5)
-            return Signal(
-                action = SignalAction.ENTER_SHORT,
-                suggestedLeverage = defaultLeverage,
-                stopLossPrice = stopLoss,
-                takeProfitPrice = takeProfit,
-                reason = "RSI Extreme Overbought (%.1f >= %.1f)".format(rsi, overboughtThreshold),
-                confidenceScore = score
-            )
+            if (isBearishReversal) {
+                val depth = (rsi - overboughtThreshold).coerceAtLeast(0.0)
+                var score = 70.0 + (depth * 2.5)
+                if (isVolumeSurge) score += 15.0
+
+                val finalScore = score.coerceIn(65.0, 98.0)
+                val stopLoss = currentPrice + (atr * 1.5)
+                val takeProfit = currentPrice - (atr * 2.5)
+                return Signal(
+                    action = SignalAction.ENTER_SHORT,
+                    suggestedLeverage = defaultLeverage,
+                    stopLossPrice = stopLoss,
+                    takeProfitPrice = takeProfit,
+                    reason = "RSI Overbought (%.1f) + Bearish Rejection Candle Confirmation".format(rsi),
+                    confidenceScore = finalScore
+                )
+            } else {
+                return Signal(
+                    action = SignalAction.HOLD,
+                    reason = "RSI Overbought (%.1f) but waiting for red rejection candle confirmation".format(rsi),
+                    confidenceScore = 45.0
+                )
+            }
         }
 
         return Signal(SignalAction.HOLD, reason = "RSI neutral (%.1f)".format(rsi), confidenceScore = 10.0)
