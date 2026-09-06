@@ -59,14 +59,16 @@ class PaperAccountManager(
         val usedMargin = openTrades.sumOf { it.allocatedMarginInr }
         val openEntryFees = openTrades.sumOf { it.fees }
         val openFundingFees = openTrades.sumOf { it.fundingFees }
-        val openUnrealizedPnl = openTrades.sumOf { it.unrealizedPnl ?: 0.0 }
+        val openGrossPnl = openTrades.sumOf { it.grossPnl ?: 0.0 }
+        val openUnrealizedNetPnl = openGrossPnl - openEntryFees - openFundingFees
 
-        // Formula: Available = Starting + NetRealizedPnl - UsedMargin - OpenEntryFees - OpenAccruedFunding
+        // Formula: Available Cash = Starting Capital + Net Realized PnL - Locked Margin - Open Entry Fees - Open Funding
         val availableBalance = (startingBalance + netRealizedPnlClosed - usedMargin - openEntryFees - openFundingFees)
             .coerceAtLeast(0.0)
 
-        // Total Equity = Available + UsedMargin + UnrealizedPnl
-        val totalEquity = availableBalance + usedMargin + openUnrealizedPnl
+        // Total Equity = Available Cash + Locked Margin + Open Gross PnL
+        // Mathematically equals: Starting Capital + Net Realized PnL + Open Net Unrealized PnL (Zero double counting!)
+        val totalEquity = availableBalance + usedMargin + openGrossPnl
 
         val totalReturnPct = if (startingBalance > 0.0) {
             ((totalEquity - startingBalance) / startingBalance) * 100.0
@@ -79,7 +81,7 @@ class PaperAccountManager(
             startingBalanceInr = startingBalance,
             availableBalanceInr = availableBalance,
             usedMarginInr = usedMargin,
-            unrealizedPnlInr = openUnrealizedPnl,
+            unrealizedPnlInr = openUnrealizedNetPnl,
             totalEquityInr = totalEquity,
             totalReturnPct = totalReturnPct,
             openPositionsCount = openTrades.size,

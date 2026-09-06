@@ -60,7 +60,9 @@ class MarketScannerEngine(
                 return null
             }
 
-            val candles = candleResp.body()!!
+            // CoinDCX returns candles in descending order (newest first).
+            // We sort by timestamp ascending so candles.last() is guaranteed to be the live, current candle.
+            val candles = candleResp.body()!!.sortedBy { it.time }
             if (candles.size < strategy.requiredCandleCount) {
                 return null
             }
@@ -77,7 +79,7 @@ class MarketScannerEngine(
             } else {
                 candleResp
             }
-            val htfCandles = if (htfResp?.isSuccessful == true) htfResp.body() else null
+            val htfCandles = if (htfResp?.isSuccessful == true) htfResp.body()?.sortedBy { it.time } else null
 
             val quality = TradeQualityScorer.evaluateQuality(
                 candles = candles,

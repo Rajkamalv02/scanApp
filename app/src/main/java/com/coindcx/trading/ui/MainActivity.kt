@@ -24,6 +24,7 @@ import com.coindcx.trading.data.db.entities.OrderEntity
 import com.coindcx.trading.data.db.entities.SystemLogEntity
 import com.coindcx.trading.data.db.entities.TradeEntity
 import com.coindcx.trading.databinding.ActivityMainBinding
+import com.coindcx.trading.databinding.DialogClosedTradeDetailBinding
 import com.coindcx.trading.databinding.ItemActivePositionBinding
 import com.coindcx.trading.databinding.ItemPaperClosedBinding
 import com.coindcx.trading.databinding.ItemPaperHoldingBinding
@@ -37,6 +38,7 @@ import com.coindcx.trading.engine.currency.CurrencyConverter
 import com.coindcx.trading.engine.scanner.MarketOpportunity
 import com.coindcx.trading.engine.scanner.MarketScanState
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
+import com.coindcx.trading.engine.paper.PaperAccountManager
 import com.coindcx.trading.service.TradingForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -52,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private val configRepo by lazy { TradingConfigRepository.getInstance(this) }
     private val currencyConverter by lazy { CurrencyConverter(ApiClient.apiService) }
     private val allocationEngine by lazy { AllocationEngine() }
+    private val paperAccountManager by lazy { PaperAccountManager(this, db) }
 
     private var isUserSwitchingMode = true
     private var currentPortfolioTab = 0 // 0 = Holding, 1 = Pending, 2 = Closed
@@ -750,7 +753,7 @@ class MainActivity : AppCompatActivity() {
 
                     val pnl = trade.unrealizedPnl ?: 0.0
                     val roi = trade.roiPercent ?: 0.0
-                    itemBinding.tvHoldingPnl.text = "%+₹%.2f (%+.1f%%)".format(pnl, roi)
+                    itemBinding.tvHoldingPnl.text = formatRupeePnl(pnl, roi)
                     itemBinding.tvHoldingPnl.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
 
                     val slText = if (trade.stopLoss != null) "$%.2f".format(trade.stopLoss) else "None"
@@ -807,38 +810,46 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 for (trade in cachedClosedTrades) {
-                    val itemBinding = ItemPaperClosedBinding.inflate(inflater, container, false)
-                    val symbol = trade.pair.removePrefix("B-").removeSuffix("_USDT")
-                    itemBinding.tvClosedPair.text = "$symbol Futures"
-                    itemBinding.tvClosedSide.text = trade.side
-                    val isLong = trade.side.equals("LONG", ignoreCase = true)
-                    itemBinding.tvClosedSide.setTextColor(getColor(if (isLong) R.color.accent_green else R.color.accent_red))
+                    try {
+                        val itemBinding = ItemPaperClosedBinding.inflate(inflater, container, false)
+                        val symbol = trade.pair.removePrefix("B-").removeSuffix("_USDT")
+                        itemBinding.tvClosedPair.text = "$symbol Futures"
+                        itemBinding.tvClosedSide.text = trade.side
+                        val isLong = trade.side.equals("LONG", ignoreCase = true)
+                        itemBinding.tvClosedSide.setTextColor(getColor(if (isLong) R.color.accent_green else R.color.accent_red))
 
-                    val result = trade.tradeResult ?: if ((trade.realizedPnl ?: 0.0) >= 0) "WIN" else "LOSS"
-                    itemBinding.tvClosedResultBadge.text = result
-                    when (result) {
-                        "WIN" -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_green))
-                        "LOSS" -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_red))
-                        else -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_amber))
+                        val result = trade.tradeResult ?: if ((trade.realizedPnl ?: 0.0) >= 0) "WIN" else "LOSS"
+                        itemBinding.tvClosedResultBadge.text = result
+                        when (result) {
+                            "WIN" -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_green))
+                            "LOSS" -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_red))
+                            else -> itemBinding.tvClosedResultBadge.setTextColor(getColor(R.color.accent_amber))
+                        }
+
+                        val pnl = trade.realizedPnl ?: 0.0
+                        val roi = trade.roiPercent ?: 0.0
+                        itemBinding.tvClosedPnl.text = formatRupeePnl(pnl, roi)
+                        itemBinding.tvClosedPnl.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
+
+                        val exitPrice = trade.exitPrice ?: trade.entryPrice
+                        itemBinding.tvClosedPrices.text = "$%.2f → $%.2f".format(trade.entryPrice, exitPrice)
+
+                        val durSec = if (trade.durationMillis != null) trade.durationMillis / 1000 else 0
+                        val durMins = durSec / 60
+                        val durSecRem = durSec % 60
+                        itemBinding.tvClosedDuration.text = "Duration: %dm %02ds".format(durMins, durSecRem)
+
+                        itemBinding.tvClosedExitReason.text = "Reason: ${trade.exitReason ?: "Closed"}"
+                        itemBinding.tvClosedFees.text = "Fees: ₹%.2f".format(trade.fees + trade.fundingFees)
+
+                        itemBinding.root.setOnClickListener {
+                            showClosedTradeDetailDialog(trade)
+                        }
+
+                        container.addView(itemBinding.root)
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "Error rendering closed trade item: ${trade.id}", e)
                     }
-
-                    val pnl = trade.realizedPnl ?: 0.0
-                    val roi = trade.roiPercent ?: 0.0
-                    itemBinding.tvClosedPnl.text = "%+₹%.2f (%+.1f%%)".format(pnl, roi)
-                    itemBinding.tvClosedPnl.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
-
-                    val exitPrice = trade.exitPrice ?: trade.entryPrice
-                    itemBinding.tvClosedPrices.text = "$%.2f → $%.2f".format(trade.entryPrice, exitPrice)
-
-                    val durSec = if (trade.durationMillis != null) trade.durationMillis / 1000 else 0
-                    val durMins = durSec / 60
-                    val durSecRem = durSec % 60
-                    itemBinding.tvClosedDuration.text = "Duration: %dm %02ds".format(durMins, durSecRem)
-
-                    itemBinding.tvClosedExitReason.text = "Reason: ${trade.exitReason ?: "Closed"}"
-                    itemBinding.tvClosedFees.text = "Fees: ₹%.2f".format(trade.fees + trade.fundingFees)
-
-                    container.addView(itemBinding.root)
                 }
             }
         }
@@ -1056,6 +1067,104 @@ class MainActivity : AppCompatActivity() {
             try {
                 startActivity(intent)
             } catch (_: Exception) {}
+        }
+    }
+
+    private fun formatRupeePnl(pnl: Double, roi: Double): String {
+        val sign = if (pnl >= 0) "+₹" else "-₹"
+        return "%s%.2f (%+.1f%%)".format(sign, kotlin.math.abs(pnl), roi)
+    }
+
+    private fun showClosedTradeDetailDialog(trade: TradeEntity) {
+        try {
+            val dialogBinding = DialogClosedTradeDetailBinding.inflate(layoutInflater)
+            val dialog = AlertDialog.Builder(this)
+                .setView(dialogBinding.root)
+                .create()
+
+            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+            // Header & Identifiers
+            dialogBinding.tvDetailPair.text = trade.pair
+            dialogBinding.tvDetailSide.text = trade.side
+            val isLong = trade.side.equals("LONG", ignoreCase = true)
+            dialogBinding.tvDetailSide.setTextColor(getColor(if (isLong) R.color.accent_green else R.color.accent_red))
+
+            val result = trade.tradeResult ?: if ((trade.realizedPnl ?: 0.0) >= 0) "WIN" else "LOSS"
+            dialogBinding.tvDetailResultBadge.text = result
+            when (result) {
+                "WIN" -> dialogBinding.tvDetailResultBadge.setTextColor(getColor(R.color.accent_green))
+                "LOSS" -> dialogBinding.tvDetailResultBadge.setTextColor(getColor(R.color.accent_red))
+                else -> dialogBinding.tvDetailResultBadge.setTextColor(getColor(R.color.accent_amber))
+            }
+
+            val shortOrderId = if (trade.clientOrderId.length > 8) trade.clientOrderId.takeLast(8) else trade.clientOrderId
+            dialogBinding.tvDetailTradeId.text = "Trade ID: #${trade.id} ($shortOrderId)"
+
+            // Net Realized PnL & ROI
+            val netPnl = trade.realizedPnl ?: 0.0
+            val netSign = if (netPnl >= 0) "+₹" else "-₹"
+            dialogBinding.tvDetailNetPnl.text = "%s%.2f".format(netSign, kotlin.math.abs(netPnl))
+            dialogBinding.tvDetailNetPnl.setTextColor(getColor(if (netPnl >= 0) R.color.accent_green else R.color.accent_red))
+
+            val roi = trade.roiPercent ?: 0.0
+            val startingCapital = paperAccountManager.getStartingBalanceInr().coerceAtLeast(1.0)
+            val accountReturn = (netPnl / startingCapital) * 100.0
+            dialogBinding.tvDetailRoi.text = "Position ROI: %+.2f%% | Account Impact: %+.2f%%".format(roi, accountReturn)
+            dialogBinding.tvDetailRoi.setTextColor(getColor(if (netPnl >= 0) R.color.accent_green else R.color.accent_red))
+
+            // Strategy & Timing
+            dialogBinding.tvDetailStrategy.text = trade.strategyName.ifBlank { "EMA Crossover" }
+            dialogBinding.tvDetailTimeframe.text = trade.timeframe.ifBlank { "15m" }
+
+            val sdf = java.text.SimpleDateFormat("dd MMM, HH:mm:ss", java.util.Locale.getDefault())
+            val signalTime = if (trade.signalPrice > 0) (trade.entryTime - 5000).coerceAtLeast(0) else trade.entryTime
+            dialogBinding.tvDetailSignalTime.text = sdf.format(java.util.Date(signalTime))
+            dialogBinding.tvDetailEntryTime.text = sdf.format(java.util.Date(trade.entryTime))
+            dialogBinding.tvDetailExitTime.text = if (trade.exitTime != null && trade.exitTime > 0) sdf.format(java.util.Date(trade.exitTime)) else "--"
+
+            val durMillis = trade.durationMillis ?: if (trade.exitTime != null) (trade.exitTime - trade.entryTime).coerceAtLeast(0) else 0L
+            val durSec = durMillis / 1000
+            val durMins = durSec / 60
+            val durSecRem = durSec % 60
+            dialogBinding.tvDetailDuration.text = "%dm %02ds".format(durMins, durSecRem)
+
+            dialogBinding.tvDetailExitReason.text = trade.exitReason ?: "Closed"
+
+            // Pricing & Slippage
+            val sigPrice = if (trade.signalPrice > 0) trade.signalPrice else trade.entryPrice
+            dialogBinding.tvDetailSignalPrice.text = "$%.4f".format(sigPrice)
+            dialogBinding.tvDetailEntryPrice.text = "$%.4f".format(trade.entryPrice)
+            val exitPrice = trade.exitPrice ?: trade.currentPrice ?: trade.entryPrice
+            dialogBinding.tvDetailExitPrice.text = "$%.4f".format(exitPrice)
+            dialogBinding.tvDetailSlippage.text = "%.2f%% per fill".format(trade.slippageRate * 100.0)
+
+            // Position & Margin
+            val baseSymbol = trade.pair.removePrefix("B-").removeSuffix("_USDT")
+            dialogBinding.tvDetailQuantity.text = "%.4f %s".format(trade.quantity, baseSymbol)
+            dialogBinding.tvDetailLeverage.text = "${trade.leverage}x (Simulated Isolated)"
+            dialogBinding.tvDetailMargin.text = "₹%.2f".format(trade.allocatedMarginInr)
+            val notional = if (trade.notionalValueInr > 0) trade.notionalValueInr else trade.allocatedMarginInr * trade.leverage
+            dialogBinding.tvDetailNotional.text = "₹%.2f".format(notional)
+
+            // Financial Breakdown
+            val grossPnl = trade.grossPnl ?: (netPnl + trade.fees + trade.fundingFees)
+            val grossSign = if (grossPnl >= 0) "+₹" else "-₹"
+            dialogBinding.tvDetailGrossPnl.text = "%s%.2f".format(grossSign, kotlin.math.abs(grossPnl))
+            dialogBinding.tvDetailGrossPnl.setTextColor(getColor(if (grossPnl >= 0) R.color.accent_green else R.color.accent_red))
+
+            dialogBinding.tvDetailFees.text = "-₹%.2f".format(trade.fees)
+            dialogBinding.tvDetailFundingFees.text = "₹%.2f".format(trade.fundingFees)
+            dialogBinding.tvDetailAccountReturn.text = "%+.2f%%".format(accountReturn)
+            dialogBinding.tvDetailAccountReturn.setTextColor(getColor(if (accountReturn >= 0) R.color.accent_green else R.color.accent_red))
+
+            dialogBinding.btnDetailClose.setOnClickListener { dialog.dismiss() }
+            dialogBinding.btnDetailDismiss.setOnClickListener { dialog.dismiss() }
+
+            dialog.show()
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to show trade detail dialog", e)
+            Toast.makeText(this, "Unable to load trade details: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 }

@@ -161,8 +161,7 @@ class PaperExecutionEngine(
             currentPrice * (1.0 - PaperPositionManager.SLIPPAGE_RATE)
         }
 
-        val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, fillPrice)
-        val quantity = rawQty.coerceAtLeast(0.001)
+        val quantity = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, fillPrice)
 
         val notionalInr = marginInr * leverage
         val entryFeeInr = notionalInr * PaperPositionManager.TAKER_FEE_RATE

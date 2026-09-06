@@ -26,15 +26,16 @@ class RsiMeanReversionStrategy(
             return Signal(SignalAction.HOLD, reason = "Insufficient candle history (${candles.size}/$requiredCandleCount)", confidenceScore = 0.0)
         }
 
-        val closePrices = candles.map { it.close }
+        val sortedCandles = if (candles.size >= 2 && candles[0].time > candles[1].time) candles.sortedBy { it.time } else candles
+        val closePrices = sortedCandles.map { it.close }
         val rsi = TechnicalIndicators.calculateRsi(closePrices, rsiPeriod)
         val currentPrice = closePrices.last()
-        val latestCandle = candles.last()
-        val prevCandle = candles[candles.size - 2]
-        val atr = TechnicalIndicators.calculateAtr(candles, 14)
+        val latestCandle = sortedCandles.last()
+        val prevCandle = sortedCandles[sortedCandles.size - 2]
+        val atr = TechnicalIndicators.calculateAtr(sortedCandles, 14)
 
         // Volume momentum
-        val avgVolume = candles.takeLast(20).map { it.volume }.average()
+        val avgVolume = sortedCandles.takeLast(20).map { it.volume }.average()
         val isVolumeSurge = latestCandle.volume >= avgVolume * 1.15
 
         // Exit management for open positions
