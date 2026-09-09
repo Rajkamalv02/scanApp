@@ -97,6 +97,40 @@ object TechnicalIndicators {
     }
 
     /**
+     * Rolling Average True Range (ATR) series aligned 1-to-1 with input candles.
+     * Guarantees that historical zone evaluation uses contemporaneous volatility at bar t.
+     */
+    fun calculateAtrSeries(candles: List<MarketCandle>, period: Int = 14): List<Double> {
+        if (candles.isEmpty()) return emptyList()
+        val result = ArrayList<Double>(candles.size)
+
+        var prevClose = candles[0].close
+        val trList = ArrayList<Double>(candles.size)
+        trList.add(candles[0].high - candles[0].low)
+
+        for (i in 1 until candles.size) {
+            val c = candles[i]
+            val tr = max(c.high - c.low, max(abs(c.high - prevClose), abs(c.low - prevClose)))
+            trList.add(tr)
+            prevClose = c.close
+        }
+
+        var runningAtr = trList[0]
+        result.add(runningAtr)
+
+        for (i in 1 until candles.size) {
+            if (i < period) {
+                runningAtr = (runningAtr * i + trList[i]) / (i + 1)
+            } else {
+                runningAtr = (runningAtr * (period - 1) + trList[i]) / period
+            }
+            result.add(runningAtr)
+        }
+
+        return result
+    }
+
+    /**
      * Average Directional Index (ADX) using Wilder's exact smoothing.
      * Evaluates true directional movement (+DM, -DM mutual exclusivity) and trend strength.
      * Returns latest ADX value (0 to 100).
@@ -165,4 +199,48 @@ object TechnicalIndicators {
 
         return adx
     }
+
+    /**
+     * Moving Average Convergence Divergence (MACD)
+     * Computes MACD line (Fast EMA - Slow EMA), Signal line (EMA of MACD), and Histogram.
+     */
+    fun calculateMacd(
+        prices: List<Double>,
+        fastPeriod: Int = 12,
+        slowPeriod: Int = 26,
+        signalPeriod: Int = 9
+    ): List<MacdPoint> {
+        if (prices.size < slowPeriod + signalPeriod) return emptyList()
+
+        val fastEma = calculateEma(prices, fastPeriod)
+        val slowEma = calculateEma(prices, slowPeriod)
+
+        if (fastEma.isEmpty() || slowEma.isEmpty()) return emptyList()
+
+        val offset = fastEma.size - slowEma.size
+        val macdLine = ArrayList<Double>(slowEma.size)
+        for (i in slowEma.indices) {
+            macdLine.add(fastEma[i + offset] - slowEma[i])
+        }
+
+        val signalEma = calculateEma(macdLine, signalPeriod)
+        if (signalEma.isEmpty()) return emptyList()
+
+        val signalOffset = macdLine.size - signalEma.size
+        val result = ArrayList<MacdPoint>(signalEma.size)
+        for (i in signalEma.indices) {
+            val macd = macdLine[i + signalOffset]
+            val signal = signalEma[i]
+            val hist = macd - signal
+            result.add(MacdPoint(macd = macd, signal = signal, histogram = hist))
+        }
+
+        return result
+    }
 }
+
+data class MacdPoint(
+    val macd: Double,
+    val signal: Double,
+    val histogram: Double
+)
