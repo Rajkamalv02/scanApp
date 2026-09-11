@@ -326,6 +326,19 @@ class TradingForegroundService : Service() {
             var inMemoryAvailableBalance = initialBalanceInr
             val audits = mutableListOf<com.coindcx.trading.engine.scanner.TradeExecutionAudit>()
 
+            // Evaluate Bitcoin 1h Macro Trend (EMA 50) for portfolio regime gating
+            val btcMacroBullish: Boolean? = try {
+                val btcHtfResp = ApiClient.apiService.getCandles("B-BTC_USDT", "1h")
+                if (btcHtfResp.isSuccessful && !btcHtfResp.body().isNullOrEmpty()) {
+                    val btcCandles = btcHtfResp.body()!!.sortedBy { it.time }
+                    val btcCloses = btcCandles.map { it.close }
+                    val btcEma50 = com.coindcx.trading.engine.indicators.TechnicalIndicators.calculateEma(btcCloses, 50)
+                    if (btcEma50.isNotEmpty()) {
+                        btcCloses.last() >= btcEma50.last()
+                    } else null
+                } else null
+            } catch (_: Exception) { null }
+
             for (opp in rankedTop5) {
                 // Signal Action Check: Must be actionable entry
                 if (!opp.isBuy && !opp.isSell) {
@@ -355,25 +368,26 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
-                // Gate 1: Quality Score Rubric Gate (Reject < 70)
-                if (opp.qualityScore < 70) {
+                // Gate 1: Quality Score Rubric Gate (Must be approved by TradeQualityScorer)
+                if (!opp.isApproved) {
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
                             pair = opp.pair,
                             action = opp.actionLabel,
                             status = com.coindcx.trading.engine.scanner.AuditStatus.REJECTED_LOW_QUALITY,
-                            reason = "Rejected — Quality Score ${opp.qualityScore}/100 < 70 (${opp.qualityCategory}). ${opp.rejectionReason ?: "Insufficient confluence"}"
+                            reason = "Rejected — Quality Score ${opp.qualityScore}/100 (${opp.qualityCategory}). ${opp.rejectionReason ?: "Insufficient confluence"}"
                         )
                     )
                     continue
                 }
 
-                // Gate 2: Portfolio Exposure & BTC Correlation Check (Max 3 total, Max 2 Long/Short, No 2 alt Longs without BTC)
+                // Gate 2: Portfolio Exposure & Macro Regime BTC Gate
                 val portfolioCheck = riskManager.checkPortfolioAndCorrelation(
                     candidatePair = opp.pair,
                     isBuy = opp.isBuy,
-                    activePositions = inMemoryOpenPositions
+                    activePositions = inMemoryOpenPositions,
+                    btcMacroTrendIsBullish = btcMacroBullish
                 )
                 if (portfolioCheck is RiskCheckResult.Rejected) {
                     audits.add(

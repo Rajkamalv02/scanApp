@@ -1,6 +1,8 @@
 package com.coindcx.trading.engine
 
 import android.content.Context
+import com.coindcx.trading.engine.strategies.SupplyDemandBidirectionalStrategy
+import com.coindcx.trading.engine.strategies.SupplyDemandEngulfingMacdLongStrategy
 import com.coindcx.trading.engine.strategies.SupplyDemandEngulfingMacdStrategy
 
 object StrategyRegistry {
@@ -8,8 +10,10 @@ object StrategyRegistry {
     private const val PREFS_NAME = "trading_strategy_prefs"
     private const val KEY_ACTIVE_STRATEGY_ID = "active_strategy_id"
 
-    // Focused exclusively on the institutional Short Trading Strategy
+    // Institutional Strategies: Two-Way Bidirectional by default, with discrete Long & Short options
     val availableStrategies: List<Strategy> = listOf(
+        SupplyDemandBidirectionalStrategy(),
+        SupplyDemandEngulfingMacdLongStrategy(),
         SupplyDemandEngulfingMacdStrategy()
     )
 

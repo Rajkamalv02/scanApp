@@ -27,7 +27,9 @@ data class MarketOpportunity(
     val qualityCategory: QualityCategory = QualityCategory.REJECT,
     val netRiskRewardRatio: Double = 0.0,
     val adxValue: Double = 0.0,
-    val rejectionReason: String? = null
+    val rejectionReason: String? = null,
+    val isApproved: Boolean = false,
+    val htfAlignment: HtfAlignment = HtfAlignment.NEUTRAL
 ) {
     val isBuy: Boolean get() = signal.action == SignalAction.ENTER_LONG
     val isSell: Boolean get() = signal.action == SignalAction.ENTER_SHORT

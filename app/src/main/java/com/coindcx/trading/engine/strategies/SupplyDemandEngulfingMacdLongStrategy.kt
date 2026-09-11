@@ -11,11 +11,11 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Institutional Short Trading Strategy
- * Confluence: Supply & Demand Zones + Bearish Engulfing Reversal + MACD Momentum Confirmation.
- * Pure, deterministic strategy with zero look-ahead bias and mathematical risk management.
+ * Institutional Long Trading Strategy
+ * Confluence: Demand Zones + Bullish Engulfing Reversal + Contemporaneous MACD Momentum Confirmation.
+ * Pure, deterministic strategy with zero look-ahead bias, fee-adjusted Net R:R, and structural supply clearance.
  */
-class SupplyDemandEngulfingMacdStrategy(
+class SupplyDemandEngulfingMacdLongStrategy(
     private val fastMacd: Int = 12,
     private val slowMacd: Int = 26,
     private val signalMacd: Int = 9,
@@ -27,10 +27,10 @@ class SupplyDemandEngulfingMacdStrategy(
     private val maxZoneAge: Int = 300
 ) : Strategy {
 
-    override val id: String = "supply_demand_engulfing_macd"
-    override val name: String = "Supply & Demand Short"
-    override val description: String = "Institutional short strategy combining Supply Zone rejections, Bearish Engulfing candlestick patterns, and MACD bearish momentum confirmation with strict demand zone clearance."
-    override val parametersSummary: String = "MACD: $fastMacd/$slowMacd/$signalMacd | ADX Min: $adxMin | Trend: ${emaTrendPeriod}EMA | SL: Supply High + 0.3x ATR"
+    override val id: String = "supply_demand_engulfing_macd_long"
+    override val name: String = "Supply & Demand Long"
+    override val description: String = "Institutional long strategy combining Demand Zone bounces, Bullish Engulfing candlestick patterns, and MACD bullish momentum confirmation with strict supply zone clearance."
+    override val parametersSummary: String = "MACD: $fastMacd/$slowMacd/$signalMacd | ADX Min: $adxMin | Trend: ${emaTrendPeriod}EMA | SL: Demand Low - 0.3x ATR"
     override val requiredCandleCount: Int = 215
     override val defaultTimeframe: String = "15m"
 
@@ -88,31 +88,31 @@ class SupplyDemandEngulfingMacdStrategy(
         val (supplyZones, demandZones) = detectZones(sortedCandles, atrSeries)
 
         // 3. Active Position Management (Exit rules)
-        if (activePosition != null && activePosition.isOpen && activePosition.isShort) {
-            // A. Target Check: Price reaching nearest active Demand Zone top
-            val nearestDemand = findNearestDemandBelow(demandZones, currentPrice)
-            if (nearestDemand != null && currentCandle.low <= (nearestDemand.high + 0.1 * atr)) {
+        if (activePosition != null && activePosition.isOpen && !activePosition.isShort) {
+            // A. Target Check: Price reaching nearest active Supply Zone bottom
+            val nearestSupply = findNearestSupplyAbove(supplyZones, currentPrice)
+            if (nearestSupply != null && currentCandle.high >= (nearestSupply.low - 0.1 * atr)) {
                 return Signal(
                     action = SignalAction.EXIT,
-                    reason = "Demand Zone reached (${String.format("%.2f", nearestDemand.high)}). Target 1 filled.",
+                    reason = "Supply Zone reached (${String.format("%.2f", nearestSupply.low)}). Target 1 filled.",
                     confidenceScore = 90.0
                 )
             }
 
-            // B. Momentum Invalidation: Bullish MACD crossover exit
+            // B. Momentum Invalidation: Bearish MACD crossover exit
             val latestMacd = macdPoints.last()
             val prevMacd = macdPoints[macdPoints.size - 2]
-            if (prevMacd.histogram <= 0.0 && latestMacd.histogram > 0.0) {
+            if (prevMacd.histogram >= 0.0 && latestMacd.histogram < 0.0) {
                 return Signal(
                     action = SignalAction.EXIT,
-                    reason = "Bullish MACD momentum reversal exit",
+                    reason = "Bearish MACD momentum reversal exit",
                     confidenceScore = 85.0
                 )
             }
 
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "Active Short running; Supply zone structure intact",
+                reason = "Active Long running; Demand zone structure intact",
                 confidenceScore = 60.0
             )
         }
@@ -129,72 +129,58 @@ class SupplyDemandEngulfingMacdStrategy(
         // 5. Dual Trend Regime Filter
         val currEma200 = ema200List.last()
         val prevEma200 = ema200List[ema200List.size - 6]
-        val isTrendContinuation = currentPrice < currEma200 && currEma200 <= prevEma200
-        val isExhaustionTop = currentPrice >= currEma200 && (currentPrice - currEma200) >= (2.5 * atr)
+        val isTrendContinuation = currentPrice > currEma200 && currEma200 >= prevEma200
+        val isExhaustionBottom = currentPrice <= currEma200 && (currEma200 - currentPrice) >= (2.5 * atr)
 
-        if (!isTrendContinuation && !isExhaustionTop) {
+        if (!isTrendContinuation && !isExhaustionBottom) {
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "Trend filter: Not in downward trend continuation nor 2.5x ATR exhaustion top",
+                reason = "Trend filter: Not in upward trend continuation nor 2.5x ATR exhaustion bottom",
                 confidenceScore = 30.0
             )
         }
 
-        // 6. Direct Rejection Execution: Check if the latest completed candle is a Bearish Engulfing pattern
-        val engulfCandle = currentCandle
+        // 6. Signal Candle Trigger: Bullish Engulfing
         val prevCandle = sortedCandles[lastIndex - 1]
-
-        if (!isValidBearishEngulfing(engulfCandle, prevCandle, atr)) {
+        val isEngulfing = isValidBullishEngulfing(currentCandle, prevCandle, atr)
+        if (!isEngulfing) {
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "No valid bearish engulfing pattern on latest completed candle",
+                reason = "No bullish engulfing reversal candle detected at bar close",
+                confidenceScore = 40.0
+            )
+        }
+
+        val activeDemand = findDemandZoneProbed(demandZones, currentCandle)
+        if (activeDemand == null) {
+            return Signal(
+                action = SignalAction.HOLD,
+                reason = "Bullish engulfing candle did not probe an active Demand Zone",
                 confidenceScore = 35.0
             )
         }
 
-        // Volume Participation Threshold (>= 1.0x VolSMA20)
-        if (lastIndex >= 20) {
-            val avgVol = sortedCandles.subList(lastIndex - 20, lastIndex).map { it.volume }.average()
-            if (engulfCandle.volume < 1.0 * avgVol) {
-                return Signal(
-                    action = SignalAction.HOLD,
-                    reason = "Engulfing volume (${String.format("%.1f", engulfCandle.volume)}) < 1.0x 20-bar volume SMA (${String.format("%.1f", avgVol)})",
-                    confidenceScore = 30.0
-                )
-            }
-        }
-
-        // Check if engulfing candle probed an active Supply Zone
-        val activeSupply = findSupplyZoneProbed(supplyZones, engulfCandle)
-        if (activeSupply == null) {
+        // Demand zone must be fresh (max 1 prior test)
+        if (activeDemand.touchCount > 1) {
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "Bearish engulfing candle did not probe an active Supply Zone",
-                confidenceScore = 35.0
-            )
-        }
-
-        // Supply zone must be fresh (max 1 prior test)
-        if (activeSupply.touchCount > 1) {
-            return Signal(
-                action = SignalAction.HOLD,
-                reason = "Supply zone mitigated (touch count ${activeSupply.touchCount} > 1)",
+                reason = "Demand zone mitigated (touch count ${activeDemand.touchCount} > 1)",
                 confidenceScore = 25.0
             )
         }
 
-        // Price Extension Gate: prevent shorting if price has already extended > 2.5 ATR from supply
-        if ((activeSupply.low - currentPrice) > (2.5 * atr)) {
+        // Price Extension Gate: prevent longing if price has already extended > 2.5 ATR above demand
+        if ((currentPrice - activeDemand.high) > (2.5 * atr)) {
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "Price extended > 2.5x ATR from supply zone low",
+                reason = "Price extended > 2.5x ATR from demand zone high",
                 confidenceScore = 20.0
             )
         }
 
-        // Stop loss placement: Zone High + ATR Buffer
-        val stopLoss = max(engulfCandle.high, activeSupply.high) + (0.3 * atr)
-        val riskDist = stopLoss - currentPrice
+        // Stop loss placement: Zone Low - ATR Buffer
+        val stopLoss = min(currentCandle.low, activeDemand.low) - (0.3 * atr)
+        val riskDist = currentPrice - stopLoss
 
         if (riskDist <= 0.0 || riskDist > (3.0 * atr)) {
             return Signal(
@@ -210,9 +196,9 @@ class SupplyDemandEngulfingMacdStrategy(
         val reqRewardDist = currentPrice * (reqTargetPct / 100.0)
         val rewardDist = max(2.0 * riskDist, reqRewardDist)
 
-        val nearestDemand = findNearestDemandBelow(demandZones, currentPrice)
-        if (nearestDemand != null) {
-            val potentialReward = currentPrice - (nearestDemand.high + 0.2 * atr)
+        val nearestSupply = findNearestSupplyAbove(supplyZones, currentPrice)
+        if (nearestSupply != null) {
+            val potentialReward = nearestSupply.low - (currentPrice + 0.2 * atr)
             if (potentialReward < rewardDist) {
                 return Signal(
                     action = SignalAction.HOLD,
@@ -222,47 +208,47 @@ class SupplyDemandEngulfingMacdStrategy(
             }
         }
 
-        val clearanceDistance = if (nearestDemand != null) currentPrice - nearestDemand.high else Double.MAX_VALUE
+        val clearanceDistance = if (nearestSupply != null) nearestSupply.low - currentPrice else Double.MAX_VALUE
         if (clearanceDistance < rewardDist || clearanceDistance < (1.0 * atr)) {
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "Vetoed: Too close to unmitigated Demand Zone at ${String.format("%.2f", nearestDemand?.high ?: 0.0)}",
+                reason = "Vetoed: Too close to unmitigated Supply Zone at ${String.format("%.2f", nearestSupply?.low ?: 0.0)}",
                 confidenceScore = 15.0
             )
         }
 
-        // 8. Contemporaneous Momentum Condition (Eliminates 0.30R delayed-crossover penalty)
+        // 8. Contemporaneous Momentum Condition
         val latestMacd = macdPoints.last()
         val prevMacd = macdPoints[macdPoints.size - 2]
-        val isExpandingDownward = latestMacd.histogram <= prevMacd.histogram
-        val isBearishState = latestMacd.macd < latestMacd.signal
+        val isExpandingUpward = latestMacd.histogram >= prevMacd.histogram
+        val isBullishState = latestMacd.macd > latestMacd.signal
 
-        if (!isExpandingDownward && !isBearishState) {
+        if (!isExpandingUpward && !isBullishState) {
             return Signal(
                 action = SignalAction.HOLD,
-                reason = "MACD momentum expanding upward at signal candle",
+                reason = "MACD momentum expanding downward at signal candle",
                 confidenceScore = 30.0
             )
         }
 
         // Structural Target calculation: fee-aware target
-        val target1 = currentPrice - rewardDist
+        val target1 = currentPrice + rewardDist
 
         // Confidence scoring
         var score = 65.0
-        if (activeSupply.touchCount == 0) score += 15.0 // Virgin supply zone
+        if (activeDemand.touchCount == 0) score += 15.0 // Virgin demand zone
         if (adx >= 25.0) score += 10.0                 // Strong directional movement
         if (isTrendContinuation) score += 10.0         // Macro trend alignment
         val finalScore = score.coerceIn(70.0, 98.0)
 
-        val branchTag = if (isTrendContinuation) "TREND_CONTINUATION" else "EXHAUSTION_TOP"
+        val branchTag = if (isTrendContinuation) "TREND_CONTINUATION" else "EXHAUSTION_BOTTOM"
 
         return Signal(
-            action = SignalAction.ENTER_SHORT,
+            action = SignalAction.ENTER_LONG,
             suggestedLeverage = defaultLeverage,
             stopLossPrice = stopLoss,
             takeProfitPrice = target1,
-            reason = "[$branchTag] Supply Zone Rejection (${String.format("%.2f", activeSupply.low)}-${String.format("%.2f", activeSupply.high)}) + Bearish Engulfing + Contemporaneous MACD",
+            reason = "[$branchTag] Demand Zone Bounce (${String.format("%.2f", activeDemand.low)}-${String.format("%.2f", activeDemand.high)}) + Bullish Engulfing + Contemporaneous MACD",
             confidenceScore = finalScore
         )
     }
@@ -289,12 +275,10 @@ class SupplyDemandEngulfingMacdStrategy(
             // Supply Zone (Displacement Drop)
             val isBearishDisplacement = (curr.open - curr.close >= 1.5 * localAtr) && (curr.volume >= 1.3 * avgVol)
             if (isBearishDisplacement) {
-                // Downside Structure-Break Filter (Hypothesis 2 vetted: K=5 bars low break)
                 if (i >= 5) {
                     val prior5Lows = (1..5).map { candles[i - it].low }
                     val minPriorLow = prior5Lows.minOrNull() ?: Double.MAX_VALUE
                     if (curr.close >= minPriorLow) {
-                        // Disqualified: Did not break previous 5-bar structural low
                         continue
                     }
                 }
@@ -313,7 +297,6 @@ class SupplyDemandEngulfingMacdStrategy(
                 if (baseBars.isNotEmpty()) {
                     val zHigh = baseBars.maxOf { it.high }
                     val zLow = baseBars.maxOf { max(it.open, it.close) }
-                    // Zone Width Quality Filter (Hypothesis 1 vetted: width <= 2.5 local ATR)
                     if ((zHigh - zLow) <= 2.5 * localAtr) {
                         supplyZones.add(Zone(zoneIdCounter++, ZoneType.SUPPLY, zHigh, zLow, i))
                     }
@@ -323,6 +306,14 @@ class SupplyDemandEngulfingMacdStrategy(
             // Demand Zone (Displacement Rally)
             val isBullishDisplacement = (curr.close - curr.open >= 1.5 * localAtr) && (curr.volume >= 1.3 * avgVol)
             if (isBullishDisplacement) {
+                if (i >= 5) {
+                    val prior5Highs = (1..5).map { candles[i - it].high }
+                    val maxPriorHigh = prior5Highs.maxOrNull() ?: 0.0
+                    if (curr.close <= maxPriorHigh) {
+                        continue
+                    }
+                }
+
                 val baseBars = ArrayList<MarketCandle>()
                 for (bIdx in 1..3) {
                     if (i - bIdx < 0) break
@@ -346,7 +337,7 @@ class SupplyDemandEngulfingMacdStrategy(
 
         val lastIndex = candles.size - 1
 
-        // Invalidation and touch tracking (with visit hysteresis)
+        // Invalidation and touch tracking
         for (sz in supplyZones) {
             var inVisit = false
             for (i in (sz.createdIndex + 1)..lastIndex) {
@@ -356,7 +347,6 @@ class SupplyDemandEngulfingMacdStrategy(
                     sz.invalidated = true
                     break
                 }
-                // Probed the zone
                 if (c.high >= sz.low && c.close <= sz.high) {
                     if (!inVisit) {
                         sz.touchCount++
@@ -400,31 +390,31 @@ class SupplyDemandEngulfingMacdStrategy(
         return Pair(activeSupply, activeDemand)
     }
 
-    private fun isValidBearishEngulfing(curr: MarketCandle, prev: MarketCandle, atr: Double): Boolean {
-        if (prev.close <= prev.open || curr.close >= curr.open) return false
+    private fun isValidBullishEngulfing(curr: MarketCandle, prev: MarketCandle, atr: Double): Boolean {
+        if (prev.close >= prev.open || curr.close <= curr.open) return false
 
-        val bodyEngulfed = (curr.open >= prev.close - 0.05 * atr) && (curr.close < prev.open)
+        val bodyEngulfed = (curr.open <= prev.close + 0.05 * atr) && (curr.close > prev.open)
         if (!bodyEngulfed) return false
 
         val currRange = curr.high - curr.low
-        val currBody = curr.open - curr.close
-        val lowerWick = curr.close - curr.low
+        val currBody = curr.close - curr.open
+        val upperWick = curr.high - curr.close
 
         if (currRange <= 0.0) return false
         if ((currBody / currRange) < 0.60) return false
-        if (lowerWick > (0.25 * currRange)) return false
+        if (upperWick > (0.25 * currRange)) return false
         if (currRange < (0.75 * atr) || currRange > (2.5 * atr)) return false
 
         return true
     }
 
-    private fun findSupplyZoneProbed(zones: List<Zone>, candle: MarketCandle): Zone? {
-        return zones.lastOrNull { sz ->
-            !sz.invalidated && (candle.high >= sz.low && candle.close <= sz.high)
+    private fun findDemandZoneProbed(zones: List<Zone>, candle: MarketCandle): Zone? {
+        return zones.lastOrNull { dz ->
+            !dz.invalidated && (candle.low <= dz.high && candle.close >= dz.low)
         }
     }
 
-    private fun findNearestDemandBelow(zones: List<Zone>, price: Double): Zone? {
-        return zones.filter { !it.invalidated && it.high < price }.maxByOrNull { it.high }
+    private fun findNearestSupplyAbove(zones: List<Zone>, price: Double): Zone? {
+        return zones.filter { !it.invalidated && it.low > price }.minByOrNull { it.low }
     }
 }

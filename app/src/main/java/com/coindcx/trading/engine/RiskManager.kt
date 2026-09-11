@@ -84,12 +84,15 @@ class RiskManager(
      * - Circuit breakers & cooldowns
      * - Total active positions <= 3
      * - Max 2 Longs, Max 2 Shorts
-     * - BTC Correlation Anchor: Never hold 2 altcoins Long simultaneously unless one is BTC
+     * - BTC Macro Regime Anchor:
+     *   - Cannot hold 2 altcoins Long simultaneously if BTC macro trend is bearish (or unverified without BTC Long).
+     *   - Cannot hold 2 altcoins Short simultaneously if BTC macro trend is bullish (or unverified without BTC Short).
      */
     fun checkPortfolioAndCorrelation(
         candidatePair: String,
         isBuy: Boolean,
-        activePositions: List<FuturesPosition>
+        activePositions: List<FuturesPosition>,
+        btcMacroTrendIsBullish: Boolean? = null
     ): RiskCheckResult {
         if (circuitBreakerTripped) {
             return RiskCheckResult.Rejected("Daily circuit breaker tripped (4% loss limit reached).")
@@ -110,24 +113,43 @@ class RiskManager(
 
         val openLongs = openPositions.filter { it.isLong }
         val openShorts = openPositions.filter { it.isShort }
+        val isCandidateBtc = candidatePair.contains("BTC", ignoreCase = true)
 
         if (isBuy) {
             if (openLongs.size >= settings.maxDirectionalPositions) {
                 return RiskCheckResult.Rejected("Max Long positions reached (${openLongs.size}/${settings.maxDirectionalPositions}).")
             }
 
-            val isCandidateBtc = candidatePair.contains("BTC", ignoreCase = true)
-            val hasBtcLong = openLongs.any { it.pair.contains("BTC", ignoreCase = true) }
             val altLongsCount = openLongs.count { !it.pair.contains("BTC", ignoreCase = true) }
 
-            // If candidate is an altcoin Long and we already hold an altcoin Long without BTC,
-            // opening this would result in 2 altcoins Long without BTC anchor!
-            if (!isCandidateBtc && altLongsCount >= 1 && !hasBtcLong) {
-                return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs simultaneously without B-BTC_USDT.")
+            // If candidate is an altcoin Long and we already hold an altcoin Long:
+            if (!isCandidateBtc && altLongsCount >= 1) {
+                if (btcMacroTrendIsBullish == false) {
+                    return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs while BTC 1h trend is bearish.")
+                } else if (btcMacroTrendIsBullish == null) {
+                    val hasBtcLong = openLongs.any { it.pair.contains("BTC", ignoreCase = true) }
+                    if (!hasBtcLong) {
+                        return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs simultaneously without B-BTC_USDT.")
+                    }
+                }
             }
         } else {
             if (openShorts.size >= settings.maxDirectionalPositions) {
                 return RiskCheckResult.Rejected("Max Short positions reached (${openShorts.size}/${settings.maxDirectionalPositions}).")
+            }
+
+            val altShortsCount = openShorts.count { !it.pair.contains("BTC", ignoreCase = true) }
+
+            // Symmetric check for Shorts:
+            if (!isCandidateBtc && altShortsCount >= 1) {
+                if (btcMacroTrendIsBullish == true) {
+                    return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Shorts while BTC 1h trend is bullish.")
+                } else if (btcMacroTrendIsBullish == null) {
+                    val hasBtcShort = openShorts.any { it.pair.contains("BTC", ignoreCase = true) }
+                    if (!hasBtcShort) {
+                        return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Shorts simultaneously without B-BTC_USDT.")
+                    }
+                }
             }
         }
 

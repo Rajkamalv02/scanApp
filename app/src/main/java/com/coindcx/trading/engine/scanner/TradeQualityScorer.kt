@@ -14,6 +14,12 @@ enum class QualityCategory {
     PRIME
 }
 
+enum class HtfAlignment {
+    ALIGNED,
+    NEUTRAL,
+    MISALIGNED
+}
+
 data class TradeQualityResult(
     val totalScore: Int, // strictly 0 to 100
     val category: QualityCategory,
@@ -26,7 +32,11 @@ data class TradeQualityResult(
     val rrScore: Int,
     val extensionScore: Int,
     val adxValue: Double,
-    val netRiskRewardRatio: Double
+    val netRiskRewardRatio: Double,
+    val htfAlignment: HtfAlignment = HtfAlignment.NEUTRAL,
+    val nonHtfScore: Int = 0,
+    val passedSecondaryGate: Boolean = true,
+    val relativeVolume: Double = 1.0
 )
 
 /**
@@ -43,23 +53,24 @@ object TradeQualityScorer {
         htfCandles: List<MarketCandle>?,
         signal: Signal,
         currentPrice: Double,
-        pair: String = ""
+        @Suppress("UNUSED_PARAMETER") pair: String = ""
     ): TradeQualityResult {
         val isBuy = signal.action == SignalAction.ENTER_LONG
         var fatalRejectionReason: String? = null
 
-        // 1. Higher-Timeframe (1h) 50 EMA Alignment (Max 25 pts, Floor -15 pts)
+        // 1. Higher-Timeframe (1h) 50 EMA Alignment (Tri-State: Aligned 25, Neutral 10, Misaligned 0)
         val htfPrices = htfCandles?.map { it.close } ?: candles.map { it.close }
         val htfEma50List = TechnicalIndicators.calculateEma(htfPrices, 50)
-        val htfScore = if (htfEma50List.isNotEmpty()) {
+        val (htfAlignment, htfScore) = if (htfEma50List.isNotEmpty()) {
             val htfEma50 = htfEma50List.last()
-            if (isBuy) {
-                if (currentPrice >= htfEma50) 25 else -15
+            val isAligned = if (isBuy) currentPrice >= htfEma50 else currentPrice <= htfEma50
+            if (isAligned) {
+                Pair(HtfAlignment.ALIGNED, 25)
             } else {
-                if (currentPrice <= htfEma50) 25 else -15
+                Pair(HtfAlignment.MISALIGNED, 0)
             }
         } else {
-            10 // Neutral fallback if not enough HTF bars
+            Pair(HtfAlignment.NEUTRAL, 10) // Neutral fallback if not enough HTF bars
         }
 
         // 2. Market Regime Strength (ADX 14) (Max 20 pts)
@@ -78,18 +89,19 @@ object TradeQualityScorer {
         }
 
         // 4. Volume Participation (Max 15 pts) - Gap-free
-        val volumeScore = if (candles.size >= 21) {
+        val (volumeScore, relVol) = if (candles.size >= 21) {
             val latestVol = candles.last().volume
             val avgVol20 = candles.dropLast(1).takeLast(20).map { it.volume }.average()
-            val relVol = if (avgVol20 > 0) latestVol / avgVol20 else 1.0
-            when {
-                relVol >= 1.5 -> 15
-                relVol >= 1.2 -> 10
-                relVol >= 1.0 -> 5
+            val ratio = if (avgVol20 > 0) latestVol / avgVol20 else 1.0
+            val pts = when {
+                ratio >= 1.5 -> 15
+                ratio >= 1.2 -> 10
+                ratio >= 1.0 -> 5
                 else -> 0
             }
+            Pair(pts, ratio)
         } else {
-            5
+            Pair(5, 1.0)
         }
 
         // 5. Fee-Adjusted Net Risk-to-Reward (Max 10 pts)
@@ -131,8 +143,29 @@ object TradeQualityScorer {
             5
         }
 
+        // Non-HTF Confluence Score (Max 75 pts)
+        val nonHtfScore = regimeScore + confluenceScore + volumeScore + rrScore + extensionScore
+
+        // Secondary gate strictly for MISALIGNED (counter-trend / exhaustion setups)
+        val passedSecondaryGate = when (htfAlignment) {
+            HtfAlignment.MISALIGNED -> {
+                // Requires elite non-HTF confluence >= 70/75 (93.3%), Net R:R >= 2.0, and RelVol >= 1.3x
+                val hasEliteScore = nonHtfScore >= 70
+                val hasHighRr = netRr >= 2.0
+                val hasExpansionVol = relVol >= 1.3
+                hasEliteScore && hasHighRr && hasExpansionVol
+            }
+            HtfAlignment.ALIGNED, HtfAlignment.NEUTRAL -> true
+        }
+
+        if (htfAlignment == HtfAlignment.MISALIGNED && !passedSecondaryGate) {
+            if (fatalRejectionReason == null) {
+                fatalRejectionReason = "Counter-trend setup rejected: Non-HTF confluence %d/75 (requires >=70), Net R:R %.2f (requires >=2.0), RelVol %.2fx (requires >=1.3x)".format(nonHtfScore, netRr, relVol)
+            }
+        }
+
         // Raw Total & Strict [0, 100] Clamping
-        val rawTotal = htfScore + regimeScore + confluenceScore + volumeScore + rrScore + extensionScore
+        val rawTotal = htfScore + nonHtfScore
         val clampedScore = rawTotal.coerceIn(0, 100)
 
         val category = when {
@@ -142,10 +175,11 @@ object TradeQualityScorer {
             else -> QualityCategory.REJECT
         }
 
-        val isApproved = clampedScore >= 70 && fatalRejectionReason == null
+        val meetsScoreThreshold = clampedScore >= 70
+        val isApproved = meetsScoreThreshold && passedSecondaryGate && fatalRejectionReason == null
         val rejectionReason = when {
             fatalRejectionReason != null -> fatalRejectionReason
-            clampedScore < 70 -> "Score %d/100 < 70 threshold".format(clampedScore)
+            !meetsScoreThreshold -> "Score %d/100 < 70 threshold".format(clampedScore)
             else -> null
         }
 
@@ -161,7 +195,11 @@ object TradeQualityScorer {
             rrScore = rrScore,
             extensionScore = extensionScore,
             adxValue = adx,
-            netRiskRewardRatio = netRr
+            netRiskRewardRatio = netRr,
+            htfAlignment = htfAlignment,
+            nonHtfScore = nonHtfScore,
+            passedSecondaryGate = passedSecondaryGate,
+            relativeVolume = relVol
         )
     }
 

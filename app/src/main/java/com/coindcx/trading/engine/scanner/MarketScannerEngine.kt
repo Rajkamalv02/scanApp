@@ -99,7 +99,9 @@ class MarketScannerEngine(
                 qualityCategory = quality.category,
                 netRiskRewardRatio = quality.netRiskRewardRatio,
                 adxValue = quality.adxValue,
-                rejectionReason = quality.rejectionReason
+                rejectionReason = quality.rejectionReason,
+                isApproved = quality.isApproved,
+                htfAlignment = quality.htfAlignment
             )
         } catch (_: Exception) {
             null

@@ -10,6 +10,7 @@ class OpportunityRanker {
         return opportunities
             .sortedWith(
                 compareByDescending<MarketOpportunity> { it.isEntry }
+                    .thenByDescending { it.isApproved }
                     .thenByDescending { it.qualityScore }
                     .thenByDescending { it.netRiskRewardRatio }
                     .thenByDescending { it.confidenceScore }

@@ -86,6 +86,135 @@ class ClosedTrade:
     symbol: str = "BTCUSDT"
 
 
+@dataclass
+class TradeQualityAssessment:
+    total_score: int
+    is_approved: bool
+    rejection_reason: Optional[str]
+    htf_alignment: str
+    non_htf_score: int
+    passed_secondary_gate: bool
+    relative_volume: float
+    net_rr: float
+
+
+class DownstreamTradeQualityScorer:
+    """
+    Python mirror of Kotlin TradeQualityScorer.kt for Short setups.
+    Evaluates candidates on the 0-100 matrix with Tri-State HTF and Secondary Gate.
+    """
+    @staticmethod
+    def evaluate(
+        is_buy: bool,
+        current_price: float,
+        stop_loss: float,
+        take_profit: float,
+        bars: List[Bar],
+        bar_idx: int,
+        adx: float,
+        strategy_confidence: float,
+        ema_20: float,
+        atr: float,
+        htf_ema_50: Optional[float]
+    ) -> TradeQualityAssessment:
+        fatal_rejection = None
+
+        # 1. HTF 50 EMA Alignment (ALIGNED: 25, NEUTRAL: 10, MISALIGNED: 0)
+        if htf_ema_50 is not None:
+            is_aligned = (current_price >= htf_ema_50) if is_buy else (current_price <= htf_ema_50)
+            if is_aligned:
+                htf_alignment = "ALIGNED"
+                htf_score = 25
+            else:
+                htf_alignment = "MISALIGNED"
+                htf_score = 0
+        else:
+            htf_alignment = "NEUTRAL"
+            htf_score = 10
+
+        # 2. ADX Market Regime Strength (Max 20 pts)
+        if adx >= 25.0:
+            regime_score = 20
+        elif adx >= 20.0:
+            regime_score = 12
+        else:
+            regime_score = 0
+
+        # 3. Strategy Confluence (Max 20 pts)
+        if strategy_confidence >= 75.0:
+            confluence_score = 20
+        elif strategy_confidence >= 60.0:
+            confluence_score = 10
+        else:
+            confluence_score = 0
+
+        # 4. Volume Participation (Max 15 pts)
+        if bar_idx >= 20:
+            vols = [b.volume for b in bars[bar_idx - 20:bar_idx]]
+            avg_vol20 = sum(vols) / len(vols)
+            rel_vol = bars[bar_idx].volume / avg_vol20 if avg_vol20 > 0 else 1.0
+            if rel_vol >= 1.5:
+                volume_score = 15
+            elif rel_vol >= 1.2:
+                volume_score = 10
+            elif rel_vol >= 1.0:
+                volume_score = 5
+            else:
+                volume_score = 0
+        else:
+            rel_vol = 1.0
+            volume_score = 5
+
+        # 5. Fee-Adjusted Net Risk-to-Reward (0.20% friction)
+        gross_target_pct = (abs(take_profit - current_price) / current_price) * 100.0
+        gross_risk_pct = (abs(current_price - stop_loss) / current_price) * 100.0
+        net_target_pct = max(0.0, gross_target_pct - 0.20)
+        net_risk_pct = gross_risk_pct + 0.20
+        net_rr = net_target_pct / net_risk_pct if net_risk_pct > 0 else 0.0
+
+        if net_rr < 1.5:
+            fatal_rejection = f"Net R:R {net_rr:.2f} < 1.5"
+            rr_score = 0
+        elif net_rr >= 2.0:
+            rr_score = 10
+        else:
+            rr_score = 6
+
+        # 6. Pullback Extension (dist to EMA 20 / ATR)
+        dist = abs(current_price - ema_20)
+        ratio = dist / atr if atr > 0 else 999.0
+        if ratio <= 1.2:
+            ext_score = 10
+        elif ratio <= 2.0:
+            ext_score = 5
+        else:
+            ext_score = 0
+
+        non_htf_score = regime_score + confluence_score + volume_score + rr_score + ext_score
+
+        # Secondary gate strictly for MISALIGNED:
+        if htf_alignment == "MISALIGNED":
+            passed_secondary_gate = (non_htf_score >= 70) and (net_rr >= 2.0) and (rel_vol >= 1.3)
+            if not passed_secondary_gate and fatal_rejection is None:
+                fatal_rejection = f"Secondary gate failed: non-HTF={non_htf_score}/75, net_rr={net_rr:.2f}, rel_vol={rel_vol:.2f}"
+        else:
+            passed_secondary_gate = True
+
+        total_score = min(100, max(0, htf_score + non_htf_score))
+        is_approved = (total_score >= 70) and passed_secondary_gate and (fatal_rejection is None)
+
+        return TradeQualityAssessment(
+            total_score=total_score,
+            is_approved=is_approved,
+            rejection_reason=fatal_rejection if not is_approved else None,
+            htf_alignment=htf_alignment,
+            non_htf_score=non_htf_score,
+            passed_secondary_gate=passed_secondary_gate,
+            relative_volume=rel_vol,
+            net_rr=net_rr
+        )
+
+
 class SystematicShortEngine:
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
@@ -120,9 +249,11 @@ class SystematicShortEngine:
         self.min_rr_ratio = cfg.get("min_rr_ratio", 0.0)                     # 0.0 (off) or 1.50
         self.cooldown_bars = cfg.get("cooldown_bars", 0)                     # 0 (off), 3, 5, 8
         self.max_extension_atr = cfg.get("max_extension_atr", 999.0)         # 999.0 (off) or 2.5
+        self.use_downstream_scorer = cfg.get("use_downstream_scorer", False)
 
         # Stateful indicator series
         self.atr_series: List[float] = []
+        self.ema_20_series: List[float] = []
         self.ema_200_series: List[float] = []
         self.ema_fast_series: List[float] = []
         self.ema_slow_series: List[float] = []
@@ -253,15 +384,46 @@ class SystematicShortEngine:
                         self.equity_curve.append(self.account_equity)
                         return  # REJECT ENTRY: Market structure reward is insufficient!
 
+                # Fee-aware gross target calculation to clear Net R:R >= 1.80
+                gross_risk_pct = (risk_dist / current_bar.close) * 100.0
+                req_target_pct = 1.80 * (gross_risk_pct + 0.20) + 0.20
+                req_reward_dist = current_bar.close * (req_target_pct / 100.0)
+                reward_dist = max(2.0 * risk_dist, req_reward_dist)
+                tp1 = current_bar.close - reward_dist
+
+                if self.use_downstream_scorer:
+                    strat_conf = 75.0
+                    if abs(current_bar.close - ema_200) <= 1.5 * atr: strat_conf += 5.0
+                    if adx >= 25.0: strat_conf += 5.0
+                    if is_trend_continuation: strat_conf += 10.0
+                    strat_conf = min(98.0, strat_conf)
+
+                    assessment = DownstreamTradeQualityScorer.evaluate(
+                        is_buy=False,
+                        current_price=current_bar.close,
+                        stop_loss=stop_loss,
+                        take_profit=tp1,
+                        bars=bars,
+                        bar_idx=bar_idx,
+                        adx=adx,
+                        strategy_confidence=strat_conf,
+                        ema_20=self.ema_20_series[bar_idx],
+                        atr=atr,
+                        htf_ema_50=ema_200
+                    )
+                    if not assessment.is_approved:
+                        self.equity_curve.append(self.account_equity)
+                        return
+
                 if 0 < risk_dist <= (3.0 * atr):
                     # Demand Clearance Filter
                     demand_dist = (current_bar.close - nearest_demand.high) if nearest_demand else 999999.0
-                    if demand_dist >= (1.5 * risk_dist) and demand_dist >= (1.0 * atr):
+                    if demand_dist >= reward_dist and demand_dist >= (1.0 * atr):
                         if self.execution_mode in ("DIRECT_REJECTION", "NO_MACD"):
-                            self._queue_short_order(stop_loss, nearest_demand, atr, active_supply)
+                            self._queue_short_order(stop_loss, nearest_demand, atr, active_supply, reward_dist)
                         elif self.execution_mode == "CONTEMPORANEOUS_MACD":
                             if (hist <= prev_hist) or (macd < signal):
-                                self._queue_short_order(stop_loss, nearest_demand, atr, active_supply)
+                                self._queue_short_order(stop_loss, nearest_demand, atr, active_supply, reward_dist)
                         else:  # "DELAYED_MACD_QUEUE"
                             cross_at_t = (prev_macd >= prev_signal and macd < signal)
                             p2_macd = self.macd_series[bar_idx - 2]
@@ -269,7 +431,7 @@ class SystematicShortEngine:
                             cross_at_t_minus_1 = (p2_macd >= p2_signal and prev_macd < prev_signal and macd < signal)
 
                             if (cross_at_t or cross_at_t_minus_1) and (hist < prev_hist and hist < 0):
-                                self._queue_short_order(stop_loss, nearest_demand, atr, active_supply)
+                                self._queue_short_order(stop_loss, nearest_demand, atr, active_supply, reward_dist)
                             else:
                                 self.zone_counter += 1
                                 self.pending_setups.append(PendingSetup(
@@ -306,6 +468,13 @@ class SystematicShortEngine:
         if len(self.vol_window) > 20:
             self.vol_window.pop(0)
         self.vol_sma_series.append(sum(self.vol_window) / len(self.vol_window))
+
+        # EMA 20
+        alpha_20 = 2.0 / 21.0
+        if idx == 0:
+            self.ema_20_series.append(curr.close)
+        else:
+            self.ema_20_series.append(alpha_20 * curr.close + (1.0 - alpha_20) * self.ema_20_series[-1])
 
         # EMA 200
         alpha_200 = 2.0 / (self.ema_trend_period + 1.0)
@@ -493,12 +662,13 @@ class SystematicShortEngine:
     # EXECUTION WITH GAP SLIPPAGE & LEVERAGE CAP
     # =========================================================================
     def _queue_short_order(self, stop_loss: float, nearest_demand: Optional[Zone],
-                           atr: float, supply_zone: Zone):
+                           atr: float, supply_zone: Zone, reward_dist: float = 0.0):
         self.next_order = {
             "stop_loss": stop_loss,
             "nearest_demand": nearest_demand,
             "atr": atr,
-            "supply_zone": supply_zone
+            "supply_zone": supply_zone,
+            "reward_dist": reward_dist
         }
 
     def _fill_order_on_open(self, bar: Bar):
@@ -519,7 +689,9 @@ class SystematicShortEngine:
         total_qty = min(raw_qty, max_qty)
 
         nearest_demand = order["nearest_demand"]
-        tp1 = max(actual_entry - (1.5 * risk_unit), nearest_demand.high + (0.2 * atr)) if nearest_demand else (actual_entry - 1.5 * risk_unit)
+        reward_dist = order.get("reward_dist", 0.0)
+        tp1_dist = reward_dist if reward_dist > 0 else (1.5 * risk_unit)
+        tp1 = actual_entry - tp1_dist
         tp2 = nearest_demand.low if nearest_demand else (actual_entry - 3.0 * risk_unit)
 
         self.position = Position(
@@ -997,6 +1169,10 @@ def run_ablation_study():
             "min_rr_ratio": 1.50,
             "max_extension_atr": 2.5,
             "cooldown_bars": 5
+        }),
+        ("12. Downstream Scorer Enabled (HTF + Secondary Gate)", {
+            "execution_mode": "DIRECT_REJECTION",
+            "use_downstream_scorer": True
         })
     ]
 
