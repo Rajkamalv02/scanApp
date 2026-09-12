@@ -5,6 +5,7 @@ import com.coindcx.trading.data.config.TradingConfig
 import com.coindcx.trading.engine.ExecutionEngine
 import com.coindcx.trading.engine.SignalAction
 import com.coindcx.trading.engine.Strategy
+import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -34,6 +35,8 @@ class MarketScannerEngine(
             config.selectedPairs.ifEmpty { liquidMarketWidePairs.take(5) }
         }
 
+        AppLogManager.scanner("Starting market scan cycle [${if (config.isMarketWideScan) "Market-Wide (${pairsToScan.size} pairs)" else "${pairsToScan.size} pairs"}] | Strategy: ${strategy.name} | TF: ${config.timeframe}")
+
         val concurrencySemaphore = Semaphore(2) // Max 2 concurrent network requests to prevent 429
 
         val deferredResults = pairsToScan.map { pair ->
@@ -45,7 +48,10 @@ class MarketScannerEngine(
             }
         }
 
-        deferredResults.awaitAll().filterNotNull()
+        val results = deferredResults.awaitAll().filterNotNull()
+        val actionable = results.count { it.signal.action != SignalAction.HOLD }
+        AppLogManager.scanner("Scan finished. Scanned ${pairsToScan.size} pairs -> ${results.size} snapshots evaluated, $actionable actionable signals found.")
+        results
     }
 
     private suspend fun scanSinglePair(
@@ -57,6 +63,8 @@ class MarketScannerEngine(
         return try {
             val candleResp = apiService.getCandles(pair, timeframe)
             if (!candleResp.isSuccessful || candleResp.body().isNullOrEmpty()) {
+                val err = if (!candleResp.isSuccessful) "HTTP ${candleResp.code()}: ${candleResp.message()}" else "Empty candle array"
+                AppLogManager.w("SCANNER", "[$pair] Failed fetching $timeframe candles: $err")
                 return null
             }
 
@@ -64,6 +72,7 @@ class MarketScannerEngine(
             // We sort by timestamp ascending so candles.last() is guaranteed to be the live, current candle.
             val candles = candleResp.body()!!.sortedBy { it.time }
             if (candles.size < strategy.requiredCandleCount) {
+                AppLogManager.w("SCANNER", "[$pair] Insufficient candles: ${candles.size}/${strategy.requiredCandleCount} required for ${strategy.name}")
                 return null
             }
 
@@ -73,9 +82,23 @@ class MarketScannerEngine(
 
             val signal = strategy.evaluate(candles, activePosition)
 
+            // Diagnostic trace for strategy evaluation
+            val diag = signal.diagnostics
+            if (signal.action != SignalAction.HOLD) {
+                AppLogManager.trade("STRATEGY", "[$pair] >>> SIGNAL GENERATED: ${signal.action} @ $currentPrice | SL: ${signal.stopLossPrice} | TP: ${signal.takeProfitPrice} | Confidence: ${signal.confidenceScore}% | Reason: ${signal.reason}")
+            } else {
+                val diagInfo = if (diag != null) "[Stage: ${diag.stage}, FailedFilter: ${diag.failedFilter ?: "None"}]" else ""
+                AppLogManager.d("STRATEGY", "[$pair] HOLD: ${signal.reason} $diagInfo")
+            }
+
             // Fetch Higher-Timeframe (1h) candles for macro trend alignment
             val htfResp = if (timeframe != "1h" && timeframe != "1d") {
-                try { apiService.getCandles(pair, "1h") } catch (_: Exception) { null }
+                try { 
+                    apiService.getCandles(pair, "1h") 
+                } catch (e: Exception) { 
+                    AppLogManager.w("SCANNER", "[$pair] Failed fetching 1h HTF candles: ${e.message}")
+                    null 
+                }
             } else {
                 candleResp
             }
@@ -88,6 +111,10 @@ class MarketScannerEngine(
                 currentPrice = currentPrice,
                 pair = pair
             )
+
+            if (signal.action != SignalAction.HOLD) {
+                AppLogManager.quality("[$pair] Quality Score: ${quality.totalScore}/100 (${quality.category}) | Net R:R: ${quality.netRiskRewardRatio} | HTF Align: ${quality.htfAlignment} | Approved: ${quality.isApproved} | Rejection: ${quality.rejectionReason ?: "None"}")
+            }
 
             MarketOpportunity(
                 pair = pair,
@@ -103,7 +130,8 @@ class MarketScannerEngine(
                 isApproved = quality.isApproved,
                 htfAlignment = quality.htfAlignment
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            AppLogManager.e("SCANNER", "[$pair] Unhandled exception during pair scan: ${e.message}", e)
             null
         }
     }

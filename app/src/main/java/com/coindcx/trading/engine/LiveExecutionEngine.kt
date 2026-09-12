@@ -3,6 +3,7 @@ package com.coindcx.trading.engine
 import com.coindcx.trading.data.api.CoinDCXApiService
 import com.coindcx.trading.data.api.models.FuturesPosition
 import com.coindcx.trading.engine.currency.CurrencyConverter
+import com.coindcx.trading.util.AppLogManager
 
 class LiveExecutionEngine(
     private val orderManager: OrderManager,
@@ -92,9 +93,18 @@ class LiveExecutionEngine(
         val quantity = rawQty.coerceAtLeast(0.001)
 
         return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, quantity, leverage)) {
-            is OrderResult.Success -> ExecutionResult.Success(res.orderId, "Live order placed: ${res.orderId} (Margin: ₹%.0f)".format(marginInr))
-            is OrderResult.Ambiguous -> ExecutionResult.Failed("Order ambiguous (${res.clientOrderId}): ${res.message}")
-            is OrderResult.Failed -> ExecutionResult.Failed("Live order failed: ${res.error}")
+            is OrderResult.Success -> {
+                AppLogManager.trade("LIVE_EXEC", "Placed live order: ${res.orderId} on $pair $side qty=$quantity @ $currentPrice (Margin: ₹%.0f)".format(marginInr))
+                ExecutionResult.Success(res.orderId, "Live order placed: ${res.orderId} (Margin: ₹%.0f)".format(marginInr))
+            }
+            is OrderResult.Ambiguous -> {
+                AppLogManager.w("LIVE_EXEC", "Order ambiguous (${res.clientOrderId}): ${res.message}")
+                ExecutionResult.Failed("Order ambiguous (${res.clientOrderId}): ${res.message}")
+            }
+            is OrderResult.Failed -> {
+                AppLogManager.e("LIVE_EXEC", "Live order failed on $pair: ${res.error}")
+                ExecutionResult.Failed("Live order failed: ${res.error}")
+            }
         }
     }
 

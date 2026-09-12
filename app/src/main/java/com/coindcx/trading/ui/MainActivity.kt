@@ -40,6 +40,7 @@ import com.coindcx.trading.engine.scanner.MarketScanState
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
 import com.coindcx.trading.engine.paper.PaperAccountManager
 import com.coindcx.trading.service.TradingForegroundService
+import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -74,6 +75,7 @@ class MainActivity : AppCompatActivity() {
         setupExecutionModeToggle()
         setupButtons()
         setupPaperAccountControls()
+        setupLogControls()
 
         observeMarketScanState()
         observePaperTrades()
@@ -1044,9 +1046,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupLogControls() {
+        binding.tvLogFilePath.text = AppLogManager.getLogFilePath()
+        binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
+
+        binding.cardLogFilePath.setOnClickListener {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("Log Path", AppLogManager.getLogFilePath())
+            clipboard.setPrimaryClip(clip)
+            Toast.makeText(this, "Log file path copied to clipboard!", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.btnExportLogs.setOnClickListener {
+            val shareIntent = AppLogManager.createShareIntent(this)
+            if (shareIntent != null) {
+                startActivity(Intent.createChooser(shareIntent, "Share trading_bot.log via"))
+            } else {
+                Toast.makeText(this, "Log file is empty or cannot be accessed.", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnClearLogs.setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("Clear Log File?")
+                .setMessage("This will erase all past entries in ${AppLogManager.getLogFilePath()}.\n\nAre you sure?")
+                .setPositiveButton("Clear Logs") { _, _ ->
+                    AppLogManager.clearLogs()
+                    binding.tvRecentLogs.text = "Logs cleared by user."
+                    binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
+                    Toast.makeText(this, "Log file cleared.", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
     private fun observeSystemLogs() {
         lifecycleScope.launch {
             db.systemLogDao().getRecentLogsFlow().collectLatest { logs ->
+                binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
                 if (logs.isNotEmpty()) {
                     val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
                     val logText = logs.take(15).joinToString("\n") {

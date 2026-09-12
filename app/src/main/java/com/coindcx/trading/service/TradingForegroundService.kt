@@ -20,6 +20,7 @@ import com.coindcx.trading.engine.scanner.MarketScannerEngine
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
 import com.coindcx.trading.engine.scanner.OpportunityRanker
 import com.coindcx.trading.ui.MainActivity
+import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.*
 
 class TradingForegroundService : Service() {
@@ -67,6 +68,7 @@ class TradingForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         db = AppDatabase.getInstance(applicationContext)
+        AppLogManager.init(applicationContext, db)
         configRepo = TradingConfigRepository.getInstance(applicationContext)
         currencyConverter = CurrencyConverter(ApiClient.apiService)
         orderManager = OrderManager(ApiClient.apiService, db.orderDao())
@@ -129,19 +131,13 @@ class TradingForegroundService : Service() {
                 countdownResetRequested = true
                 MarketScanState.setNextScanSecondsRemaining(0)
                 updateNotification("Bot Stopped", "Scanner & execution loop halted")
-                serviceScope.launch {
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "INFO", tag = "SERVICE", message = "Trading Bot Stopped by user.")
-                    )
-                }
+                AppLogManager.i("SERVICE", "Trading Bot Stopped by user.")
             }
             ACTION_SET_MODE -> {
                 val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
                 updateNotification("Bot Mode Changed ($modeLabel)", "Strategy: ${StrategyRegistry.activeStrategy.name}")
+                AppLogManager.i("MODE", "Switched execution mode to $modeLabel")
                 serviceScope.launch {
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "INFO", tag = "MODE", message = "Switched execution mode to $modeLabel")
-                    )
                     // Trigger refresh to align state with newly selected engine
                     val syncRes = executionEngine.refreshExchangeState()
                     if (syncRes.isSuccess) {
@@ -153,11 +149,7 @@ class TradingForegroundService : Service() {
                 val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
                 updateNotification("Strategy Updated", "${StrategyRegistry.activeStrategy.name} ($modeLabel)")
                 countdownResetRequested = true
-                serviceScope.launch {
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "INFO", tag = "STRATEGY", message = "Active strategy: ${StrategyRegistry.activeStrategy.name}")
-                    )
-                }
+                AppLogManager.i("STRATEGY", "Active strategy: ${StrategyRegistry.activeStrategy.name}")
             }
             ACTION_CLOSE_POSITION -> {
                 val pairToClose = intent.getStringExtra(EXTRA_PAIR)
@@ -166,9 +158,7 @@ class TradingForegroundService : Service() {
                         val candleResp = ApiClient.apiService.getCandles(pairToClose, "1m")
                         val currentPrice = candleResp.body()?.lastOrNull()?.close ?: 0.0
                         val res = executionEngine.exitPosition(pairToClose, currentPrice, "Manual close requested by user")
-                        db.systemLogDao().insert(
-                            SystemLogEntity(level = "TRADE", tag = "MANUAL_CLOSE", message = "Closed $pairToClose: ${res}")
-                        )
+                        AppLogManager.trade("MANUAL_CLOSE", "Closed $pairToClose: $res")
                         val syncRes = executionEngine.refreshExchangeState()
                         if (syncRes.isSuccess) {
                             MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
@@ -178,10 +168,8 @@ class TradingForegroundService : Service() {
             }
             ACTION_TRIGGER_SCAN -> {
                 countdownResetRequested = true
+                AppLogManager.i("SCANNER", "Manual scan requested by user.")
                 serviceScope.launch {
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "INFO", tag = "SCANNER", message = "Manual scan requested by user.")
-                    )
                     performMarketScanAndAllocation()
                 }
             }
@@ -195,13 +183,9 @@ class TradingForegroundService : Service() {
                         val syncResult = executionEngine.refreshExchangeState()
                         if (syncResult.isSuccess) {
                             MarketScanState.updateExchangeSnapshot(syncResult.getOrThrow())
-                            db.systemLogDao().insert(
-                                SystemLogEntity(level = "INFO", tag = "REFRESH", message = "Manual exchange refresh completed successfully.")
-                            )
+                            AppLogManager.i("REFRESH", "Manual exchange refresh completed successfully.")
                         } else {
-                            db.systemLogDao().insert(
-                                SystemLogEntity(level = "WARN", tag = "REFRESH", message = "Manual refresh failed: ${syncResult.exceptionOrNull()?.message}")
-                            )
+                            AppLogManager.w("REFRESH", "Manual refresh failed: ${syncResult.exceptionOrNull()?.message}")
                         }
                     } finally {
                         MarketScanState.setRefreshingExchange(false)
@@ -229,21 +213,13 @@ class TradingForegroundService : Service() {
 
     private fun startTradingLoop() {
         serviceScope.launch {
-            db.systemLogDao().insert(
-                SystemLogEntity(
-                    level = "INFO",
-                    tag = "SERVICE",
-                    message = "Market Scanning Loop started. Strategy: ${StrategyRegistry.activeStrategy.name} | Mode: ${if (executionEngine.isPaperTrading) "PAPER" else "LIVE"}"
-                )
-            )
+            AppLogManager.i("SERVICE", "Market Scanning Loop started. Strategy: ${StrategyRegistry.activeStrategy.name} | Mode: ${if (executionEngine.isPaperTrading) "PAPER" else "LIVE"}")
 
             while (isTradingActive) {
                 try {
                     performMarketScanAndAllocation()
                 } catch (e: Exception) {
-                    db.systemLogDao().insert(
-                        SystemLogEntity(level = "ERROR", tag = "SCANNER", message = "Scan cycle error: ${e.message}")
-                    )
+                    AppLogManager.e("SCANNER", "Scan cycle error: ${e.message}", e)
                 }
 
                 countdownResetRequested = false
@@ -255,9 +231,7 @@ class TradingForegroundService : Service() {
                     if (currentInterval != activeIntervalMinutes) {
                         activeIntervalMinutes = currentInterval
                         secondsRemaining = (currentInterval * 60).coerceAtMost(secondsRemaining)
-                        db.systemLogDao().insert(
-                            SystemLogEntity(level = "INFO", tag = "CONFIG", message = "Auto-scan countdown adjusted to ${currentInterval}m interval.")
-                        )
+                        AppLogManager.i("CONFIG", "Auto-scan countdown adjusted to ${currentInterval}m interval.")
                     }
                     MarketScanState.setNextScanSecondsRemaining(secondsRemaining)
                     delay(1000)
@@ -279,29 +253,18 @@ class TradingForegroundService : Service() {
             val config = configRepo.configFlow.value
             val activeStrategy = StrategyRegistry.activeStrategy
             val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
-
-            db.systemLogDao().insert(
-                SystemLogEntity(
-                    level = "INFO",
-                    tag = "SCANNER",
-                    message = "Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with ${activeStrategy.name}..."
-                )
-            )
+            AppLogManager.scanner("Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with ${activeStrategy.name}...")
 
             // Circuit Breaker Check: Daily drawdown cap (4% loss limit)
             if (riskManager.isCircuitBreakerTripped()) {
-                db.systemLogDao().insert(
-                    SystemLogEntity(level = "WARN", tag = "RISK", message = "Scan #$cycle skipped: Daily drawdown circuit breaker tripped (4% loss limit reached).")
-                )
+                AppLogManager.w("RISK", "Scan #$cycle skipped: Daily drawdown circuit breaker tripped (4% loss limit reached).")
                 return
             }
 
             val isCooldown = riskManager.isCooldownActive()
             if (isCooldown) {
                 val remainingMins = riskManager.getCooldownRemainingMinutes()
-                db.systemLogDao().insert(
-                    SystemLogEntity(level = "WARN", tag = "RISK", message = "Scan #$cycle: Execution paused (90m cooldown active, $remainingMins min remaining).")
-                )
+                AppLogManager.w("RISK", "Scan #$cycle: Execution paused (90m cooldown active, $remainingMins min remaining).")
             }
 
             // 1. Initial State Sync (Exchange is SSOT)
@@ -342,6 +305,7 @@ class TradingForegroundService : Service() {
             for (opp in rankedTop5) {
                 // Signal Action Check: Must be actionable entry
                 if (!opp.isBuy && !opp.isSell) {
+                    AppLogManager.d("EVAL", "[${opp.pair}] Watching: ${opp.signal.reason} [QualityScore: ${opp.qualityScore}]")
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -356,6 +320,7 @@ class TradingForegroundService : Service() {
 
                 // Circuit Breaker / Cooldown Gate
                 if (isCooldown) {
+                    AppLogManager.w("RISK", "[${opp.pair}] Skipped: Cooldown active (${riskManager.getCooldownRemainingMinutes()}m remaining)")
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -370,6 +335,7 @@ class TradingForegroundService : Service() {
 
                 // Gate 1: Quality Score Rubric Gate (Must be approved by TradeQualityScorer)
                 if (!opp.isApproved) {
+                    AppLogManager.quality("[${opp.pair}] Gate 1 (Quality) REJECTED: Score ${opp.qualityScore}/100 (${opp.qualityCategory}). Rejection: ${opp.rejectionReason ?: "Insufficient confluence"}")
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -390,6 +356,7 @@ class TradingForegroundService : Service() {
                     btcMacroTrendIsBullish = btcMacroBullish
                 )
                 if (portfolioCheck is RiskCheckResult.Rejected) {
+                    AppLogManager.risk("[${opp.pair}] Gate 2 (Macro/Portfolio) REJECTED: ${portfolioCheck.reason}")
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -411,9 +378,11 @@ class TradingForegroundService : Service() {
                     leverage = config.leverage,
                     minMarginInr = config.minMarginPerTradeInr
                 )
+                AppLogManager.risk("[${opp.pair}] Gate 3 (Risk Sizing): Margin ₹%.2f @ ${config.leverage}x (Entry: ${opp.currentPrice}, SL: $slPrice)".format(marginToAllocate))
 
                 // Gate 4: Fresh In-Memory Balance Check
                 if (inMemoryAvailableBalance < marginToAllocate) {
+                    AppLogManager.risk("[${opp.pair}] Gate 4 (Balance) REJECTED: Available ₹%.2f < Sized Margin ₹%.2f".format(inMemoryAvailableBalance, marginToAllocate))
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -427,6 +396,7 @@ class TradingForegroundService : Service() {
                 }
 
                 // All gates passed -> Execute Order!
+                AppLogManager.trade("EXEC", "[${opp.pair}] Gate 5: Submitting ${opp.actionLabel} order for ₹%.0f margin @ ${config.leverage}x...".format(marginToAllocate))
                 val execResult = executionEngine.executeSignal(
                     signal = opp.signal,
                     pair = opp.pair,
@@ -473,9 +443,7 @@ class TradingForegroundService : Service() {
                                 reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ ${config.leverage}x".format(marginToAllocate)
                             )
                         )
-                        db.systemLogDao().insert(
-                            SystemLogEntity(level = "TRADE", tag = "EXEC", message = "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}): ${execResult.message}")
-                        )
+                        AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}): ${execResult.message}")
 
                         // Immediate Post-Order State Sync to reflect deducted balance and added position!
                         val syncResult = executionEngine.refreshExchangeState()
@@ -493,9 +461,7 @@ class TradingForegroundService : Service() {
                                 reason = "Failed — ${execResult.error}"
                             )
                         )
-                        db.systemLogDao().insert(
-                            SystemLogEntity(level = "ERROR", tag = "EXEC", message = "Failed to execute ${opp.pair}: ${execResult.error}")
-                        )
+                        AppLogManager.e("EXEC", "Failed to execute ${opp.pair}: ${execResult.error}")
                     }
                 }
             }
@@ -521,13 +487,7 @@ class TradingForegroundService : Service() {
             val skippedExistingCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_EXISTING_POSITION }
             val skippedBalanceCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE }
 
-            db.systemLogDao().insert(
-                SystemLogEntity(
-                    level = "INFO",
-                    tag = "SCANNER",
-                    message = "Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Ranked Top ${rankedTop5.size}. Executed: $executedCount | Filtered: $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance."
-                )
-            )
+            AppLogManager.scanner("Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Ranked Top ${rankedTop5.size}. Executed: $executedCount | Filtered: $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance.")
 
             // Update Notification
             val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
@@ -537,9 +497,7 @@ class TradingForegroundService : Service() {
                 "Cycle #$cycle | Bal: ₹%.0f | Audited ${audits.size} | Next: ${config.scanIntervalMinutes}m".format(finalBalance)
             )
         } catch (e: Exception) {
-            db.systemLogDao().insert(
-                SystemLogEntity(level = "ERROR", tag = "SCANNER", message = "Scan cycle #$scanCycleCounter error: ${e.message}")
-            )
+            AppLogManager.e("SCANNER", "Scan cycle #$scanCycleCounter error: ${e.message}", e)
         } finally {
             MarketScanState.setScanning(false)
             scanMutex.unlock()

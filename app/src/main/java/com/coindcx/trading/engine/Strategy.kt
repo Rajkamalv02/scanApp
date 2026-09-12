@@ -10,6 +10,14 @@ enum class SignalAction {
     HOLD
 }
 
+data class StrategyDiagnostics(
+    val stage: String,
+    val failedFilter: String? = null,
+    val indicators: Map<String, Double> = emptyMap(),
+    val flags: Map<String, Boolean> = emptyMap(),
+    val mathDetails: Map<String, String> = emptyMap()
+)
+
 data class Signal(
     val action: SignalAction,
     val suggestedQuantity: Double = 0.0,
@@ -17,7 +25,8 @@ data class Signal(
     val stopLossPrice: Double? = null,
     val takeProfitPrice: Double? = null,
     val reason: String = "",
-    val confidenceScore: Double = 0.0 // 0.0 to 100.0 for ranking
+    val confidenceScore: Double = 0.0, // 0.0 to 100.0 for ranking
+    val diagnostics: StrategyDiagnostics? = null
 )
 
 /**

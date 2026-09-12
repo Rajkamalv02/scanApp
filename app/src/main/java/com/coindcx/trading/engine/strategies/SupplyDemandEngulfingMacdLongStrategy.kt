@@ -5,6 +5,7 @@ import com.coindcx.trading.data.api.models.MarketCandle
 import com.coindcx.trading.engine.Signal
 import com.coindcx.trading.engine.SignalAction
 import com.coindcx.trading.engine.Strategy
+import com.coindcx.trading.engine.StrategyDiagnostics
 import com.coindcx.trading.engine.indicators.TechnicalIndicators
 import kotlin.math.abs
 import kotlin.math.max
@@ -122,7 +123,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "ADX (${String.format("%.1f", adx)}) < $adxMin: Market in low-volatility consolidation",
-                confidenceScore = 20.0
+                confidenceScore = 20.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "REGIME_FILTER",
+                    failedFilter = "CHOP_FILTER_ACTIVE",
+                    indicators = mapOf("adx" to adx, "adxMin" to adxMin, "atr" to atr),
+                    mathDetails = mapOf("adx" to String.format("%.1f", adx), "adxMin" to "$adxMin")
+                )
             )
         }
 
@@ -136,7 +143,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "Trend filter: Not in upward trend continuation nor 2.5x ATR exhaustion bottom",
-                confidenceScore = 30.0
+                confidenceScore = 30.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "TREND_FILTER",
+                    failedFilter = "NOT_TREND_OR_EXHAUSTION",
+                    indicators = mapOf("currentPrice" to currentPrice, "ema200" to currEma200, "prevEma200" to prevEma200, "atr" to atr),
+                    flags = mapOf("isTrendContinuation" to isTrendContinuation, "isExhaustionBottom" to isExhaustionBottom)
+                )
             )
         }
 
@@ -147,7 +160,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "No bullish engulfing reversal candle detected at bar close",
-                confidenceScore = 40.0
+                confidenceScore = 40.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "CANDLE_TRIGGER",
+                    failedFilter = "NOT_BULLISH_ENGULFING",
+                    indicators = mapOf("currentPrice" to currentPrice, "atr" to atr),
+                    mathDetails = mapOf("open" to "${currentCandle.open}", "close" to "${currentCandle.close}", "high" to "${currentCandle.high}", "low" to "${currentCandle.low}")
+                )
             )
         }
 
@@ -156,7 +175,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "Bullish engulfing candle did not probe an active Demand Zone",
-                confidenceScore = 35.0
+                confidenceScore = 35.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "ZONE_PROBE",
+                    failedFilter = "NO_ACTIVE_DEMAND_PROBED",
+                    indicators = mapOf("activeDemandCount" to demandZones.size.toDouble(), "activeSupplyCount" to supplyZones.size.toDouble()),
+                    mathDetails = mapOf("candleLow" to "${currentCandle.low}", "candleClose" to "${currentCandle.close}")
+                )
             )
         }
 
@@ -165,7 +190,12 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "Demand zone mitigated (touch count ${activeDemand.touchCount} > 1)",
-                confidenceScore = 25.0
+                confidenceScore = 25.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "ZONE_FRESHNESS",
+                    failedFilter = "DEMAND_ZONE_MITIGATED",
+                    indicators = mapOf("touchCount" to activeDemand.touchCount.toDouble())
+                )
             )
         }
 
@@ -174,7 +204,12 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "Price extended > 2.5x ATR from demand zone high",
-                confidenceScore = 20.0
+                confidenceScore = 20.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "PRICE_EXTENSION",
+                    failedFilter = "EXTENDED_FROM_DEMAND",
+                    indicators = mapOf("extensionAtr" to (currentPrice - activeDemand.high) / atr, "maxAllowed" to 2.5)
+                )
             )
         }
 
@@ -186,7 +221,12 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "Risk distance (${String.format("%.2f", riskDist)}) out of bounds (<= 0 or > 3.0x ATR)",
-                confidenceScore = 20.0
+                confidenceScore = 20.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "RISK_BOUNDS",
+                    failedFilter = "RISK_OUT_OF_BOUNDS",
+                    indicators = mapOf("riskDist" to riskDist, "atr" to atr, "riskInAtr" to riskDist / atr)
+                )
             )
         }
 
@@ -203,7 +243,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
                 return Signal(
                     action = SignalAction.HOLD,
                     reason = "Vetoed: Reward clearance (${String.format("%.2f", potentialReward / riskDist)}R) < required net fee-adjusted threshold (${String.format("%.2f", rewardDist / riskDist)}R)",
-                    confidenceScore = 20.0
+                    confidenceScore = 20.0,
+                    diagnostics = StrategyDiagnostics(
+                        stage = "NET_RR_CLEARANCE",
+                        failedFilter = "INSUFFICIENT_REWARD_CLEARANCE",
+                        indicators = mapOf("potentialReward" to potentialReward, "rewardDistRequired" to rewardDist, "riskDist" to riskDist),
+                        mathDetails = mapOf("clearanceR" to String.format("%.2f", potentialReward / riskDist), "requiredR" to String.format("%.2f", rewardDist / riskDist))
+                    )
                 )
             }
         }
@@ -213,7 +259,12 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "Vetoed: Too close to unmitigated Supply Zone at ${String.format("%.2f", nearestSupply?.low ?: 0.0)}",
-                confidenceScore = 15.0
+                confidenceScore = 15.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "ZONE_CLEARANCE",
+                    failedFilter = "TOO_CLOSE_TO_SUPPLY",
+                    indicators = mapOf("clearanceDist" to clearanceDistance, "requiredDist" to rewardDist)
+                )
             )
         }
 
@@ -227,7 +278,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
             return Signal(
                 action = SignalAction.HOLD,
                 reason = "MACD momentum expanding downward at signal candle",
-                confidenceScore = 30.0
+                confidenceScore = 30.0,
+                diagnostics = StrategyDiagnostics(
+                    stage = "MOMENTUM_FILTER",
+                    failedFilter = "MACD_EXPANDING_DOWNWARD",
+                    indicators = mapOf("macd" to latestMacd.macd, "signal" to latestMacd.signal, "hist" to latestMacd.histogram, "prevHist" to prevMacd.histogram),
+                    flags = mapOf("isExpandingUpward" to isExpandingUpward, "isBullishState" to isBullishState)
+                )
             )
         }
 
@@ -249,7 +306,13 @@ class SupplyDemandEngulfingMacdLongStrategy(
             stopLossPrice = stopLoss,
             takeProfitPrice = target1,
             reason = "[$branchTag] Demand Zone Bounce (${String.format("%.2f", activeDemand.low)}-${String.format("%.2f", activeDemand.high)}) + Bullish Engulfing + Contemporaneous MACD",
-            confidenceScore = finalScore
+            confidenceScore = finalScore,
+            diagnostics = StrategyDiagnostics(
+                stage = "ACTIONABLE_SIGNAL",
+                indicators = mapOf("entryPrice" to currentPrice, "stopLoss" to stopLoss, "target1" to target1, "adx" to adx, "atr" to atr, "confidence" to finalScore),
+                flags = mapOf("isTrendContinuation" to isTrendContinuation, "isVirginZone" to (activeDemand.touchCount == 0)),
+                mathDetails = mapOf("branch" to branchTag, "riskPct" to String.format("%.2f", grossRiskPct), "netRR" to ">=1.80")
+            )
         )
     }
 

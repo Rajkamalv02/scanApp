@@ -4,6 +4,7 @@ import com.coindcx.trading.data.api.CoinDCXApiService
 import com.coindcx.trading.data.db.AppDatabase
 import com.coindcx.trading.data.db.entities.SystemLogEntity
 import com.coindcx.trading.data.db.entities.TradeEntity
+import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Calendar
@@ -216,13 +217,11 @@ class PaperPositionManager(
 
         db.tradeDao().update(closedTrade)
 
-        db.systemLogDao().insert(
-            SystemLogEntity(
-                level = if (netRealizedPnl >= 0) "INFO" else "WARN",
-                tag = "PAPER_EXIT",
-                message = "Closed ${trade.side} ${trade.pair} @ $exitFillPrice. Net P&L: ₹%.2f (ROI: %.1f%%). Reason: %s"
-                    .format(netRealizedPnl, roiPct, reason)
-            )
+        AppLogManager.log(
+            level = if (netRealizedPnl >= 0) "TRADE" else "WARN",
+            tag = "PAPER_EXIT",
+            message = "Closed ${trade.side} ${trade.pair} @ $exitFillPrice. Net P&L: ₹%.2f (ROI: %.1f%%). Reason: %s"
+                .format(netRealizedPnl, roiPct, reason)
         )
 
         onTradeClosed?.invoke(closedTrade, netRealizedPnl)

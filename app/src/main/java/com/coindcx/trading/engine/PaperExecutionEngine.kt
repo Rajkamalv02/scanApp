@@ -12,6 +12,7 @@ import com.coindcx.trading.engine.paper.PaperAccountManager
 import com.coindcx.trading.engine.paper.PaperAnalyticsEngine
 import com.coindcx.trading.engine.paper.PaperPositionManager
 import com.coindcx.trading.engine.paper.PaperPositionManager.Companion.calculateEstimatedLiquidation
+import com.coindcx.trading.util.AppLogManager
 import java.util.UUID
 
 class PaperExecutionEngine(
@@ -212,13 +213,10 @@ class PaperExecutionEngine(
         // Record initial equity snapshot
         accountManager.recordEquitySnapshot()
 
-        db.systemLogDao().insert(
-            SystemLogEntity(
-                level = "INFO",
-                tag = "PAPER_TRADE",
-                message = "Simulated $side $pair (Margin: ₹%.0f, Lev: ${leverage}x, Qty: $quantity) @ $fillPrice. EstLiq: $estLiq. ${signal.reason}"
-                    .format(marginInr)
-            )
+        AppLogManager.trade(
+            "PAPER_TRADE",
+            "Simulated $side $pair (Margin: ₹%.0f, Lev: ${leverage}x, Qty: $quantity) @ $fillPrice. EstLiq: $estLiq. ${signal.reason}"
+                .format(marginInr)
         )
 
         return ExecutionResult.Success(
