@@ -1,20 +1,17 @@
 package com.coindcx.trading.engine
 
 import android.content.Context
-import com.coindcx.trading.engine.strategies.SupplyDemandBidirectionalStrategy
-import com.coindcx.trading.engine.strategies.SupplyDemandEngulfingMacdLongStrategy
-import com.coindcx.trading.engine.strategies.SupplyDemandEngulfingMacdStrategy
+import com.coindcx.trading.engine.strategies.EmaCrossoverStrategy
 
 object StrategyRegistry {
 
     private const val PREFS_NAME = "trading_strategy_prefs"
     private const val KEY_ACTIVE_STRATEGY_ID = "active_strategy_id"
 
-    // Institutional Strategies: Two-Way Bidirectional by default, with discrete Long & Short options
+    val emaCrossoverStrategy = EmaCrossoverStrategy()
+
     val availableStrategies: List<Strategy> = listOf(
-        SupplyDemandBidirectionalStrategy(),
-        SupplyDemandEngulfingMacdLongStrategy(),
-        SupplyDemandEngulfingMacdStrategy()
+        emaCrossoverStrategy
     )
 
     var activeStrategy: Strategy = availableStrategies.first()
@@ -26,7 +23,6 @@ object StrategyRegistry {
         val target = availableStrategies.find { it.id == savedId } ?: availableStrategies.first()
         activeStrategy = target
 
-        // Safely migrate legacy preferences (e.g. "ema_crossover", "rsi_mean_reversion")
         if (savedId != target.id) {
             prefs.edit().putString(KEY_ACTIVE_STRATEGY_ID, target.id).apply()
         }

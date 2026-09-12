@@ -412,13 +412,20 @@ class TradingForegroundService : Service() {
 
                 // All gates passed -> Execute Order!
                 AppLogManager.trade("EXEC", "[${opp.pair}] Gate 5: Submitting ${opp.actionLabel} order for ₹%.0f margin @ ${config.leverage}x...".format(marginToAllocate))
-                val execResult = executionEngine.executeSignal(
-                    signal = opp.signal,
-                    pair = opp.pair,
-                    currentPrice = opp.currentPrice,
-                    marginInr = marginToAllocate,
-                    leverage = config.leverage
-                )
+                val orderStartTime = System.currentTimeMillis()
+                val execResult = try {
+                    executionEngine.executeSignal(
+                        signal = opp.signal,
+                        pair = opp.pair,
+                        currentPrice = opp.currentPrice,
+                        marginInr = marginToAllocate,
+                        leverage = config.leverage
+                    )
+                } catch (e: Exception) {
+                    AppLogManager.e("EXEC", "[${opp.pair}] Exception during order execution: ${e.message}", e)
+                    ExecutionResult.Failed("Order execution threw exception: ${e.message}")
+                }
+                val orderDurationMs = System.currentTimeMillis() - orderStartTime
 
                 when (execResult) {
                     is ExecutionResult.Success -> {
@@ -458,7 +465,7 @@ class TradingForegroundService : Service() {
                                 reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ ${config.leverage}x".format(marginToAllocate)
                             )
                         )
-                        AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}): ${execResult.message}")
+                        AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}) executed in ${orderDurationMs}ms: ${execResult.message}")
 
                         // Immediate Post-Order State Sync to reflect deducted balance and added position!
                         val syncResult = executionEngine.refreshExchangeState()
@@ -473,10 +480,10 @@ class TradingForegroundService : Service() {
                                 pair = opp.pair,
                                 action = opp.actionLabel,
                                 status = com.coindcx.trading.engine.scanner.AuditStatus.FAILED,
-                                reason = "Failed — ${execResult.error}"
+                                reason = "Failed (${orderDurationMs}ms) — ${execResult.error}"
                             )
                         )
-                        AppLogManager.e("EXEC", "Failed to execute ${opp.pair}: ${execResult.error}")
+                        AppLogManager.e("EXEC", "[${opp.pair}] Order execution failed in ${orderDurationMs}ms: ${execResult.error}")
                     }
                 }
             }

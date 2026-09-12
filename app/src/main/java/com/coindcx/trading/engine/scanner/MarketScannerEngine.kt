@@ -22,6 +22,17 @@ class MarketScannerEngine(
         strategy: Strategy,
         executionEngine: ExecutionEngine
     ): List<MarketOpportunity> = withContext(Dispatchers.IO) {
+        val scanStartTime = System.currentTimeMillis()
+
+        // 1. Dynamic strategy configuration from live TradingConfig parameters
+        if (strategy is com.coindcx.trading.engine.strategies.EmaCrossoverStrategy) {
+            strategy.configure(
+                fast = config.fastEmaPeriod,
+                slow = config.slowEmaPeriod,
+                atrMult = config.atrMultiplier
+            )
+        }
+
         val dynamicUniverse = if (config.isMarketWideScan) {
             universeManager.getOrRefreshUniverse()
         } else {
@@ -34,16 +45,16 @@ class MarketScannerEngine(
         val pairsToScan = (dynamicUniverse + openPositionPairs).distinct()
 
         AppLogManager.scanner(
-            "Starting market scan cycle [${if (config.isMarketWideScan) "Dynamic Universe (${dynamicUniverse.size} pairs)" else "${dynamicUniverse.size} pairs"} + ${openPositionPairs.size} active open positions -> Total ${pairsToScan.size} pairs] | Strategy: ${strategy.name} | TF: ${config.timeframe}"
+            "Launching parallel evaluation of ${pairsToScan.size} futures symbols (Concurrency: 6) | Strategy: ${strategy.name} (${strategy.parametersSummary}) | TF: ${config.timeframe}"
         )
 
-        // Concurrency controlled with Semaphore(3) and 20ms delay pacing to respect CoinDCX rate limits
-        val concurrencySemaphore = Semaphore(3)
+        // Concurrency controlled with Semaphore(6) and 15ms delay pacing to respect CoinDCX rate limits
+        val concurrencySemaphore = Semaphore(6)
 
         val deferredResults = pairsToScan.map { pair ->
             async {
                 concurrencySemaphore.withPermit {
-                    kotlinx.coroutines.delay(20)
+                    kotlinx.coroutines.delay(15)
                     scanSinglePair(pair, config.timeframe, strategy, executionEngine)
                 }
             }
@@ -51,7 +62,11 @@ class MarketScannerEngine(
 
         val results = deferredResults.awaitAll().filterNotNull()
         val actionable = results.count { it.signal.action != SignalAction.HOLD }
-        AppLogManager.scanner("Scan finished. Scanned ${pairsToScan.size} pairs -> ${results.size} snapshots evaluated, $actionable actionable signals found.")
+        val totalDurationMs = System.currentTimeMillis() - scanStartTime
+
+        AppLogManager.scanner(
+            "Parallel scan finished in ${totalDurationMs}ms. Evaluated ${pairsToScan.size} pairs -> ${results.size} snapshots, $actionable actionable signals found."
+        )
         results
     }
 
@@ -61,6 +76,7 @@ class MarketScannerEngine(
         strategy: Strategy,
         executionEngine: ExecutionEngine
     ): MarketOpportunity? {
+        val pairStartTime = System.currentTimeMillis()
         return try {
             val candleResp = fetchCandlesWithBackoffInternal(pair, timeframe)
             if (candleResp == null || !candleResp.isSuccessful || candleResp.body().isNullOrEmpty()) {
@@ -83,13 +99,16 @@ class MarketScannerEngine(
 
             val signal = strategy.evaluate(candles, activePosition)
 
-            // Diagnostic trace for strategy evaluation
+            // Diagnostic trace for strategy evaluation with execution timing
+            val elapsedMs = System.currentTimeMillis() - pairStartTime
             val diag = signal.diagnostics
             if (signal.action != SignalAction.HOLD) {
-                AppLogManager.trade("STRATEGY", "[$pair] >>> SIGNAL GENERATED: ${signal.action} @ $currentPrice | SL: ${signal.stopLossPrice} | TP: ${signal.takeProfitPrice} | Confidence: ${signal.confidenceScore}% | Reason: ${signal.reason}")
+                AppLogManager.trade("STRATEGY", "[$pair] (${elapsedMs}ms) >>> SIGNAL GENERATED: ${signal.action} @ $currentPrice | SL: ${signal.stopLossPrice} | TP: ${signal.takeProfitPrice} | Confidence: ${signal.confidenceScore}% | Reason: ${signal.reason}")
             } else {
-                val diagInfo = if (diag != null) "[Stage: ${diag.stage}, FailedFilter: ${diag.failedFilter ?: "None"}]" else ""
-                AppLogManager.d("STRATEGY", "[$pair] HOLD: ${signal.reason} $diagInfo")
+                val fastVal = diag?.indicators?.get("fastEma")
+                val slowVal = diag?.indicators?.get("slowEma")
+                val diagInfo = if (fastVal != null && slowVal != null) "[Fast: %.2f, Slow: %.2f]".format(fastVal, slowVal) else ""
+                AppLogManager.d("STRATEGY", "[$pair] (${elapsedMs}ms) HOLD: ${signal.reason} $diagInfo")
             }
 
             // Optimization: Fetch Higher-Timeframe (1h) candles ONLY when signal is actionable (JIT fetch).
