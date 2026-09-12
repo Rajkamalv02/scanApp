@@ -171,6 +171,47 @@ object AppLogManager {
     fun scanner(message: String) = log("INFO", "SCANNER", message)
 
     /**
+     * Institutional Structured Trade Lifecycle Logger.
+     * Writes standardized machine-searchable key-value pairs and optional human-readable narrative step.
+     */
+    fun tradeLifecycle(
+        event: String,
+        tradeId: String,
+        symbol: String,
+        mode: String,
+        attributes: Map<String, Any?>,
+        narrative: String? = null
+    ) {
+        val builder = java.lang.StringBuilder()
+        builder.append("event=").append(event)
+            .append(" | trade_id=").append(tradeId)
+            .append(" | symbol=").append(symbol)
+            .append(" | mode=").append(mode)
+
+        for ((k, v) in attributes) {
+            if (v != null) {
+                builder.append(" | ").append(k).append("=").append(v)
+            }
+        }
+        log("TRADE", "LIFECYCLE", builder.toString())
+
+        if (!narrative.isNullOrBlank()) {
+            log("TRADE", "LIFECYCLE", "trade_id=$tradeId | >>> $narrative")
+        }
+    }
+
+    object TradeIdGenerator {
+        private val format = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+
+        fun generate(pair: String): String {
+            val clean = pair.replace("B-", "").replace("_", "").replace("-", "")
+            val time = synchronized(format) { format.format(Date()) }
+            val rand = java.util.UUID.randomUUID().toString().take(4).uppercase(Locale.US)
+            return "TID-$clean-$time-$rand"
+        }
+    }
+
+    /**
      * Dedicated background I/O consumer loop.
      * Batches log events to the single target file in the Download folder.
      */

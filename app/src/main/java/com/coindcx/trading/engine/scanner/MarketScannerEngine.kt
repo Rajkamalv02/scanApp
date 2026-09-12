@@ -97,7 +97,7 @@ class MarketScannerEngine(
             val currentPrice = latestCandle.close
             val activePosition = executionEngine.getActivePosition(pair)
 
-            val signal = strategy.evaluate(candles, activePosition)
+            val signal = strategy.evaluate(candles, activePosition, pair)
 
             // Diagnostic trace for strategy evaluation with execution timing
             val elapsedMs = System.currentTimeMillis() - pairStartTime

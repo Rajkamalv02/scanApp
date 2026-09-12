@@ -84,7 +84,8 @@ class LiveExecutionEngine(
         pair: String,
         currentPrice: Double,
         marginInr: Double,
-        leverage: Int
+        leverage: Int,
+        tradeId: String
     ): ExecutionResult {
         val isBuy = signal.action == SignalAction.ENTER_LONG
         val side = if (isBuy) "buy" else "sell"
@@ -92,7 +93,7 @@ class LiveExecutionEngine(
         val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, currentPrice)
         val quantity = rawQty.coerceAtLeast(0.001)
 
-        return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, quantity, leverage)) {
+        return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, quantity, leverage, tradeId)) {
             is OrderResult.Success -> {
                 AppLogManager.trade("LIVE_EXEC", "Placed live order: ${res.orderId} on $pair $side qty=$quantity @ $currentPrice (Margin: ₹%.0f)".format(marginInr))
                 ExecutionResult.Success(res.orderId, "Live order placed: ${res.orderId} (Margin: ₹%.0f)".format(marginInr))
@@ -111,7 +112,8 @@ class LiveExecutionEngine(
     override suspend fun exitPosition(
         pair: String,
         currentPrice: Double,
-        reason: String
+        reason: String,
+        tradeId: String?
     ): ExecutionResult {
         return try {
             val ordersPayload = mapOf("page" to "1", "size" to "50", "timestamp" to System.currentTimeMillis())
@@ -121,6 +123,17 @@ class LiveExecutionEngine(
                     apiService.cancelOrder(mapOf("id" to o.id, "timestamp" to System.currentTimeMillis()))
                 }
             }
+            AppLogManager.tradeLifecycle(
+                event = "EXIT_ORDER_FILLED",
+                tradeId = tradeId ?: "live_exit_$pair",
+                symbol = pair,
+                mode = "LIVE",
+                attributes = mapOf(
+                    "reason" to reason,
+                    "price" to currentPrice
+                ),
+                narrative = "Closed/Cancelled live orders on %s: %s @ %.4f".format(pair, reason, currentPrice)
+            )
             ExecutionResult.Success("exit_success", "Closed/Cancelled live orders on $pair")
         } catch (e: Exception) {
             ExecutionResult.Failed("Failed to exit live position on $pair: ${e.message}")

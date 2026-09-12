@@ -33,12 +33,14 @@ interface ExecutionEngine {
         pair: String,
         currentPrice: Double,
         marginInr: Double,
-        leverage: Int
+        leverage: Int,
+        tradeId: String = ""
     ): ExecutionResult
 
     suspend fun exitPosition(
         pair: String,
         currentPrice: Double,
-        reason: String
+        reason: String,
+        tradeId: String? = null
     ): ExecutionResult
 }

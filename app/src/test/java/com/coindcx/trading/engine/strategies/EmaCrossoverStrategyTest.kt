@@ -90,13 +90,24 @@ class EmaCrossoverStrategyTest {
         // 5. Bar 54 Live Forming Bar (t)
         candles.add(createCandle(baseTime + 54 * 900000L, surgePrice, surgePrice + 1.0, surgePrice - 1.0, surgePrice))
 
-        val signal = strategy.evaluate(candles, null)
+        val signal = strategy.evaluate(candles, null, "B-BTC_USDT")
         assertEquals(SignalAction.ENTER_LONG, signal.action)
         assertNotNull(signal.stopLossPrice)
         assertNotNull(signal.takeProfitPrice)
         assertTrue("SL must be below entry", signal.stopLossPrice!! < surgePrice)
         assertTrue("TP must be above entry", signal.takeProfitPrice!! > surgePrice)
         assertTrue("Confidence score should be 80.0", signal.confidenceScore >= 75.0)
+
+        // Mathematical Transparency Verification
+        assertNotNull("tradeId must be generated", signal.tradeId)
+        assertTrue("tradeId must contain symbol", signal.tradeId!!.contains("BTCUSDT"))
+        assertEquals(surgePrice, signal.entryPrice, 0.001)
+        assertTrue("Current Fast EMA must be > Slow EMA on bullish cross", signal.fastEma > signal.slowEma)
+        assertTrue("Prev Fast EMA must be <= Slow EMA", signal.prevFastEma <= signal.prevSlowEma)
+        assertTrue("ATR must be positive", signal.atr > 0.0)
+        assertEquals(1.5, signal.atrMultiplier, 0.001)
+        assertTrue("Risk distance must be positive", signal.riskDistance > 0.0)
+        assertEquals(2.0, signal.riskRewardRatio, 0.001)
     }
 
     @Test

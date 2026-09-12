@@ -5,6 +5,7 @@ import com.coindcx.trading.data.api.models.CreateOrderRequest
 import com.coindcx.trading.data.api.models.OrderPayload
 import com.coindcx.trading.data.db.dao.OrderDao
 import com.coindcx.trading.data.db.entities.OrderEntity
+import com.coindcx.trading.util.AppLogManager
 import java.util.UUID
 
 sealed class OrderResult {
@@ -30,9 +31,10 @@ class OrderManager(
         side: String,
         price: Double,
         quantity: Double,
-        leverage: Int
+        leverage: Int,
+        tradeId: String = ""
     ): OrderResult {
-        val clientOrderId = generateClientOrderId()
+        val clientOrderId = tradeId.ifEmpty { generateClientOrderId() }
 
         // 1. Record order locally as PENDING before transmission
         val orderEntity = OrderEntity(
@@ -45,6 +47,22 @@ class OrderManager(
             status = "PENDING"
         )
         orderDao.insert(orderEntity)
+
+        AppLogManager.tradeLifecycle(
+            event = "ORDER_REQUESTED",
+            tradeId = clientOrderId,
+            symbol = pair,
+            mode = "LIVE",
+            attributes = mapOf(
+                "side" to side.uppercase(),
+                "order_type" to "LIMIT",
+                "price" to "%.4f".format(price),
+                "quantity" to "%.4f".format(quantity),
+                "leverage" to "${leverage}x"
+            ),
+            narrative = "ORDER_REQUESTED: Submitting LIVE LIMIT order for %s %s qty=%.4f @ %.4f (Lev: %dx)"
+                .format(pair, side.uppercase(), quantity, price, leverage)
+        )
 
         val request = CreateOrderRequest(
             timestamp = System.currentTimeMillis(),
@@ -69,16 +87,54 @@ class OrderManager(
                         status = body.status
                     )
                 )
+                AppLogManager.tradeLifecycle(
+                    event = "ORDER_ACCEPTED",
+                    tradeId = clientOrderId,
+                    symbol = pair,
+                    mode = "LIVE",
+                    attributes = mapOf(
+                        "exchange_order_id" to body.id,
+                        "status" to body.status,
+                        "side" to side.uppercase(),
+                        "price" to "%.4f".format(price),
+                        "quantity" to "%.4f".format(quantity)
+                    ),
+                    narrative = "ORDER_ACCEPTED: Live order accepted by CoinDCX: %s (Status: %s)".format(body.id, body.status)
+                )
                 OrderResult.Success(body.id, clientOrderId)
             } else {
                 val errorMsg = response.errorBody()?.string() ?: "Order rejected"
                 orderDao.update(orderEntity.copy(status = "REJECTED"))
+                AppLogManager.tradeLifecycle(
+                    event = "ORDER_REJECTED",
+                    tradeId = clientOrderId,
+                    symbol = pair,
+                    mode = "LIVE",
+                    attributes = mapOf(
+                        "error" to errorMsg,
+                        "side" to side.uppercase(),
+                        "price" to "%.4f".format(price)
+                    ),
+                    narrative = "ORDER_REJECTED: CoinDCX rejected live order for %s: %s".format(pair, errorMsg)
+                )
                 OrderResult.Failed(errorMsg)
             }
         } catch (e: Exception) {
             // Network drop, timeout, or dropped response -> Enter UNKNOWN state
             // Never assume failure, never assume fill.
             orderDao.update(orderEntity.copy(status = "UNKNOWN"))
+            AppLogManager.tradeLifecycle(
+                event = "ORDER_AMBIGUOUS",
+                tradeId = clientOrderId,
+                symbol = pair,
+                mode = "LIVE",
+                attributes = mapOf(
+                    "error" to (e.message ?: "Network error / Timeout"),
+                    "side" to side.uppercase(),
+                    "price" to "%.4f".format(price)
+                ),
+                narrative = "ORDER_AMBIGUOUS: Network error / timeout during live order on %s: %s".format(pair, e.message)
+            )
             OrderResult.Ambiguous(clientOrderId, e.message ?: "Network error / Timeout")
         }
     }

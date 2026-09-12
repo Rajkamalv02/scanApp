@@ -104,27 +104,34 @@ class PaperPositionManager(
 
             // 4. Check Exit Conditions (Stop-Loss, Take-Profit, Estimated Liquidation)
             var exitReason: String? = null
+            var exitCondition: String = "MONITORING"
 
             if (isLong) {
                 if (trade.stopLoss != null && currentPrice <= trade.stopLoss) {
+                    exitCondition = "STOP_LOSS_HIT"
                     exitReason = "Stop-Loss hit (Price: $currentPrice <= SL: ${trade.stopLoss})"
                 } else if (trade.takeProfit != null && currentPrice >= trade.takeProfit) {
+                    exitCondition = "TARGET_HIT"
                     exitReason = "Take-Profit hit (Price: $currentPrice >= TP: ${trade.takeProfit})"
                 } else if (currentPrice <= estLiq) {
+                    exitCondition = "EST_LIQUIDATION"
                     exitReason = "EST. LIQ reached (Price: $currentPrice <= EstLiq: $estLiq)"
                 }
             } else {
                 if (trade.stopLoss != null && currentPrice >= trade.stopLoss) {
+                    exitCondition = "STOP_LOSS_HIT"
                     exitReason = "Stop-Loss hit (Price: $currentPrice >= SL: ${trade.stopLoss})"
                 } else if (trade.takeProfit != null && currentPrice <= trade.takeProfit) {
+                    exitCondition = "TARGET_HIT"
                     exitReason = "Take-Profit hit (Price: $currentPrice <= TP: ${trade.takeProfit})"
                 } else if (currentPrice >= estLiq) {
+                    exitCondition = "EST_LIQUIDATION"
                     exitReason = "EST. LIQ reached (Price: $currentPrice >= EstLiq: $estLiq)"
                 }
             }
 
             if (exitReason != null) {
-                executeExit(trade, currentPrice, exitReason, accruedFunding, now)
+                executeExit(trade, currentPrice, exitReason, accruedFunding, now, exitCondition)
             } else {
                 // Update live position state
                 db.tradeDao().update(
@@ -137,6 +144,26 @@ class PaperPositionManager(
                         estimatedLiquidationPrice = estLiq,
                         notionalValueInr = notionalInr
                     )
+                )
+
+                AppLogManager.tradeLifecycle(
+                    event = "POSITION_MONITOR",
+                    tradeId = trade.clientOrderId,
+                    symbol = trade.pair,
+                    mode = "PAPER",
+                    attributes = mapOf(
+                        "side" to trade.side,
+                        "entry_price" to "%.4f".format(trade.entryPrice),
+                        "current_price" to "%.4f".format(currentPrice),
+                        "gross_pnl_inr" to "₹%.2f".format(grossPnl),
+                        "net_pnl_inr" to "₹%.2f".format(unrealizedNetPnl),
+                        "roi_pct" to "%.2f%%".format(roiPct),
+                        "stop_loss" to trade.stopLoss?.let { "%.4f".format(it) },
+                        "target" to trade.takeProfit?.let { "%.4f".format(it) },
+                        "est_liq" to "%.4f".format(estLiq)
+                    ),
+                    narrative = "Monitoring %s %s: Price=%.4f (Entry: %.4f) | Net PnL: ₹%.2f (ROI: %.2f%%) | SL: %s | TP: %s"
+                        .format(trade.side, trade.pair, currentPrice, trade.entryPrice, unrealizedNetPnl, roiPct, trade.stopLoss ?: "None", trade.takeProfit ?: "None")
                 )
             }
         }
@@ -157,7 +184,8 @@ class PaperPositionManager(
         val notionalInr = if (trade.notionalValueInr > 0) trade.notionalValueInr else trade.allocatedMarginInr * trade.leverage
         val accruedFunding = notionalInr * FUNDING_RATE_8H * fundingIntervals
 
-        executeExit(trade, currentPrice, reason, accruedFunding, now)
+        val condition = if (reason.contains("EMA", ignoreCase = true)) "EMA_REVERSAL_CROSS" else "MANUAL_CLOSE"
+        executeExit(trade, currentPrice, reason, accruedFunding, now, condition)
         accountManager.recordEquitySnapshot()
         true
     }
@@ -167,10 +195,45 @@ class PaperPositionManager(
         marketPrice: Double,
         reason: String,
         accruedFunding: Double,
-        exitTimestamp: Long
+        exitTimestamp: Long,
+        exitCondition: String = "UNKNOWN"
     ) {
         val isLong = trade.side.equals("LONG", ignoreCase = true)
         val notionalInr = if (trade.notionalValueInr > 0) trade.notionalValueInr else trade.allocatedMarginInr * trade.leverage
+
+        AppLogManager.tradeLifecycle(
+            event = "EXIT_SIGNAL",
+            tradeId = trade.clientOrderId,
+            symbol = trade.pair,
+            mode = "PAPER",
+            attributes = mapOf(
+                "exit_condition" to exitCondition,
+                "side" to trade.side,
+                "entry_price" to "%.4f".format(trade.entryPrice),
+                "market_price" to "%.4f".format(marketPrice),
+                "stop_loss" to trade.stopLoss?.let { "%.4f".format(it) },
+                "target" to trade.takeProfit?.let { "%.4f".format(it) },
+                "trigger_reason" to reason
+            ),
+            narrative = "EXIT_SIGNAL: %s triggered on %s %s @ %.4f: %s"
+                .format(exitCondition, trade.side, trade.pair, marketPrice, reason)
+        )
+
+        AppLogManager.tradeLifecycle(
+            event = "EXIT_ORDER_CONSTRUCTED",
+            tradeId = trade.clientOrderId,
+            symbol = trade.pair,
+            mode = "PAPER",
+            attributes = mapOf(
+                "side" to (if (isLong) "SELL" else "BUY"),
+                "order_type" to "MARKET",
+                "reduce_only" to true,
+                "quantity" to "%.4f".format(trade.quantity),
+                "reference_price" to "%.4f".format(marketPrice)
+            ),
+            narrative = "EXIT_ORDER_CONSTRUCTED: Submitting %s MARKET order to close %s %s qty=%.4f @ %.4f"
+                .format(if (isLong) "SELL" else "BUY", trade.side, trade.pair, trade.quantity, marketPrice)
+        )
 
         // Apply slippage on exit
         val exitFillPrice = if (isLong) {
@@ -178,6 +241,8 @@ class PaperPositionManager(
         } else {
             marketPrice * (1.0 + SLIPPAGE_RATE)
         }
+        val exitSlippage = kotlin.math.abs(exitFillPrice - marketPrice)
+        val exitSlippagePct = if (marketPrice > 0) (exitSlippage / marketPrice) * 100.0 else 0.0
 
         val exitFeeInr = notionalInr * TAKER_FEE_RATE
         val totalFeesInr = trade.fees + exitFeeInr
@@ -191,6 +256,8 @@ class PaperPositionManager(
         // Net Realized PnL = Gross PnL - Total Fees - Accrued Funding
         val netRealizedPnl = grossPnl - totalFeesInr - accruedFunding
         val durationMillis = exitTimestamp - trade.entryTime
+        val durationSec = durationMillis / 1000L
+        val durationFormatted = "${durationSec / 60}m ${durationSec % 60}s"
         val roiPct = if (trade.allocatedMarginInr > 0) (netRealizedPnl / trade.allocatedMarginInr) * 100.0 else 0.0
 
         val tradeResult = when {
@@ -217,11 +284,46 @@ class PaperPositionManager(
 
         db.tradeDao().update(closedTrade)
 
-        AppLogManager.log(
-            level = if (netRealizedPnl >= 0) "TRADE" else "WARN",
-            tag = "PAPER_EXIT",
-            message = "Closed ${trade.side} ${trade.pair} @ $exitFillPrice. Net P&L: ₹%.2f (ROI: %.1f%%). Reason: %s"
-                .format(netRealizedPnl, roiPct, reason)
+        AppLogManager.tradeLifecycle(
+            event = "EXIT_ORDER_FILLED",
+            tradeId = trade.clientOrderId,
+            symbol = trade.pair,
+            mode = "PAPER",
+            attributes = mapOf(
+                "status" to "FILLED",
+                "exit_fill_price" to "%.4f".format(exitFillPrice),
+                "exit_slippage_inr" to "%.4f".format(exitSlippage),
+                "exit_slippage_pct" to "%.3f%%".format(exitSlippagePct),
+                "exit_fee_inr" to "₹%.2f".format(exitFeeInr),
+                "accrued_funding_inr" to "₹%.2f".format(accruedFunding),
+                "total_fees_inr" to "₹%.2f".format(totalFeesInr)
+            ),
+            narrative = "EXIT_ORDER_FILLED: %s closed @ %.4f (Slippage: %.3f%%, Exit Fee: ₹%.2f, Total Fees: ₹%.2f)"
+                .format(trade.pair, exitFillPrice, exitSlippagePct, exitFeeInr, totalFeesInr)
+        )
+
+        AppLogManager.tradeLifecycle(
+            event = "TRADE_COMPLETED",
+            tradeId = trade.clientOrderId,
+            symbol = trade.pair,
+            mode = "PAPER",
+            attributes = mapOf(
+                "side" to trade.side,
+                "entry_price" to "%.4f".format(trade.entryPrice),
+                "exit_price" to "%.4f".format(exitFillPrice),
+                "gross_pnl_inr" to "₹%.2f".format(grossPnl),
+                "total_fees_inr" to "₹%.2f".format(totalFeesInr),
+                "funding_fees_inr" to "₹%.2f".format(accruedFunding),
+                "net_pnl_inr" to "₹%.2f".format(netRealizedPnl),
+                "roi_pct" to "%.2f%%".format(roiPct),
+                "trade_result" to tradeResult,
+                "duration_sec" to durationSec,
+                "duration_formatted" to durationFormatted,
+                "exit_condition" to exitCondition,
+                "exit_reason" to reason
+            ),
+            narrative = "TRADE_COMPLETED: %s %s | Entry: %.4f -> Exit: %.4f | Gross: ₹%.2f | Fees: ₹%.2f | Net: ₹%.2f (ROI: %.2f%%) | Result: %s | Duration: %s | Condition: %s"
+                .format(trade.side, trade.pair, trade.entryPrice, exitFillPrice, grossPnl, totalFeesInr, netRealizedPnl, roiPct, tradeResult, durationFormatted, exitCondition)
         )
 
         onTradeClosed?.invoke(closedTrade, netRealizedPnl)

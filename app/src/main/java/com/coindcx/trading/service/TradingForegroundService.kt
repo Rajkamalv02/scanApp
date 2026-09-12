@@ -277,6 +277,29 @@ class TradingForegroundService : Service() {
             // 2. Scan Futures Market Opportunities
             val rawOpportunities = scannerEngine.scanMarket(config, activeStrategy, executionEngine)
 
+            // 2.5. Process Strategy-Triggered Exits on Open Positions (e.g. EMA Reversal Crossover)
+            for (opp in rawOpportunities) {
+                if (opp.signal.action == com.coindcx.trading.engine.SignalAction.EXIT) {
+                    val activePos = executionEngine.getActivePosition(opp.pair)
+                    if (activePos != null && activePos.isOpen) {
+                        val posTradeId = activePos.id
+                        AppLogManager.tradeLifecycle(
+                            event = "EXIT_SIGNAL",
+                            tradeId = posTradeId,
+                            symbol = opp.pair,
+                            mode = modeLabel,
+                            attributes = mapOf(
+                                "exit_condition" to "EMA_REVERSAL_CROSS",
+                                "reason" to opp.signal.reason,
+                                "current_price" to "%.4f".format(opp.currentPrice)
+                            ),
+                            narrative = "Strategy EXIT signal on %s: %s @ %.4f".format(opp.pair, opp.signal.reason, opp.currentPrice)
+                        )
+                        executionEngine.exitPosition(opp.pair, opp.currentPrice, opp.signal.reason, posTradeId)
+                    }
+                }
+            }
+
             // 3. Rank Opportunities from #1 to #5
             val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
 
@@ -303,6 +326,8 @@ class TradingForegroundService : Service() {
             } catch (_: Exception) { null }
 
             for (opp in rankedTop5) {
+                val tradeId = opp.signal.tradeId ?: AppLogManager.TradeIdGenerator.generate(opp.pair)
+
                 // Signal Action Check: Must be actionable entry
                 if (!opp.isBuy && !opp.isSell) {
                     AppLogManager.d("EVAL", "[${opp.pair}] Watching: ${opp.signal.reason} [QualityScore: ${opp.qualityScore}]")
@@ -318,9 +343,42 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
+                // Initial Entry Evaluation Structured Log
+                AppLogManager.tradeLifecycle(
+                    event = "ENTRY_EVALUATION",
+                    tradeId = tradeId,
+                    symbol = opp.pair,
+                    mode = modeLabel,
+                    attributes = mapOf(
+                        "rank" to opp.rank,
+                        "action" to opp.actionLabel,
+                        "price" to "%.4f".format(opp.currentPrice),
+                        "fast_ema" to "%.4f".format(opp.signal.fastEma),
+                        "slow_ema" to "%.4f".format(opp.signal.slowEma),
+                        "quality_score" to opp.qualityScore,
+                        "quality_category" to opp.qualityCategory,
+                        "net_rr" to "%.2f".format(opp.netRiskRewardRatio),
+                        "htf_align" to opp.htfAlignment
+                    ),
+                    narrative = "Evaluating %s candidate: Rank #%d %s %s @ %.4f (Quality: %d/100 %s, Net R:R: %.2f, HTF: %s)"
+                        .format(modeLabel, opp.rank, opp.pair, opp.actionLabel, opp.currentPrice, opp.qualityScore, opp.qualityCategory, opp.netRiskRewardRatio, opp.htfAlignment)
+                )
+
                 // Circuit Breaker / Cooldown Gate
                 if (isCooldown) {
-                    AppLogManager.w("RISK", "[${opp.pair}] Skipped: Cooldown active (${riskManager.getCooldownRemainingMinutes()}m remaining)")
+                    AppLogManager.tradeLifecycle(
+                        event = "RISK_FILTER_REJECTED",
+                        tradeId = tradeId,
+                        symbol = opp.pair,
+                        mode = modeLabel,
+                        attributes = mapOf(
+                            "gate" to "CIRCUIT_BREAKER_COOLDOWN",
+                            "remaining_minutes" to riskManager.getCooldownRemainingMinutes(),
+                            "reason" to "Consecutive loss cooldown active"
+                        ),
+                        narrative = "Gate 0 (Circuit Breaker Cooldown) REJECTED: %dm cooldown active after consecutive losses"
+                            .format(riskManager.getCooldownRemainingMinutes())
+                    )
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -335,7 +393,20 @@ class TradingForegroundService : Service() {
 
                 // Gate 1: Quality Score Rubric Gate (Must be approved by TradeQualityScorer)
                 if (!opp.isApproved) {
-                    AppLogManager.quality("[${opp.pair}] Gate 1 (Quality) REJECTED: Score ${opp.qualityScore}/100 (${opp.qualityCategory}). Rejection: ${opp.rejectionReason ?: "Insufficient confluence"}")
+                    AppLogManager.tradeLifecycle(
+                        event = "RISK_FILTER_REJECTED",
+                        tradeId = tradeId,
+                        symbol = opp.pair,
+                        mode = modeLabel,
+                        attributes = mapOf(
+                            "gate" to "GATE_1_QUALITY",
+                            "quality_score" to opp.qualityScore,
+                            "quality_category" to opp.qualityCategory,
+                            "reason" to (opp.rejectionReason ?: "Insufficient confluence")
+                        ),
+                        narrative = "Gate 1 (Quality Rubric) REJECTED: Score %d/100 (%s). Rejection: %s"
+                            .format(opp.qualityScore, opp.qualityCategory, opp.rejectionReason ?: "Insufficient confluence")
+                    )
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -350,7 +421,17 @@ class TradingForegroundService : Service() {
 
                 // Gate 1.5: Canary Guardrail — Restrict Live Trading to Tier-1 Majors
                 if (!executionEngine.isPaperTrading && !scannerEngine.universeManager.isTier1Major(opp.pair)) {
-                    AppLogManager.risk("[${opp.pair}] Skipped: Tier-2 Altcoin restricted to Paper trading until canary validation complete")
+                    AppLogManager.tradeLifecycle(
+                        event = "RISK_FILTER_REJECTED",
+                        tradeId = tradeId,
+                        symbol = opp.pair,
+                        mode = modeLabel,
+                        attributes = mapOf(
+                            "gate" to "GATE_1_5_CANARY",
+                            "reason" to "Tier-2 Altcoin restricted to Paper trading until canary validation complete"
+                        ),
+                        narrative = "Gate 1.5 (Canary Guardrail) REJECTED: %s is Tier-2 Altcoin restricted to Paper trading".format(opp.pair)
+                    )
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -371,7 +452,17 @@ class TradingForegroundService : Service() {
                     btcMacroTrendIsBullish = btcMacroBullish
                 )
                 if (portfolioCheck is RiskCheckResult.Rejected) {
-                    AppLogManager.risk("[${opp.pair}] Gate 2 (Macro/Portfolio) REJECTED: ${portfolioCheck.reason}")
+                    AppLogManager.tradeLifecycle(
+                        event = "RISK_FILTER_REJECTED",
+                        tradeId = tradeId,
+                        symbol = opp.pair,
+                        mode = modeLabel,
+                        attributes = mapOf(
+                            "gate" to "GATE_2_PORTFOLIO_MACRO",
+                            "reason" to portfolioCheck.reason
+                        ),
+                        narrative = "Gate 2 (Portfolio & Macro Correlation) REJECTED: %s".format(portfolioCheck.reason)
+                    )
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -386,6 +477,11 @@ class TradingForegroundService : Service() {
 
                 // Gate 3: Volatility-Adjusted Risk Parity Sizing (1% account risk / SL distance %)
                 val slPrice = opp.signal.stopLossPrice ?: (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
+                val slDistance = kotlin.math.abs(opp.currentPrice - slPrice)
+                val slDistPct = if (opp.currentPrice > 0) (slDistance / opp.currentPrice) * 100.0 else 0.0
+                val riskPerTradePct = riskManager.settings.riskPerTradePercent
+                val targetRiskInr = inMemoryAvailableBalance * (riskPerTradePct / 100.0)
+
                 val marginToAllocate = riskManager.calculateRiskSizedMargin(
                     balanceInr = inMemoryAvailableBalance,
                     entryPrice = opp.currentPrice,
@@ -393,11 +489,95 @@ class TradingForegroundService : Service() {
                     leverage = config.leverage,
                     minMarginInr = config.minMarginPerTradeInr
                 )
-                AppLogManager.risk("[${opp.pair}] Gate 3 (Risk Sizing): Margin ₹%.2f @ ${config.leverage}x (Entry: ${opp.currentPrice}, SL: $slPrice)".format(marginToAllocate))
+                val requestedLeverage = config.leverage
+                val actualLeverage = requestedLeverage.coerceIn(1, riskManager.settings.maxLeverage)
+                val notionalInr = marginToAllocate * actualLeverage
+
+                val tpPrice = opp.signal.takeProfitPrice ?: (if (opp.isBuy) opp.currentPrice + (slDistance * 2.0) else opp.currentPrice - (slDistance * 2.0))
+                val targetDistance = kotlin.math.abs(tpPrice - opp.currentPrice)
+                val targetDistPct = if (opp.currentPrice > 0) (targetDistance / opp.currentPrice) * 100.0 else 0.0
+                val rrRatio = if (opp.signal.riskRewardRatio > 0) opp.signal.riskRewardRatio else 2.0
+                val expectedProfitInr = targetRiskInr * rrRatio
+                val expectedLossInr = targetRiskInr
+
+                // Stop-Loss Calculation Log
+                AppLogManager.tradeLifecycle(
+                    event = "STOP_LOSS_CALCULATION",
+                    tradeId = tradeId,
+                    symbol = opp.pair,
+                    mode = modeLabel,
+                    attributes = mapOf(
+                        "side" to (if (opp.isBuy) "LONG" else "SHORT"),
+                        "entry_price" to "%.4f".format(opp.currentPrice),
+                        "sl_method" to "ATR_MULTIPLIER",
+                        "atr_14" to "%.4f".format(opp.signal.atr),
+                        "atr_mult" to "%.2fx".format(opp.signal.atrMultiplier),
+                        "sl_dist" to "%.4f".format(slDistance),
+                        "sl_dist_pct" to "%.2f%%".format(slDistPct),
+                        "stop_loss" to "%.4f".format(slPrice),
+                        "account_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
+                        "risk_pct" to "%.1f%%".format(riskPerTradePct),
+                        "risk_amount_inr" to "₹%.2f".format(targetRiskInr)
+                    ),
+                    narrative = "Entry = %.4f -> SL distance = %.4f (%.2f%%) -> SL = %.4f -> Risk = ₹%.2f (%.1f%% of ₹%.2f)"
+                        .format(opp.currentPrice, slDistance, slDistPct, slPrice, targetRiskInr, riskPerTradePct, inMemoryAvailableBalance)
+                )
+
+                // Target Calculation Log
+                AppLogManager.tradeLifecycle(
+                    event = "TARGET_CALCULATION",
+                    tradeId = tradeId,
+                    symbol = opp.pair,
+                    mode = modeLabel,
+                    attributes = mapOf(
+                        "side" to (if (opp.isBuy) "LONG" else "SHORT"),
+                        "entry_price" to "%.4f".format(opp.currentPrice),
+                        "stop_loss" to "%.4f".format(slPrice),
+                        "target_method" to "FIXED_RISK_REWARD",
+                        "rr_ratio" to "1:%.1f".format(rrRatio),
+                        "target_dist" to "%.4f".format(targetDistance),
+                        "target_dist_pct" to "%.2f%%".format(targetDistPct),
+                        "target" to "%.4f".format(tpPrice),
+                        "expected_profit_inr" to "₹%.2f".format(expectedProfitInr),
+                        "expected_loss_inr" to "₹%.2f".format(expectedLossInr)
+                    ),
+                    narrative = "Entry = %.4f -> Stop Loss = %.4f -> Risk = ₹%.2f -> R:R 1:%.1f -> Target = %.4f (Exp Profit: ₹%.2f, Exp Loss: ₹%.2f)"
+                        .format(opp.currentPrice, slPrice, targetRiskInr, rrRatio, tpPrice, expectedProfitInr, expectedLossInr)
+                )
+
+                // Leverage & Sizing Log
+                AppLogManager.tradeLifecycle(
+                    event = "LEVERAGE_AND_SIZING",
+                    tradeId = tradeId,
+                    symbol = opp.pair,
+                    mode = modeLabel,
+                    attributes = mapOf(
+                        "requested_leverage" to "${requestedLeverage}x",
+                        "actual_leverage" to "${actualLeverage}x",
+                        "margin_allocated_inr" to "₹%.2f".format(marginToAllocate),
+                        "notional_value_inr" to "₹%.2f".format(notionalInr),
+                        "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance)
+                    ),
+                    narrative = "Account Balance = ₹%.2f -> Allocated Margin = ₹%.2f @ %dx leverage (Requested: %dx) -> Notional Value = ₹%.2f"
+                        .format(inMemoryAvailableBalance, marginToAllocate, actualLeverage, requestedLeverage, notionalInr)
+                )
 
                 // Gate 4: Fresh In-Memory Balance Check
                 if (inMemoryAvailableBalance < marginToAllocate) {
-                    AppLogManager.risk("[${opp.pair}] Gate 4 (Balance) REJECTED: Available ₹%.2f < Sized Margin ₹%.2f".format(inMemoryAvailableBalance, marginToAllocate))
+                    AppLogManager.tradeLifecycle(
+                        event = "RISK_FILTER_REJECTED",
+                        tradeId = tradeId,
+                        symbol = opp.pair,
+                        mode = modeLabel,
+                        attributes = mapOf(
+                            "gate" to "GATE_4_BALANCE",
+                            "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
+                            "margin_required_inr" to "₹%.2f".format(marginToAllocate),
+                            "shortfall_inr" to "₹%.2f".format(marginToAllocate - inMemoryAvailableBalance)
+                        ),
+                        narrative = "Gate 4 (Balance Check) REJECTED: Available ₹%.2f < Sized Margin ₹%.2f (Shortfall: ₹%.2f)"
+                            .format(inMemoryAvailableBalance, marginToAllocate, marginToAllocate - inMemoryAvailableBalance)
+                    )
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -410,8 +590,43 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
-                // All gates passed -> Execute Order!
-                AppLogManager.trade("EXEC", "[${opp.pair}] Gate 5: Submitting ${opp.actionLabel} order for ₹%.0f margin @ ${config.leverage}x...".format(marginToAllocate))
+                // All gates passed -> Approve & Construct Order!
+                AppLogManager.tradeLifecycle(
+                    event = "ENTRY_APPROVED",
+                    tradeId = tradeId,
+                    symbol = opp.pair,
+                    mode = modeLabel,
+                    attributes = mapOf(
+                        "direction" to opp.actionLabel,
+                        "entry_price" to "%.4f".format(opp.currentPrice),
+                        "margin_inr" to "₹%.2f".format(marginToAllocate),
+                        "leverage" to "${actualLeverage}x"
+                    ),
+                    narrative = "EMA crossover detected -> %s signal -> risk checks passed -> position size calculated -> leverage %dx -> entry approved"
+                        .format(opp.actionLabel, actualLeverage)
+                )
+
+                AppLogManager.tradeLifecycle(
+                    event = "ORDER_CONSTRUCTION",
+                    tradeId = tradeId,
+                    symbol = opp.pair,
+                    mode = modeLabel,
+                    attributes = mapOf(
+                        "side" to (if (opp.isBuy) "BUY" else "SELL"),
+                        "direction" to (if (opp.isBuy) "LONG" else "SHORT"),
+                        "order_type" to (if (executionEngine.isPaperTrading) "MARKET" else "LIMIT"),
+                        "price" to "%.4f".format(opp.currentPrice),
+                        "margin_inr" to "₹%.2f".format(marginToAllocate),
+                        "leverage" to "${actualLeverage}x",
+                        "stop_loss" to "%.4f".format(slPrice),
+                        "target" to "%.4f".format(tpPrice),
+                        "reduce_only" to false,
+                        "time_in_force" to "GTC"
+                    ),
+                    narrative = "Constructed %s %s order for %s @ %.4f (Margin: ₹%.2f @ %dx leverage | SL: %.4f | TP: %.4f)"
+                        .format(modeLabel, if (opp.isBuy) "BUY" else "SELL", opp.pair, opp.currentPrice, marginToAllocate, actualLeverage, slPrice, tpPrice)
+                )
+
                 val orderStartTime = System.currentTimeMillis()
                 val execResult = try {
                     executionEngine.executeSignal(
@@ -419,7 +634,8 @@ class TradingForegroundService : Service() {
                         pair = opp.pair,
                         currentPrice = opp.currentPrice,
                         marginInr = marginToAllocate,
-                        leverage = config.leverage
+                        leverage = actualLeverage,
+                        tradeId = tradeId
                     )
                 } catch (e: Exception) {
                     AppLogManager.e("EXEC", "[${opp.pair}] Exception during order execution: ${e.message}", e)

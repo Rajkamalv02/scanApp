@@ -133,10 +133,12 @@ class PaperExecutionEngine(
         pair: String,
         currentPrice: Double,
         marginInr: Double,
-        leverage: Int
+        leverage: Int,
+        tradeId: String
     ): ExecutionResult {
         val currentSession = accountManager.getCurrentSessionId()
-        val clientOrderId = "paper_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+        val effectiveTradeId = tradeId.ifEmpty { AppLogManager.TradeIdGenerator.generate(pair) }
+        val clientOrderId = effectiveTradeId
 
         val isBuy = signal.action == SignalAction.ENTER_LONG
         val side = if (isBuy) "LONG" else "SHORT"
@@ -155,12 +157,30 @@ class PaperExecutionEngine(
         )
         db.orderDao().insert(initialOrder)
 
+        AppLogManager.tradeLifecycle(
+            event = "ORDER_REQUESTED",
+            tradeId = effectiveTradeId,
+            symbol = pair,
+            mode = "PAPER",
+            attributes = mapOf(
+                "side" to side,
+                "order_type" to "MARKET",
+                "reference_price" to "%.4f".format(currentPrice),
+                "margin_inr" to "₹%.2f".format(marginInr),
+                "leverage" to "${leverage}x"
+            ),
+            narrative = "ORDER_REQUESTED: Submitting simulated %s MARKET order on %s @ %.4f (Margin: ₹%.2f, Lev: %dx)"
+                .format(side, pair, currentPrice, marginInr, leverage)
+        )
+
         // 2. Simulate Fill (State: FILLED with slippage + fees)
         val fillPrice = if (isBuy) {
             currentPrice * (1.0 + PaperPositionManager.SLIPPAGE_RATE)
         } else {
             currentPrice * (1.0 - PaperPositionManager.SLIPPAGE_RATE)
         }
+        val slippageAmount = kotlin.math.abs(fillPrice - currentPrice)
+        val slippagePct = if (currentPrice > 0) (slippageAmount / currentPrice) * 100.0 else 0.0
 
         val quantity = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, fillPrice)
 
@@ -176,6 +196,29 @@ class PaperExecutionEngine(
                 status = "FILLED",
                 updatedAt = System.currentTimeMillis()
             )
+        )
+
+        AppLogManager.tradeLifecycle(
+            event = "ORDER_FILLED",
+            tradeId = effectiveTradeId,
+            symbol = pair,
+            mode = "PAPER",
+            attributes = mapOf(
+                "status" to "FILLED",
+                "exchange_order_id" to "sim_$clientOrderId",
+                "client_order_id" to clientOrderId,
+                "side" to side,
+                "order_price" to "%.4f".format(currentPrice),
+                "fill_price" to "%.4f".format(fillPrice),
+                "quantity" to "%.4f".format(quantity),
+                "slippage_inr" to "%.4f".format(slippageAmount),
+                "slippage_pct" to "%.3f%%".format(slippagePct),
+                "entry_fee_inr" to "₹%.2f".format(entryFeeInr),
+                "est_liquidation_price" to "%.4f".format(estLiq),
+                "notional_inr" to "₹%.2f".format(notionalInr)
+            ),
+            narrative = "ORDER_FILLED: Simulated fill on %s %s @ %.4f (Order Price: %.4f, Slippage: %.3f%%, Fee: ₹%.2f, Qty: %.4f, EstLiq: %.4f)"
+                .format(side, pair, fillPrice, currentPrice, slippagePct, entryFeeInr, quantity, estLiq)
         )
 
         // 3. Create Open Position in Holding (State: OPEN)
@@ -213,12 +256,6 @@ class PaperExecutionEngine(
         // Record initial equity snapshot
         accountManager.recordEquitySnapshot()
 
-        AppLogManager.trade(
-            "PAPER_TRADE",
-            "Simulated $side $pair (Margin: ₹%.0f, Lev: ${leverage}x, Qty: $quantity) @ $fillPrice. EstLiq: $estLiq. ${signal.reason}"
-                .format(marginInr)
-        )
-
         return ExecutionResult.Success(
             orderId = clientOrderId,
             message = "Simulated $side fill on $pair with ₹%.0f margin @ $fillPrice".format(marginInr)
@@ -228,7 +265,8 @@ class PaperExecutionEngine(
     override suspend fun exitPosition(
         pair: String,
         currentPrice: Double,
-        reason: String
+        reason: String,
+        tradeId: String?
     ): ExecutionResult {
         val currentSession = accountManager.getCurrentSessionId()
         val openTrades = db.tradeDao().getTradesForSession(currentSession)

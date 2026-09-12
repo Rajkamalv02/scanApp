@@ -26,7 +26,17 @@ data class Signal(
     val takeProfitPrice: Double? = null,
     val reason: String = "",
     val confidenceScore: Double = 0.0, // 0.0 to 100.0 for ranking
-    val diagnostics: StrategyDiagnostics? = null
+    val diagnostics: StrategyDiagnostics? = null,
+    val tradeId: String? = null,
+    val entryPrice: Double = 0.0,
+    val fastEma: Double = 0.0,
+    val slowEma: Double = 0.0,
+    val prevFastEma: Double = 0.0,
+    val prevSlowEma: Double = 0.0,
+    val atr: Double = 0.0,
+    val atrMultiplier: Double = 0.0,
+    val riskDistance: Double = 0.0,
+    val riskRewardRatio: Double = 0.0
 )
 
 /**
@@ -42,5 +52,5 @@ interface Strategy {
     val requiredCandleCount: Int
     val defaultTimeframe: String // e.g. "5m"
 
-    fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?): Signal
+    fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?, pair: String = ""): Signal
 }

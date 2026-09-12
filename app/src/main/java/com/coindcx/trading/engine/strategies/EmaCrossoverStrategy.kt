@@ -71,7 +71,7 @@ class EmaCrossoverStrategy(
         }
     }
 
-    override fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?): Signal {
+    override fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?, pair: String): Signal {
         if (candles.size < requiredCandleCount) {
             return Signal(
                 action = SignalAction.HOLD,
@@ -207,18 +207,52 @@ class EmaCrossoverStrategy(
 
         // 3. New Entry Signal Generation on Fresh Confirmed Crossover
         if (isBullishCrossover) {
+            val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "EMA" })
             val stopLossPrice = currentPrice - (atr * atrMultiplier)
             val riskDistance = (currentPrice - stopLossPrice).coerceAtLeast(atr * 0.5)
             val takeProfitPrice = currentPrice + (riskDistance * riskRewardRatio)
+            val slDistPct = (riskDistance / currentPrice) * 100.0
+            val tpDistPct = ((takeProfitPrice - currentPrice) / currentPrice) * 100.0
 
-            AppLogManager.trade(
-                "STRATEGY",
-                ">>> BULLISH EMA CROSSOVER DETECTED: Fast=%.4f crossed above Slow=%.4f (Prev: %.4f <= %.4f) | Price=%.4f, SL=%.4f, TP=%.4f, ATR=%.4f"
-                    .format(currFast, currSlow, prevFast, prevSlow, currentPrice, stopLossPrice, takeProfitPrice, atr)
+            AppLogManager.tradeLifecycle(
+                event = "SIGNAL_GENERATED",
+                tradeId = tradeId,
+                symbol = pair.ifEmpty { "FUTURES" },
+                mode = "EVAL",
+                attributes = mapOf(
+                    "side" to "LONG",
+                    "entry_price" to "%.4f".format(currentPrice),
+                    "fast_ema" to "%.4f".format(currFast),
+                    "slow_ema" to "%.4f".format(currSlow),
+                    "prev_fast_ema" to "%.4f".format(prevFast),
+                    "prev_slow_ema" to "%.4f".format(prevSlow),
+                    "crossover" to "BULLISH_CONFIRMED",
+                    "atr_14" to "%.4f".format(atr),
+                    "atr_mult" to "%.2fx".format(atrMultiplier),
+                    "sl_dist" to "%.4f".format(riskDistance),
+                    "sl_dist_pct" to "%.2f%%".format(slDistPct),
+                    "stop_loss" to "%.4f".format(stopLossPrice),
+                    "target" to "%.4f".format(takeProfitPrice),
+                    "tp_dist_pct" to "%.2f%%".format(tpDistPct),
+                    "rr_ratio" to "1:%.1f".format(riskRewardRatio),
+                    "confidence" to 80.0
+                ),
+                narrative = "Bullish EMA Crossover detected: Fast(%.4f) crossed above Slow(%.4f) on confirmed bar (Prev: %.4f <= %.4f) -> Long signal -> Entry=%.4f, SL=%.4f (dist: %.4f), TP=%.4f (dist: %.4f), ATR=%.4f"
+                    .format(currFast, currSlow, prevFast, prevSlow, currentPrice, stopLossPrice, riskDistance, takeProfitPrice, takeProfitPrice - currentPrice, atr)
             )
 
             return Signal(
                 action = SignalAction.ENTER_LONG,
+                tradeId = tradeId,
+                entryPrice = currentPrice,
+                fastEma = currFast,
+                slowEma = currSlow,
+                prevFastEma = prevFast,
+                prevSlowEma = prevSlow,
+                atr = atr,
+                atrMultiplier = atrMultiplier,
+                riskDistance = riskDistance,
+                riskRewardRatio = riskRewardRatio,
                 stopLossPrice = stopLossPrice,
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = 80.0,
@@ -228,18 +262,52 @@ class EmaCrossoverStrategy(
         }
 
         if (isBearishCrossover) {
+            val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "EMA" })
             val stopLossPrice = currentPrice + (atr * atrMultiplier)
             val riskDistance = (stopLossPrice - currentPrice).coerceAtLeast(atr * 0.5)
             val takeProfitPrice = currentPrice - (riskDistance * riskRewardRatio)
+            val slDistPct = (riskDistance / currentPrice) * 100.0
+            val tpDistPct = ((currentPrice - takeProfitPrice) / currentPrice) * 100.0
 
-            AppLogManager.trade(
-                "STRATEGY",
-                ">>> BEARISH EMA CROSSOVER DETECTED: Fast=%.4f crossed below Slow=%.4f (Prev: %.4f >= %.4f) | Price=%.4f, SL=%.4f, TP=%.4f, ATR=%.4f"
-                    .format(currFast, currSlow, prevFast, prevSlow, currentPrice, stopLossPrice, takeProfitPrice, atr)
+            AppLogManager.tradeLifecycle(
+                event = "SIGNAL_GENERATED",
+                tradeId = tradeId,
+                symbol = pair.ifEmpty { "FUTURES" },
+                mode = "EVAL",
+                attributes = mapOf(
+                    "side" to "SHORT",
+                    "entry_price" to "%.4f".format(currentPrice),
+                    "fast_ema" to "%.4f".format(currFast),
+                    "slow_ema" to "%.4f".format(currSlow),
+                    "prev_fast_ema" to "%.4f".format(prevFast),
+                    "prev_slow_ema" to "%.4f".format(prevSlow),
+                    "crossover" to "BEARISH_CONFIRMED",
+                    "atr_14" to "%.4f".format(atr),
+                    "atr_mult" to "%.2fx".format(atrMultiplier),
+                    "sl_dist" to "%.4f".format(riskDistance),
+                    "sl_dist_pct" to "%.2f%%".format(slDistPct),
+                    "stop_loss" to "%.4f".format(stopLossPrice),
+                    "target" to "%.4f".format(takeProfitPrice),
+                    "tp_dist_pct" to "%.2f%%".format(tpDistPct),
+                    "rr_ratio" to "1:%.1f".format(riskRewardRatio),
+                    "confidence" to 80.0
+                ),
+                narrative = "Bearish EMA Crossover detected: Fast(%.4f) crossed below Slow(%.4f) on confirmed bar (Prev: %.4f >= %.4f) -> Short signal -> Entry=%.4f, SL=%.4f (dist: %.4f), TP=%.4f (dist: %.4f), ATR=%.4f"
+                    .format(currFast, currSlow, prevFast, prevSlow, currentPrice, stopLossPrice, riskDistance, takeProfitPrice, currentPrice - takeProfitPrice, atr)
             )
 
             return Signal(
                 action = SignalAction.ENTER_SHORT,
+                tradeId = tradeId,
+                entryPrice = currentPrice,
+                fastEma = currFast,
+                slowEma = currSlow,
+                prevFastEma = prevFast,
+                prevSlowEma = prevSlow,
+                atr = atr,
+                atrMultiplier = atrMultiplier,
+                riskDistance = riskDistance,
+                riskRewardRatio = riskRewardRatio,
                 stopLossPrice = stopLossPrice,
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = 80.0,
