@@ -20,7 +20,7 @@ class MarketScannerEngine(
     private val liquidMarketWidePairs = listOf(
         "B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-DOGE_USDT",
         "B-ADA_USDT", "B-BNB_USDT", "B-AVAX_USDT", "B-LINK_USDT", "B-NEAR_USDT",
-        "B-SUI_USDT", "B-APT_USDT", "B-MATIC_USDT", "B-PEPE_USDT", "B-SHIB_USDT",
+        "B-SUI_USDT", "B-APT_USDT", "B-POL_USDT", "B-PEPE_USDT", "B-SHIB_USDT",
         "B-ARB_USDT", "B-OP_USDT", "B-TIA_USDT", "B-RENDER_USDT", "B-INJ_USDT"
     )
 

@@ -611,6 +611,11 @@ class MainActivity : AppCompatActivity() {
                         itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
                         itemBinding.tvAllocationStatus.text = "✗ " + audit.reason
                     }
+                    com.coindcx.trading.engine.scanner.AuditStatus.WATCHING -> {
+                        itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
+                        itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.text_secondary))
+                        itemBinding.tvAllocationStatus.text = "👁 " + audit.reason
+                    }
                     else -> {
                         itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_background)
                         itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.text_secondary))

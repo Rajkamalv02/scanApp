@@ -311,7 +311,7 @@ class TradingForegroundService : Service() {
                             rank = opp.rank,
                             pair = opp.pair,
                             action = opp.actionLabel,
-                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.WATCHING,
                             reason = "Watching — ${opp.signal.reason} [Score: ${opp.qualityScore}]"
                         )
                     )
@@ -486,8 +486,9 @@ class TradingForegroundService : Service() {
             val skippedLimitCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT }
             val skippedExistingCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_EXISTING_POSITION }
             val skippedBalanceCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE }
+            val watchingCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.WATCHING }
 
-            AppLogManager.scanner("Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Ranked Top ${rankedTop5.size}. Executed: $executedCount | Filtered: $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance.")
+            AppLogManager.scanner("Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Ranked Top ${rankedTop5.size}. Executed: $executedCount | Filtered: $watchingCount watching, $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance.")
 
             // Update Notification
             val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
