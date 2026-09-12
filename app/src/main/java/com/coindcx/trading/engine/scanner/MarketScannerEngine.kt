@@ -14,35 +14,36 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 class MarketScannerEngine(
-    private val apiService: CoinDCXApiService
+    private val apiService: CoinDCXApiService,
+    val universeManager: FuturesUniverseManager = FuturesUniverseManager(apiService)
 ) {
-    // High-volume, highly liquid futures instruments curated for market-wide scanning
-    private val liquidMarketWidePairs = listOf(
-        "B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-DOGE_USDT",
-        "B-ADA_USDT", "B-BNB_USDT", "B-AVAX_USDT", "B-LINK_USDT", "B-NEAR_USDT",
-        "B-SUI_USDT", "B-APT_USDT", "B-POL_USDT", "B-PEPE_USDT", "B-SHIB_USDT",
-        "B-ARB_USDT", "B-OP_USDT", "B-TIA_USDT", "B-RENDER_USDT", "B-INJ_USDT"
-    )
-
     suspend fun scanMarket(
         config: TradingConfig,
         strategy: Strategy,
         executionEngine: ExecutionEngine
     ): List<MarketOpportunity> = withContext(Dispatchers.IO) {
-        val pairsToScan = if (config.isMarketWideScan) {
-            liquidMarketWidePairs
+        val dynamicUniverse = if (config.isMarketWideScan) {
+            universeManager.getOrRefreshUniverse()
         } else {
-            config.selectedPairs.ifEmpty { liquidMarketWidePairs.take(5) }
+            config.selectedPairs.ifEmpty { universeManager.getMajorUniverse() }
         }
 
-        AppLogManager.scanner("Starting market scan cycle [${if (config.isMarketWideScan) "Market-Wide (${pairsToScan.size} pairs)" else "${pairsToScan.size} pairs"}] | Strategy: ${strategy.name} | TF: ${config.timeframe}")
+        // Critical: Prevent open-position orphaning by including pairs of all active open positions
+        // even if they temporarily fall outside the dynamic universe cutoff.
+        val openPositionPairs = executionEngine.getAllOpenPositions().map { it.pair }
+        val pairsToScan = (dynamicUniverse + openPositionPairs).distinct()
 
-        val concurrencySemaphore = Semaphore(2) // Max 2 concurrent network requests to prevent 429
+        AppLogManager.scanner(
+            "Starting market scan cycle [${if (config.isMarketWideScan) "Dynamic Universe (${dynamicUniverse.size} pairs)" else "${dynamicUniverse.size} pairs"} + ${openPositionPairs.size} active open positions -> Total ${pairsToScan.size} pairs] | Strategy: ${strategy.name} | TF: ${config.timeframe}"
+        )
+
+        // Concurrency controlled with Semaphore(3) and 20ms delay pacing to respect CoinDCX rate limits
+        val concurrencySemaphore = Semaphore(3)
 
         val deferredResults = pairsToScan.map { pair ->
             async {
                 concurrencySemaphore.withPermit {
-                    kotlinx.coroutines.delay(50)
+                    kotlinx.coroutines.delay(20)
                     scanSinglePair(pair, config.timeframe, strategy, executionEngine)
                 }
             }
@@ -61,9 +62,9 @@ class MarketScannerEngine(
         executionEngine: ExecutionEngine
     ): MarketOpportunity? {
         return try {
-            val candleResp = apiService.getCandles(pair, timeframe)
-            if (!candleResp.isSuccessful || candleResp.body().isNullOrEmpty()) {
-                val err = if (!candleResp.isSuccessful) "HTTP ${candleResp.code()}: ${candleResp.message()}" else "Empty candle array"
+            val candleResp = fetchCandlesWithBackoffInternal(pair, timeframe)
+            if (candleResp == null || !candleResp.isSuccessful || candleResp.body().isNullOrEmpty()) {
+                val err = if (candleResp != null && !candleResp.isSuccessful) "HTTP ${candleResp.code()}: ${candleResp.message()}" else "Empty candle array or timeout"
                 AppLogManager.w("SCANNER", "[$pair] Failed fetching $timeframe candles: $err")
                 return null
             }
@@ -91,18 +92,23 @@ class MarketScannerEngine(
                 AppLogManager.d("STRATEGY", "[$pair] HOLD: ${signal.reason} $diagInfo")
             }
 
-            // Fetch Higher-Timeframe (1h) candles for macro trend alignment
-            val htfResp = if (timeframe != "1h" && timeframe != "1d") {
-                try { 
-                    apiService.getCandles(pair, "1h") 
-                } catch (e: Exception) { 
-                    AppLogManager.w("SCANNER", "[$pair] Failed fetching 1h HTF candles: ${e.message}")
-                    null 
+            // Optimization: Fetch Higher-Timeframe (1h) candles ONLY when signal is actionable (JIT fetch).
+            // This reduces network traffic by ~50% per scan cycle when mostly HOLD signals occur.
+            val htfCandles = if (signal.action != SignalAction.HOLD) {
+                if (timeframe != "1h" && timeframe != "1d") {
+                    try {
+                        val htfResp = fetchCandlesWithBackoffInternal(pair, "1h", maxRetries = 2)
+                        if (htfResp?.isSuccessful == true) htfResp.body()?.sortedBy { it.time } else null
+                    } catch (e: Exception) {
+                        AppLogManager.w("SCANNER", "[$pair] Failed fetching 1h HTF candles: ${e.message}")
+                        null
+                    }
+                } else {
+                    candles
                 }
             } else {
-                candleResp
+                null
             }
-            val htfCandles = if (htfResp?.isSuccessful == true) htfResp.body()?.sortedBy { it.time } else null
 
             val quality = TradeQualityScorer.evaluateQuality(
                 candles = candles,
@@ -134,5 +140,33 @@ class MarketScannerEngine(
             AppLogManager.e("SCANNER", "[$pair] Unhandled exception during pair scan: ${e.message}", e)
             null
         }
+    }
+
+    private suspend fun fetchCandlesWithBackoffInternal(
+        pair: String,
+        timeframe: String,
+        maxRetries: Int = 3
+    ): retrofit2.Response<List<com.coindcx.trading.data.api.models.MarketCandle>>? {
+        var backoffMs = 1000L
+        for (attempt in 1..maxRetries) {
+            try {
+                val resp = apiService.getCandles(pair, timeframe)
+                if (resp.code() == 429) {
+                    AppLogManager.w("SCANNER", "[$pair] HTTP 429 rate limited on $timeframe candles (Attempt $attempt/$maxRetries). Backing off for ${backoffMs}ms...")
+                    kotlinx.coroutines.delay(backoffMs)
+                    backoffMs *= 2
+                    continue
+                }
+                return resp
+            } catch (e: Exception) {
+                if (attempt == maxRetries) {
+                    AppLogManager.w("SCANNER", "[$pair] Failed fetching $timeframe candles after $maxRetries attempts: ${e.message}")
+                    return null
+                }
+                kotlinx.coroutines.delay(backoffMs)
+                backoffMs *= 2
+            }
+        }
+        return null
     }
 }

@@ -115,13 +115,17 @@ object AppLogManager {
     fun log(level: String, tag: String, message: String, throwable: Throwable? = null) {
         val sanitized = redactSensitiveData(message)
 
-        // 1. Android Logcat
-        when (level.uppercase(Locale.US)) {
-            "DEBUG" -> Log.d(tag, sanitized)
-            "INFO", "TRADE", "STRATEGY" -> Log.i(tag, sanitized)
-            "WARN", "RISK", "QUALITY" -> Log.w(tag, sanitized)
-            "ERROR", "CRITICAL" -> Log.e(tag, sanitized, throwable)
-            else -> Log.v(tag, sanitized)
+        // 1. Android Logcat (safely guarded for local JVM unit test environments)
+        try {
+            when (level.uppercase(Locale.US)) {
+                "DEBUG" -> Log.d(tag, sanitized)
+                "INFO", "TRADE", "STRATEGY" -> Log.i(tag, sanitized)
+                "WARN", "RISK", "QUALITY" -> Log.w(tag, sanitized)
+                "ERROR", "CRITICAL" -> Log.e(tag, sanitized, throwable)
+                else -> Log.v(tag, sanitized)
+            }
+        } catch (_: Throwable) {
+            // Ignored in headless JVM test runners where android.util.Log is unmocked
         }
 
         // 2. Enqueue for asynchronous disk writing

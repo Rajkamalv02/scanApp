@@ -348,6 +348,21 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
+                // Gate 1.5: Canary Guardrail — Restrict Live Trading to Tier-1 Majors
+                if (!executionEngine.isPaperTrading && !scannerEngine.universeManager.isTier1Major(opp.pair)) {
+                    AppLogManager.risk("[${opp.pair}] Skipped: Tier-2 Altcoin restricted to Paper trading until canary validation complete")
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_PORTFOLIO_LIMIT,
+                            reason = "Skipped — Tier-2 Altcoin restricted to Paper trading until canary validation complete"
+                        )
+                    )
+                    continue
+                }
+
                 // Gate 2: Portfolio Exposure & Macro Regime BTC Gate
                 val portfolioCheck = riskManager.checkPortfolioAndCorrelation(
                     candidatePair = opp.pair,

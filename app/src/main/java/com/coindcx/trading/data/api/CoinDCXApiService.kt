@@ -21,6 +21,10 @@ interface CoinDCXApiService {
     suspend fun getTicker(): Response<List<Map<String, Any>>>
 
     @Headers("X-PUBLIC-REQUEST: true")
+    @GET("/exchange/v1/markets_details")
+    suspend fun getMarketsDetails(): Response<List<Map<String, Any>>>
+
+    @Headers("X-PUBLIC-REQUEST: true")
     @GET("/market_data/candles")
     suspend fun getCandles(
         @Query("pair") pair: String,
