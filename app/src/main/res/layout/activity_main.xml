@@ -1394,6 +1394,15 @@
                 android:textSize="12sp"
                 android:textStyle="bold"
                 android:fontFamily="monospace" />
+
+            <TextView
+                android:id="@+id/tvStoragePermissionHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Checking storage access..."
+                android:textColor="@color/accent_amber"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <!-- Action Buttons: Share / Export and Clear -->

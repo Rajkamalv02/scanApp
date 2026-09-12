@@ -1,10 +1,13 @@
 package com.coindcx.trading.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.LayoutInflater
@@ -14,6 +17,7 @@ import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.coindcx.trading.R
 import com.coindcx.trading.data.api.ApiClient
@@ -77,6 +81,7 @@ class MainActivity : AppCompatActivity() {
         setupPaperAccountControls()
         setupLogControls()
 
+        checkAndRequestAppPermissions()
         observeMarketScanState()
         observePaperTrades()
         observeSystemLogs()
@@ -90,6 +95,25 @@ class MainActivity : AppCompatActivity() {
             val isPaper = !binding.switchLiveMode.isChecked
             sendServiceIntent(TradingForegroundService.ACTION_START) {
                 putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateStoragePermissionUi()
+        binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        AppLogManager.flush()
+    }
+
+    private fun checkAndRequestAppPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 201)
             }
         }
     }
@@ -1054,12 +1078,14 @@ class MainActivity : AppCompatActivity() {
     private fun setupLogControls() {
         binding.tvLogFilePath.text = AppLogManager.getLogFilePath()
         binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
+        updateStoragePermissionUi()
 
         binding.cardLogFilePath.setOnClickListener {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            val clip = android.content.ClipData.newPlainText("Log Path", AppLogManager.getLogFilePath())
-            clipboard.setPrimaryClip(clip)
-            Toast.makeText(this, "Log file path copied to clipboard!", Toast.LENGTH_SHORT).show()
+            handleStoragePermissionClick()
+        }
+
+        binding.tvStoragePermissionHint.setOnClickListener {
+            handleStoragePermissionClick()
         }
 
         binding.btnExportLogs.setOnClickListener {
@@ -1079,11 +1105,60 @@ class MainActivity : AppCompatActivity() {
                     AppLogManager.clearLogs()
                     binding.tvRecentLogs.text = "Logs cleared by user."
                     binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
+                    updateStoragePermissionUi()
                     Toast.makeText(this, "Log file cleared.", Toast.LENGTH_SHORT).show()
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
+    }
+
+    private fun updateStoragePermissionUi() {
+        val hasDirectAccess = AppLogManager.isDirectStorageAccessGranted(this)
+        if (hasDirectAccess) {
+            binding.tvStoragePermissionHint.text = "✓ Direct Storage Access: Active (PC / Downloads visible)"
+            binding.tvStoragePermissionHint.setTextColor(getColor(R.color.accent_green))
+        } else {
+            binding.tvStoragePermissionHint.text = "⚡ Scoped Storage active. Tap here to grant All-Files access for direct USB/PC viewing"
+            binding.tvStoragePermissionHint.setTextColor(getColor(R.color.accent_amber))
+        }
+    }
+
+    private fun handleStoragePermissionClick() {
+        val hasDirectAccess = AppLogManager.isDirectStorageAccessGranted(this)
+        if (!hasDirectAccess) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                    Toast.makeText(this, "Enable 'Allow access to manage all files' for direct log visibility", Toast.LENGTH_LONG).show()
+                    return
+                } catch (_: Exception) {
+                    try {
+                        val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                        startActivity(intent)
+                        return
+                    } catch (_: Exception) {}
+                }
+            } else {
+                requestPermissions(
+                    arrayOf(
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        Manifest.permission.READ_EXTERNAL_STORAGE
+                    ),
+                    202
+                )
+                return
+            }
+        }
+
+        // If permission is already granted, copy path to clipboard
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clip = android.content.ClipData.newPlainText("Log Path", AppLogManager.getLogFilePath())
+        clipboard.setPrimaryClip(clip)
+        Toast.makeText(this, "Log file path copied to clipboard!", Toast.LENGTH_SHORT).show()
     }
 
     private fun observeSystemLogs() {
