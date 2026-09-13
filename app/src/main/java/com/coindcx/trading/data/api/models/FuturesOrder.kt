@@ -44,7 +44,13 @@ data class FuturesOrder(
     val createdAt: Long?,
 
     @SerializedName("updated_at")
-    val updatedAt: Long?
+    val updatedAt: Long?,
+
+    @SerializedName("stop_loss_price")
+    val stopLossPrice: Double? = null,
+
+    @SerializedName("take_profit_price")
+    val takeProfitPrice: Double? = null
 ) {
     val isPending: Boolean get() = status == "open" || status == "partially_filled"
     val isFilled: Boolean get() = status == "filled"

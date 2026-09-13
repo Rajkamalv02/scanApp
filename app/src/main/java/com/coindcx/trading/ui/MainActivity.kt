@@ -923,11 +923,12 @@ class MainActivity : AppCompatActivity() {
             itemBinding.tvPosPnlInr.text = if (pnl >= 0) "+₹%.2f".format(pnl) else "-₹%.2f".format(-pnl)
             itemBinding.tvPosPnlInr.setTextColor(getColor(if (pnl >= 0) R.color.accent_green else R.color.accent_red))
 
-            itemBinding.tvPosEntryPrice.text = "Entry: $%.2f".format(trade.entryPrice)
+            val entryText = if (trade.entryPrice < 1.0) "$%.4f".format(trade.entryPrice) else "$%.2f".format(trade.entryPrice)
+            itemBinding.tvPosEntryPrice.text = "Entry: $entryText"
             itemBinding.tvPosMargin.text = "Margin: ₹%.0f".format(trade.allocatedMarginInr)
 
-            val slText = if (trade.stopLoss != null) "$%.2f".format(trade.stopLoss) else "None"
-            val tpText = if (trade.takeProfit != null) "$%.2f".format(trade.takeProfit) else "None"
+            val slText = formatPriceUsdt(trade.stopLoss)
+            val tpText = formatPriceUsdt(trade.takeProfit)
             itemBinding.tvPosTargets.text = "SL: $slText | TP: $tpText"
 
             itemBinding.btnPosClose.setOnClickListener {
@@ -1065,11 +1066,12 @@ class MainActivity : AppCompatActivity() {
             itemBinding.tvPosPnlInr.text = if (pnlInr >= 0) "+₹%.2f".format(pnlInr) else "-₹%.2f".format(-pnlInr)
             itemBinding.tvPosPnlInr.setTextColor(getColor(if (pnlInr >= 0) R.color.accent_green else R.color.accent_red))
 
-            itemBinding.tvPosEntryPrice.text = "Entry: $%.2f".format(pos.avgPrice)
+            val entryText = if (pos.avgPrice < 1.0) "$%.4f".format(pos.avgPrice) else "$%.2f".format(pos.avgPrice)
+            itemBinding.tvPosEntryPrice.text = "Entry: $entryText"
             itemBinding.tvPosMargin.text = "Margin: ₹%.0f".format(pos.lockedMargin * 90.0)
 
-            val slText = if (pos.stopLossTrigger != null) "$%.2f".format(pos.stopLossTrigger) else "None"
-            val tpText = if (pos.takeProfitTrigger != null) "$%.2f".format(pos.takeProfitTrigger) else "None"
+            val slText = formatPriceUsdt(pos.stopLossTrigger)
+            val tpText = formatPriceUsdt(pos.takeProfitTrigger)
             itemBinding.tvPosTargets.text = "SL: $slText | TP: $tpText"
 
             itemBinding.btnPosClose.setOnClickListener {
@@ -1081,6 +1083,11 @@ class MainActivity : AppCompatActivity() {
 
             container.addView(itemBinding.root)
         }
+    }
+
+    private fun formatPriceUsdt(price: Double?): String {
+        if (price == null || price <= 0.0) return "None"
+        return if (price < 1.0) "$%.4f".format(price) else "$%.2f".format(price)
     }
 
     private fun setupLogControls() {

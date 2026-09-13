@@ -49,5 +49,11 @@ data class OrderPayload(
     val marginCurrencyShortName: String = "INR",
 
     @SerializedName("client_order_id")
-    val clientOrderId: String
+    val clientOrderId: String,
+
+    @SerializedName("stop_loss_price")
+    val stopLossPrice: Double? = null,
+
+    @SerializedName("take_profit_price")
+    val takeProfitPrice: Double? = null
 )

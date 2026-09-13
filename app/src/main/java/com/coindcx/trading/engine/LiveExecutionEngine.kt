@@ -120,9 +120,39 @@ class LiveExecutionEngine(
                 .format(pair, rawQty, finalQty, step.toString(), precision, notionalUsdt, minNotionalUsdt)
         )
 
-        return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, finalQty, leverage, tradeId)) {
+        val pricePrecision = (spec?.baseCurrencyPrecision ?: if (currentPrice < 1.0) 4 else 2).coerceIn(0, 8)
+        val formattedSl = signal.stopLossPrice?.let {
+            if (it > 0.0) {
+                java.math.BigDecimal.valueOf(it)
+                    .setScale(pricePrecision, java.math.RoundingMode.HALF_UP)
+                    .toDouble()
+            } else null
+        }
+        val formattedTp = signal.takeProfitPrice?.let {
+            if (it > 0.0) {
+                java.math.BigDecimal.valueOf(it)
+                    .setScale(pricePrecision, java.math.RoundingMode.HALF_UP)
+                    .toDouble()
+            } else null
+        }
+
+        AppLogManager.trade("LIVE_EXEC",
+            "Prepared bracket order for %s: entry=%.4f, SL=%s, TP=%s (price_precision=%d)"
+                .format(pair, currentPrice, formattedSl?.toString() ?: "None", formattedTp?.toString() ?: "None", pricePrecision)
+        )
+
+        return when (val res = orderManager.placeLimitOrder(
+            pair = pair,
+            side = side,
+            price = currentPrice,
+            quantity = finalQty,
+            leverage = leverage,
+            tradeId = tradeId,
+            stopLossPrice = formattedSl,
+            takeProfitPrice = formattedTp
+        )) {
             is OrderResult.Success -> {
-                AppLogManager.trade("LIVE_EXEC", "Placed live order: ${res.orderId} on $pair $side qty=$finalQty @ $currentPrice (Margin: ₹%.0f)".format(marginInr))
+                AppLogManager.trade("LIVE_EXEC", "Placed live bracket order: ${res.orderId} on $pair $side qty=$finalQty @ $currentPrice (SL: $formattedSl, TP: $formattedTp, Margin: ₹%.0f)".format(marginInr))
                 ExecutionResult.Success(res.orderId, "Live order placed: ${res.orderId} (Margin: ₹%.0f)".format(marginInr))
             }
             is OrderResult.Ambiguous -> {

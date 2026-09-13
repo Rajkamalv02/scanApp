@@ -643,7 +643,7 @@ class TradingForegroundService : Service() {
                 val orderStartTime = System.currentTimeMillis()
                 val execResult = try {
                     executionEngine.executeSignal(
-                        signal = opp.signal,
+                        signal = opp.signal.copy(stopLossPrice = slPrice, takeProfitPrice = tpPrice),
                         pair = opp.pair,
                         currentPrice = opp.currentPrice,
                         marginInr = marginToAllocate,
@@ -672,8 +672,8 @@ class TradingForegroundService : Service() {
                                 lockedMargin = marginToAllocate,
                                 lockedUserMargin = marginToAllocate,
                                 lockedOrderMargin = 0.0,
-                                takeProfitTrigger = opp.signal.takeProfitPrice,
-                                stopLossTrigger = opp.signal.stopLossPrice,
+                                takeProfitTrigger = tpPrice,
+                                stopLossTrigger = slPrice,
                                 leverage = config.leverage.toDouble(),
                                 maintenanceMargin = null,
                                 markPrice = opp.currentPrice,
@@ -814,6 +814,11 @@ class TradingForegroundService : Service() {
                             if (syncRes.isSuccess) {
                                 MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
                             }
+                        }
+                    } else {
+                        val syncRes = executionEngine.refreshExchangeState()
+                        if (syncRes.isSuccess) {
+                            MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
                         }
                     }
                 } catch (_: Exception) {}

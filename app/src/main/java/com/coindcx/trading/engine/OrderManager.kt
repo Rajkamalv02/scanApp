@@ -32,7 +32,9 @@ class OrderManager(
         price: Double,
         quantity: Double,
         leverage: Int,
-        tradeId: String = ""
+        tradeId: String = "",
+        stopLossPrice: Double? = null,
+        takeProfitPrice: Double? = null
     ): OrderResult {
         val clientOrderId = tradeId.ifEmpty { generateClientOrderId() }
 
@@ -49,22 +51,36 @@ class OrderManager(
         orderDao.insert(orderEntity)
 
         val notionalUsdt = quantity * price
+        val requestedAttrs = mutableMapOf(
+            "side" to side.uppercase(),
+            "order_type" to "LIMIT",
+            "price" to "%.4f".format(price),
+            "quantity" to "%.4f".format(quantity),
+            "leverage" to "${leverage}x",
+            "margin_currency" to "INR",
+            "notional_usdt" to "%.2f".format(notionalUsdt)
+        ).apply {
+            stopLossPrice?.let { put("stop_loss", "%.4f".format(it)) }
+            takeProfitPrice?.let { put("take_profit", "%.4f".format(it)) }
+        }
+
         AppLogManager.tradeLifecycle(
             event = "ORDER_REQUESTED",
             tradeId = clientOrderId,
             symbol = pair,
             mode = "LIVE",
-            attributes = mapOf(
-                "side" to side.uppercase(),
-                "order_type" to "LIMIT",
-                "price" to "%.4f".format(price),
-                "quantity" to "%.4f".format(quantity),
-                "leverage" to "${leverage}x",
-                "margin_currency" to "INR",
-                "notional_usdt" to "%.2f".format(notionalUsdt)
-            ),
-            narrative = "ORDER_REQUESTED: Submitting LIVE LIMIT order for %s %s qty=%.4f @ %.4f (Lev: %dx, Margin Currency: INR, Notional: $%.2f USDT)"
-                .format(pair, side.uppercase(), quantity, price, leverage, notionalUsdt)
+            attributes = requestedAttrs,
+            narrative = "ORDER_REQUESTED: Submitting LIVE LIMIT order for %s %s qty=%.4f @ %.4f (Lev: %dx, Margin Currency: INR, Notional: $%.2f USDT, SL: %s, TP: %s)"
+                .format(
+                    pair,
+                    side.uppercase(),
+                    quantity,
+                    price,
+                    leverage,
+                    notionalUsdt,
+                    stopLossPrice?.let { "%.4f".format(it) } ?: "None",
+                    takeProfitPrice?.let { "%.4f".format(it) } ?: "None"
+                )
         )
 
         val request = CreateOrderRequest(
@@ -76,7 +92,9 @@ class OrderManager(
                 price = price,
                 totalQuantity = quantity,
                 leverage = leverage,
-                clientOrderId = clientOrderId
+                clientOrderId = clientOrderId,
+                stopLossPrice = stopLossPrice,
+                takeProfitPrice = takeProfitPrice
             )
         )
 
@@ -90,19 +108,28 @@ class OrderManager(
                         status = order.status
                     )
                 )
+                val acceptedAttrs = mutableMapOf(
+                    "exchange_order_id" to order.id,
+                    "status" to order.status,
+                    "side" to side.uppercase(),
+                    "price" to "%.4f".format(price),
+                    "quantity" to "%.4f".format(quantity)
+                ).apply {
+                    (order.stopLossPrice ?: stopLossPrice)?.let { put("stop_loss", "%.4f".format(it)) }
+                    (order.takeProfitPrice ?: takeProfitPrice)?.let { put("take_profit", "%.4f".format(it)) }
+                }
                 AppLogManager.tradeLifecycle(
                     event = "ORDER_ACCEPTED",
                     tradeId = clientOrderId,
                     symbol = pair,
                     mode = "LIVE",
-                    attributes = mapOf(
-                        "exchange_order_id" to order.id,
-                        "status" to order.status,
-                        "side" to side.uppercase(),
-                        "price" to "%.4f".format(price),
-                        "quantity" to "%.4f".format(quantity)
-                    ),
-                    narrative = "ORDER_ACCEPTED: Live order accepted by CoinDCX: %s (Status: %s)".format(order.id, order.status)
+                    attributes = acceptedAttrs,
+                    narrative = "ORDER_ACCEPTED: Live order accepted by CoinDCX: %s (Status: %s, SL: %s, TP: %s)".format(
+                        order.id,
+                        order.status,
+                        (order.stopLossPrice ?: stopLossPrice)?.let { "%.4f".format(it) } ?: "None",
+                        (order.takeProfitPrice ?: takeProfitPrice)?.let { "%.4f".format(it) } ?: "None"
+                    )
                 )
                 OrderResult.Success(order.id, clientOrderId)
             } else {

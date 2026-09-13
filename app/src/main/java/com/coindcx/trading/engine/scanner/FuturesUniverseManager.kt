@@ -66,7 +66,8 @@ class FuturesUniverseManager(
         val step: Double,
         val minQuantity: Double,
         val targetCurrencyPrecision: Int,
-        val minNotionalUsdt: Double
+        val minNotionalUsdt: Double,
+        val baseCurrencyPrecision: Int = 4
     )
 
     fun getActiveUniverse(): List<String> = universeRef.get()
@@ -135,7 +136,8 @@ class FuturesUniverseManager(
                 val minQty = item["min_quantity"]?.toString()?.toDoubleOrNull() ?: 0.001
                 val precision = item["target_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 3
                 val minNotional = item["min_notional"]?.toString()?.toDoubleOrNull() ?: 5.0
-                specsMap[pair] = InstrumentSpec(pair, step, minQty, precision, minNotional)
+                val basePrecision = item["base_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 4
+                specsMap[pair] = InstrumentSpec(pair, step, minQty, precision, minNotional, basePrecision)
             }
             if (specsMap.isNotEmpty()) {
                 specsRef.set(specsMap)
