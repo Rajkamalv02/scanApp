@@ -29,11 +29,18 @@ data class MarketOpportunity(
     val adxValue: Double = 0.0,
     val rejectionReason: String? = null,
     val isApproved: Boolean = false,
-    val htfAlignment: HtfAlignment = HtfAlignment.NEUTRAL
+    val htfAlignment: HtfAlignment = HtfAlignment.NEUTRAL,
+    val strategyId: String = "",
+    val strategyName: String = ""
 ) {
     val isBuy: Boolean get() = signal.action == SignalAction.ENTER_LONG
     val isSell: Boolean get() = signal.action == SignalAction.ENTER_SHORT
     val isEntry: Boolean get() = isBuy || isSell
-    val actionLabel: String get() = if (isBuy) "LONG" else if (isSell) "SHORT" else "WATCH"
+    val actionLabel: String get() = when (signal.action) {
+        SignalAction.ENTER_LONG -> "LONG"
+        SignalAction.ENTER_SHORT -> "SHORT"
+        SignalAction.EXIT -> "EXIT"
+        SignalAction.HOLD -> "WATCH"
+    }
     val assetSymbol: String get() = pair.removePrefix("B-").removeSuffix("_USDT")
 }

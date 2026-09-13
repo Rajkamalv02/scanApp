@@ -237,7 +237,7 @@ class PaperExecutionEngine(
             clientOrderId = clientOrderId,
             status = "OPEN",
             entryTime = System.currentTimeMillis(),
-            strategyName = StrategyRegistry.activeStrategy.name,
+            strategyName = signal.strategyName.ifBlank { StrategyRegistry.activeStrategy.name },
             signalPrice = currentPrice,
             orderPrice = currentPrice,
             currentPrice = fillPrice,

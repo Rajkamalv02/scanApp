@@ -251,9 +251,10 @@ class TradingForegroundService : Service() {
             scanCycleCounter++
             val cycle = scanCycleCounter
             val config = configRepo.configFlow.value
-            val activeStrategy = StrategyRegistry.activeStrategy
+            val scanningStrategies = StrategyRegistry.getScanningStrategies()
+            val stratNames = scanningStrategies.joinToString(", ") { it.name }
             val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
-            AppLogManager.scanner("Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with ${activeStrategy.name}...")
+            AppLogManager.scanner("Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with $stratNames...")
 
             // Circuit Breaker Check: Daily drawdown cap (4% loss limit)
             if (riskManager.isCircuitBreakerTripped()) {
@@ -274,26 +275,31 @@ class TradingForegroundService : Service() {
             }
             val initialBalanceInr = executionEngine.getAvailableBalanceInr()
 
-            // 2. Scan Futures Market Opportunities
-            val rawOpportunities = scannerEngine.scanMarket(config, activeStrategy, executionEngine)
+            // 2. Scan Futures Market Opportunities (Parallel Multi-Strategy)
+            val rawOpportunities = scannerEngine.scanMarket(config, scanningStrategies, executionEngine)
 
-            // 2.5. Process Strategy-Triggered Exits on Open Positions (e.g. EMA Reversal Crossover)
+            // 2.5. Process Strategy-Triggered Exits on Open Positions (e.g. EMA Reversal Crossover or Confluence Reversal)
             for (opp in rawOpportunities) {
                 if (opp.signal.action == com.coindcx.trading.engine.SignalAction.EXIT) {
                     val activePos = executionEngine.getActivePosition(opp.pair)
                     if (activePos != null && activePos.isOpen) {
                         val posTradeId = activePos.id
+                        val exitCondition = when {
+                            opp.strategyId.contains("confluence") -> "CONFLUENCE_REVERSAL"
+                            else -> "EMA_REVERSAL_CROSS"
+                        }
                         AppLogManager.tradeLifecycle(
                             event = "EXIT_SIGNAL",
                             tradeId = posTradeId,
                             symbol = opp.pair,
                             mode = modeLabel,
                             attributes = mapOf(
-                                "exit_condition" to "EMA_REVERSAL_CROSS",
+                                "exit_condition" to exitCondition,
+                                "strategy" to opp.strategyId.ifBlank { opp.signal.strategyId },
                                 "reason" to opp.signal.reason,
                                 "current_price" to "%.4f".format(opp.currentPrice)
                             ),
-                            narrative = "Strategy EXIT signal on %s: %s @ %.4f".format(opp.pair, opp.signal.reason, opp.currentPrice)
+                            narrative = "Strategy [%s] EXIT signal on %s: %s @ %.4f".format(opp.strategyId.uppercase(), opp.pair, opp.signal.reason, opp.currentPrice)
                         )
                         executionEngine.exitPosition(opp.pair, opp.currentPrice, opp.signal.reason, posTradeId)
                     }
@@ -351,6 +357,7 @@ class TradingForegroundService : Service() {
                     mode = modeLabel,
                     attributes = mapOf(
                         "rank" to opp.rank,
+                        "strategy" to opp.strategyId.ifBlank { opp.signal.strategyId },
                         "action" to opp.actionLabel,
                         "price" to "%.4f".format(opp.currentPrice),
                         "fast_ema" to "%.4f".format(opp.signal.fastEma),
@@ -360,8 +367,8 @@ class TradingForegroundService : Service() {
                         "net_rr" to "%.2f".format(opp.netRiskRewardRatio),
                         "htf_align" to opp.htfAlignment
                     ),
-                    narrative = "Evaluating %s candidate: Rank #%d %s %s @ %.4f (Quality: %d/100 %s, Net R:R: %.2f, HTF: %s)"
-                        .format(modeLabel, opp.rank, opp.pair, opp.actionLabel, opp.currentPrice, opp.qualityScore, opp.qualityCategory, opp.netRiskRewardRatio, opp.htfAlignment)
+                    narrative = "Evaluating %s candidate: Rank #%d [%s] %s %s @ %.4f (Quality: %d/100 %s, Net R:R: %.2f, HTF: %s)"
+                        .format(modeLabel, opp.rank, (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase(), opp.pair, opp.actionLabel, opp.currentPrice, opp.qualityScore, opp.qualityCategory, opp.netRiskRewardRatio, opp.htfAlignment)
                 )
 
                 // Circuit Breaker / Cooldown Gate
@@ -612,6 +619,7 @@ class TradingForegroundService : Service() {
                     symbol = opp.pair,
                     mode = modeLabel,
                     attributes = mapOf(
+                        "strategy" to opp.strategyId.ifBlank { opp.signal.strategyId },
                         "side" to (if (opp.isBuy) "BUY" else "SELL"),
                         "direction" to (if (opp.isBuy) "LONG" else "SHORT"),
                         "order_type" to (if (executionEngine.isPaperTrading) "MARKET" else "LIMIT"),
@@ -623,8 +631,8 @@ class TradingForegroundService : Service() {
                         "reduce_only" to false,
                         "time_in_force" to "GTC"
                     ),
-                    narrative = "Constructed %s %s order for %s @ %.4f (Margin: ₹%.2f @ %dx leverage | SL: %.4f | TP: %.4f)"
-                        .format(modeLabel, if (opp.isBuy) "BUY" else "SELL", opp.pair, opp.currentPrice, marginToAllocate, actualLeverage, slPrice, tpPrice)
+                    narrative = "Constructed %s %s [%s] order for %s @ %.4f (Margin: ₹%.2f @ %dx leverage | SL: %.4f | TP: %.4f)"
+                        .format(modeLabel, if (opp.isBuy) "BUY" else "SELL", (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase(), opp.pair, opp.currentPrice, marginToAllocate, actualLeverage, slPrice, tpPrice)
                 )
 
                 val orderStartTime = System.currentTimeMillis()

@@ -1,37 +1,120 @@
 package com.coindcx.trading.engine.scanner
 
 import com.coindcx.trading.data.api.CoinDCXApiService
+import com.coindcx.trading.data.api.models.MarketCandle
 import com.coindcx.trading.data.config.TradingConfig
 import com.coindcx.trading.engine.ExecutionEngine
 import com.coindcx.trading.engine.SignalAction
 import com.coindcx.trading.engine.Strategy
 import com.coindcx.trading.util.AppLogManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
+
+/**
+ * Cycle-Scoped Candle Cache.
+ * Deduplicates candle HTTP requests across concurrent strategies during a single scan cycle.
+ * Respects CoinDCX API rate limits using Semaphore(6) and 15ms pacing.
+ */
+class CycleCandleCache(
+    private val apiService: CoinDCXApiService,
+    private val concurrencySemaphore: Semaphore
+) {
+    private val cache = ConcurrentHashMap<String, Deferred<List<MarketCandle>?>>()
+    val fetchCount = AtomicInteger(0)
+    val cacheHitCount = AtomicInteger(0)
+    val totalFetchTimeMs = AtomicLong(0)
+
+    suspend fun getCandles(pair: String, timeframe: String, scope: CoroutineScope): List<MarketCandle>? {
+        val key = "$pair:$timeframe"
+        var wasCached = true
+        val deferred = cache.computeIfAbsent(key) {
+            wasCached = false
+            scope.async(Dispatchers.IO) {
+                concurrencySemaphore.withPermit {
+                    delay(15)
+                    val start = System.currentTimeMillis()
+                    val result = fetchCandlesWithBackoffInternal(pair, timeframe)
+                    totalFetchTimeMs.addAndGet(System.currentTimeMillis() - start)
+                    fetchCount.incrementAndGet()
+                    result
+                }
+            }
+        }
+        if (wasCached) {
+            cacheHitCount.incrementAndGet()
+        }
+        return deferred.await()
+    }
+
+    private suspend fun fetchCandlesWithBackoffInternal(
+        pair: String,
+        timeframe: String,
+        maxRetries: Int = 3
+    ): List<MarketCandle>? {
+        var backoffMs = 1000L
+        for (attempt in 1..maxRetries) {
+            try {
+                val resp = apiService.getCandles(pair, timeframe)
+                if (resp.code() == 429) {
+                    AppLogManager.w("SCANNER", "[$pair] HTTP 429 rate limited on $timeframe candles (Attempt $attempt/$maxRetries). Backing off for ${backoffMs}ms...")
+                    delay(backoffMs)
+                    backoffMs *= 2
+                    continue
+                }
+                if (resp.isSuccessful && !resp.body().isNullOrEmpty()) {
+                    return resp.body()!!.sortedBy { it.time }
+                } else {
+                    return null
+                }
+            } catch (e: Exception) {
+                if (attempt == maxRetries) {
+                    AppLogManager.w("SCANNER", "[$pair] Failed fetching $timeframe candles after $maxRetries attempts: ${e.message}")
+                    return null
+                }
+                delay(backoffMs)
+                backoffMs *= 2
+            }
+        }
+        return null
+    }
+}
 
 class MarketScannerEngine(
     private val apiService: CoinDCXApiService,
     val universeManager: FuturesUniverseManager = FuturesUniverseManager(apiService)
 ) {
+    /**
+     * Single-strategy entry point (Backward-compatible overload).
+     */
     suspend fun scanMarket(
         config: TradingConfig,
         strategy: Strategy,
         executionEngine: ExecutionEngine
+    ): List<MarketOpportunity> = scanMarket(config, listOf(strategy), executionEngine)
+
+    /**
+     * Multi-Strategy Parallel Market Scanner.
+     * Concurrently evaluates all provided strategies across the futures universe.
+     * Uses CycleCandleCache to eliminate duplicate network calls and prevent rate limiting.
+     * Isolates failures so one strategy error never brings down the complete market scan.
+     */
+    suspend fun scanMarket(
+        config: TradingConfig,
+        strategies: List<Strategy>,
+        executionEngine: ExecutionEngine
     ): List<MarketOpportunity> = withContext(Dispatchers.IO) {
         val scanStartTime = System.currentTimeMillis()
-
-        // 1. Dynamic strategy configuration from live TradingConfig parameters
-        if (strategy is com.coindcx.trading.engine.strategies.EmaCrossoverStrategy) {
-            strategy.configure(
-                fast = config.fastEmaPeriod,
-                slow = config.slowEmaPeriod,
-                atrMult = config.atrMultiplier
-            )
-        }
 
         val dynamicUniverse = if (config.isMarketWideScan) {
             universeManager.getOrRefreshUniverse()
@@ -39,55 +122,129 @@ class MarketScannerEngine(
             config.selectedPairs.ifEmpty { universeManager.getMajorUniverse() }
         }
 
-        // Critical: Prevent open-position orphaning by including pairs of all active open positions
-        // even if they temporarily fall outside the dynamic universe cutoff.
+        // Include pairs of all active open positions so position-management exits are never orphaned
         val openPositionPairs = executionEngine.getAllOpenPositions().map { it.pair }
         val pairsToScan = (dynamicUniverse + openPositionPairs).distinct()
 
+        val concurrencySemaphore = Semaphore(6)
+        val candleCache = CycleCandleCache(apiService, concurrencySemaphore)
+
+        val strategyTimings = ConcurrentHashMap<String, Long>()
+        val strategyCandidateCounts = ConcurrentHashMap<String, Int>()
+        val strategyErrorCounts = ConcurrentHashMap<String, Int>()
+
         AppLogManager.scanner(
-            "Launching parallel evaluation of ${pairsToScan.size} futures symbols (Concurrency: 6) | Strategy: ${strategy.name} (${strategy.parametersSummary}) | TF: ${config.timeframe}"
+            "================ MULTI-STRATEGY SCAN START ================\n" +
+            "Universe: ${pairsToScan.size} pairs | Active Strategies: ${strategies.map { it.name }.joinToString(", ")} | TF: ${config.timeframe}"
         )
 
-        // Concurrency controlled with Semaphore(6) and 15ms delay pacing to respect CoinDCX rate limits
-        val concurrencySemaphore = Semaphore(6)
+        // Execute all strategies concurrently
+        val strategyJobs = strategies.map { strategy ->
+            async(Dispatchers.IO) {
+                val stratStart = System.currentTimeMillis()
+                AppLogManager.scanner("Strategy scan started: ${strategy.name} (${strategy.id})")
+                try {
+                    // Dynamic strategy parameter configuration
+                    if (strategy is com.coindcx.trading.engine.strategies.EmaCrossoverStrategy) {
+                        strategy.configure(
+                            fast = config.fastEmaPeriod,
+                            slow = config.slowEmaPeriod,
+                            atrMult = config.atrMultiplier
+                        )
+                    }
 
-        val deferredResults = pairsToScan.map { pair ->
-            async {
-                concurrencySemaphore.withPermit {
-                    kotlinx.coroutines.delay(15)
-                    scanSinglePair(pair, config.timeframe, strategy, executionEngine)
+                    val results = scanUniverseForStrategy(
+                        strategy = strategy,
+                        pairs = pairsToScan,
+                        timeframe = config.timeframe,
+                        executionEngine = executionEngine,
+                        candleCache = candleCache,
+                        scope = this
+                    )
+                    val duration = System.currentTimeMillis() - stratStart
+                    strategyTimings[strategy.id] = duration
+                    strategyCandidateCounts[strategy.id] = results.count { it.signal.action != SignalAction.HOLD }
+                    strategyErrorCounts[strategy.id] = 0
+
+                    AppLogManager.scanner(
+                        "Strategy scan completed: ${strategy.name} in ${duration}ms (${results.size} evaluated, ${strategyCandidateCounts[strategy.id]} actionable)"
+                    )
+                    results
+                } catch (e: Exception) {
+                    val duration = System.currentTimeMillis() - stratStart
+                    strategyTimings[strategy.id] = duration
+                    strategyCandidateCounts[strategy.id] = 0
+                    strategyErrorCounts[strategy.id] = 1
+                    AppLogManager.e("SCANNER", "[STRATEGY_ERROR] Failure in strategy ${strategy.name}: ${e.message}", e)
+                    emptyList<MarketOpportunity>() // Isolated failure: other strategies proceed unaffected!
                 }
             }
         }
 
-        val results = deferredResults.awaitAll().filterNotNull()
-        val actionable = results.count { it.signal.action != SignalAction.HOLD }
+        val allStrategyResults = strategyJobs.awaitAll().flatten()
+
+        // Combine and resolve duplicates/conflicts across strategies
+        val deduplicationStartTime = System.currentTimeMillis()
+        val combinedCandidates = combineAndDeduplicate(allStrategyResults)
+        val rankingDurationMs = System.currentTimeMillis() - deduplicationStartTime
+
         val totalDurationMs = System.currentTimeMillis() - scanStartTime
+        val actionableCount = combinedCandidates.count { it.signal.action != SignalAction.HOLD }
+
+        // Structured Performance & Lifecycle Benchmark Log
+        val stratSummary = strategies.joinToString("\n") { strat ->
+            "  Strategy [${strat.id.uppercase()}]: %d ms | Actionable: %d | Errors: %d".format(
+                strategyTimings[strat.id] ?: 0,
+                strategyCandidateCounts[strat.id] ?: 0,
+                strategyErrorCounts[strat.id] ?: 0
+            )
+        }
 
         AppLogManager.scanner(
-            "Parallel scan finished in ${totalDurationMs}ms. Evaluated ${pairsToScan.size} pairs -> ${results.size} snapshots, $actionable actionable signals found."
+            "================ MULTI-STRATEGY SCAN BENCHMARK ================\n" +
+            "Total Scan Duration:      ${totalDurationMs} ms\n" +
+            "Candle Fetch Time (Agg):  ${candleCache.totalFetchTimeMs.get()} ms (HTTP Calls: ${candleCache.fetchCount.get()}, Cache Hits: ${candleCache.cacheHitCount.get()})\n" +
+            stratSummary + "\n" +
+            "Combined Pool:            $actionableCount actionable / ${combinedCandidates.size} total snapshots\n" +
+            "Ranking/Dedupe Duration:  ${rankingDurationMs} ms\n" +
+            "================================================================"
         )
-        results
+
+        combinedCandidates
+    }
+
+    private suspend fun scanUniverseForStrategy(
+        strategy: Strategy,
+        pairs: List<String>,
+        timeframe: String,
+        executionEngine: ExecutionEngine,
+        candleCache: CycleCandleCache,
+        scope: CoroutineScope
+    ): List<MarketOpportunity> {
+        val deferredPairScans = pairs.map { pair ->
+            scope.async(Dispatchers.IO) {
+                scanSinglePair(pair, timeframe, strategy, executionEngine, candleCache, scope)
+            }
+        }
+        return deferredPairScans.awaitAll().filterNotNull()
     }
 
     private suspend fun scanSinglePair(
         pair: String,
         timeframe: String,
         strategy: Strategy,
-        executionEngine: ExecutionEngine
+        executionEngine: ExecutionEngine,
+        candleCache: CycleCandleCache,
+        scope: CoroutineScope
     ): MarketOpportunity? {
         val pairStartTime = System.currentTimeMillis()
         return try {
-            val candleResp = fetchCandlesWithBackoffInternal(pair, timeframe)
-            if (candleResp == null || !candleResp.isSuccessful || candleResp.body().isNullOrEmpty()) {
-                val err = if (candleResp != null && !candleResp.isSuccessful) "HTTP ${candleResp.code()}: ${candleResp.message()}" else "Empty candle array or timeout"
-                AppLogManager.w("SCANNER", "[$pair] Failed fetching $timeframe candles: $err")
+            val candles = candleCache.getCandles(pair, timeframe, scope)
+            if (candles.isNullOrEmpty()) {
+                AppLogManager.w("SCANNER", "[$pair] (${strategy.id}) Empty candle array or timeout on $timeframe")
                 return null
             }
 
-            // CoinDCX returns candles in descending order (newest first).
-            // We sort by timestamp ascending so candles.last() is guaranteed to be the live, current candle.
-            val candles = candleResp.body()!!.sortedBy { it.time }
             if (candles.size < strategy.requiredCandleCount) {
                 AppLogManager.w("SCANNER", "[$pair] Insufficient candles: ${candles.size}/${strategy.requiredCandleCount} required for ${strategy.name}")
                 return null
@@ -97,27 +254,24 @@ class MarketScannerEngine(
             val currentPrice = latestCandle.close
             val activePosition = executionEngine.getActivePosition(pair)
 
-            val signal = strategy.evaluate(candles, activePosition, pair)
+            val rawSignal = strategy.evaluate(candles, activePosition, pair)
+            val signal = rawSignal.copy(
+                strategyId = rawSignal.strategyId.ifBlank { strategy.id },
+                strategyName = rawSignal.strategyName.ifBlank { strategy.name }
+            )
 
-            // Diagnostic trace for strategy evaluation with execution timing
             val elapsedMs = System.currentTimeMillis() - pairStartTime
-            val diag = signal.diagnostics
             if (signal.action != SignalAction.HOLD) {
-                AppLogManager.trade("STRATEGY", "[$pair] (${elapsedMs}ms) >>> SIGNAL GENERATED: ${signal.action} @ $currentPrice | SL: ${signal.stopLossPrice} | TP: ${signal.takeProfitPrice} | Confidence: ${signal.confidenceScore}% | Reason: ${signal.reason}")
+                AppLogManager.trade("STRATEGY", "[$pair] [${strategy.id.uppercase()}] (${elapsedMs}ms) >>> SIGNAL GENERATED: ${signal.action} @ $currentPrice | SL: ${signal.stopLossPrice} | TP: ${signal.takeProfitPrice} | Conf: ${signal.confidenceScore}% | Reason: ${signal.reason}")
             } else {
-                val fastVal = diag?.indicators?.get("fastEma")
-                val slowVal = diag?.indicators?.get("slowEma")
-                val diagInfo = if (fastVal != null && slowVal != null) "[Fast: %.2f, Slow: %.2f]".format(fastVal, slowVal) else ""
-                AppLogManager.d("STRATEGY", "[$pair] (${elapsedMs}ms) HOLD: ${signal.reason} $diagInfo")
+                AppLogManager.d("STRATEGY", "[$pair] [${strategy.id.uppercase()}] (${elapsedMs}ms) HOLD: ${signal.reason}")
             }
 
-            // Optimization: Fetch Higher-Timeframe (1h) candles ONLY when signal is actionable (JIT fetch).
-            // This reduces network traffic by ~50% per scan cycle when mostly HOLD signals occur.
+            // JIT fetch Higher-Timeframe (1h) candles only when signal is actionable
             val htfCandles = if (signal.action != SignalAction.HOLD) {
                 if (timeframe != "1h" && timeframe != "1d") {
                     try {
-                        val htfResp = fetchCandlesWithBackoffInternal(pair, "1h", maxRetries = 2)
-                        if (htfResp?.isSuccessful == true) htfResp.body()?.sortedBy { it.time } else null
+                        candleCache.getCandles(pair, "1h", scope)
                     } catch (e: Exception) {
                         AppLogManager.w("SCANNER", "[$pair] Failed fetching 1h HTF candles: ${e.message}")
                         null
@@ -138,7 +292,7 @@ class MarketScannerEngine(
             )
 
             if (signal.action != SignalAction.HOLD) {
-                AppLogManager.quality("[$pair] Quality Score: ${quality.totalScore}/100 (${quality.category}) | Net R:R: ${quality.netRiskRewardRatio} | HTF Align: ${quality.htfAlignment} | Approved: ${quality.isApproved} | Rejection: ${quality.rejectionReason ?: "None"}")
+                AppLogManager.quality("[$pair] [${strategy.id.uppercase()}] Quality: ${quality.totalScore}/100 (${quality.category}) | Net R:R: ${quality.netRiskRewardRatio} | HTF: ${quality.htfAlignment} | Approved: ${quality.isApproved}")
             }
 
             MarketOpportunity(
@@ -153,39 +307,109 @@ class MarketScannerEngine(
                 adxValue = quality.adxValue,
                 rejectionReason = quality.rejectionReason,
                 isApproved = quality.isApproved,
-                htfAlignment = quality.htfAlignment
+                htfAlignment = quality.htfAlignment,
+                strategyId = strategy.id,
+                strategyName = strategy.name
             )
         } catch (e: Exception) {
-            AppLogManager.e("SCANNER", "[$pair] Unhandled exception during pair scan: ${e.message}", e)
+            AppLogManager.e("SCANNER", "[$pair] [${strategy.id}] Unhandled exception during pair scan: ${e.message}", e)
             null
         }
     }
 
-    private suspend fun fetchCandlesWithBackoffInternal(
-        pair: String,
-        timeframe: String,
-        maxRetries: Int = 3
-    ): retrofit2.Response<List<com.coindcx.trading.data.api.models.MarketCandle>>? {
-        var backoffMs = 1000L
-        for (attempt in 1..maxRetries) {
-            try {
-                val resp = apiService.getCandles(pair, timeframe)
-                if (resp.code() == 429) {
-                    AppLogManager.w("SCANNER", "[$pair] HTTP 429 rate limited on $timeframe candles (Attempt $attempt/$maxRetries). Backing off for ${backoffMs}ms...")
-                    kotlinx.coroutines.delay(backoffMs)
-                    backoffMs *= 2
-                    continue
+    /**
+     * Combines candidates from all strategies and handles cross-strategy symbol deduplication.
+     * - Multi-Strategy Agreement (e.g. both EMA and Confluence signal LONG): Merged with +5.0 confidence boost and dual attribution.
+     * - Directional Conflict (one LONG, one SHORT): Candidate with higher quality score prevails.
+     * - Position Exits: Actionable EXIT signal takes precedence over HOLD.
+     */
+    internal fun combineAndDeduplicate(candidates: List<MarketOpportunity>): List<MarketOpportunity> {
+        val groupedByPair = candidates.groupBy { it.pair }
+        val resolvedList = mutableListOf<MarketOpportunity>()
+
+        for ((pair, pairCandidates) in groupedByPair) {
+            if (pairCandidates.size == 1) {
+                resolvedList.add(pairCandidates.first())
+                continue
+            }
+
+            // 1. Position Management Priority: If any strategy requested an EXIT on an active position, preserve it!
+            val exitCandidate = pairCandidates.find { it.signal.action == SignalAction.EXIT }
+            if (exitCandidate != null) {
+                AppLogManager.trade("STRATEGY", "[$pair] Prioritizing EXIT signal from ${exitCandidate.strategyId.uppercase()}: ${exitCandidate.signal.reason}")
+                resolvedList.add(exitCandidate)
+                continue
+            }
+
+            val actionableCandidates = pairCandidates.filter { it.isEntry }
+            if (actionableCandidates.isEmpty()) {
+                // If all are HOLD, pick the one with highest confidence
+                resolvedList.add(pairCandidates.maxByOrNull { it.confidenceScore } ?: pairCandidates.first())
+                continue
+            }
+
+            if (actionableCandidates.size == 1) {
+                // Exactly 1 actionable entry among HOLDs
+                resolvedList.add(actionableCandidates.first())
+                continue
+            }
+
+            // Multiple strategies produced an actionable entry for the same pair!
+            val longs = actionableCandidates.filter { it.isBuy }
+            val shorts = actionableCandidates.filter { it.isSell }
+
+            if (longs.size >= 2 || shorts.size >= 2) {
+                // Same Direction Agreement -> Multi-Strategy Confluence Boost!
+                val agreeingCandidates = if (longs.size >= 2) longs else shorts
+                val winner = agreeingCandidates.maxByOrNull { it.qualityScore } ?: agreeingCandidates.first()
+                val other = agreeingCandidates.first { it != winner }
+
+                val isLong = winner.isBuy
+                val saferStopLoss = if (isLong) {
+                    val sl1 = winner.signal.stopLossPrice ?: Double.MAX_VALUE
+                    val sl2 = other.signal.stopLossPrice ?: Double.MAX_VALUE
+                    kotlin.math.min(sl1, sl2).takeIf { it != Double.MAX_VALUE } ?: winner.signal.stopLossPrice
+                } else {
+                    val sl1 = winner.signal.stopLossPrice ?: 0.0
+                    val sl2 = other.signal.stopLossPrice ?: 0.0
+                    kotlin.math.max(sl1, sl2).takeIf { it != 0.0 } ?: winner.signal.stopLossPrice
                 }
-                return resp
-            } catch (e: Exception) {
-                if (attempt == maxRetries) {
-                    AppLogManager.w("SCANNER", "[$pair] Failed fetching $timeframe candles after $maxRetries attempts: ${e.message}")
-                    return null
-                }
-                kotlinx.coroutines.delay(backoffMs)
-                backoffMs *= 2
+
+                val boostedConfidence = min(100.0, winner.confidenceScore + 5.0)
+                val dualStrategyName = "${winner.strategyName} + ${other.strategyName}"
+                val dualStrategyId = "${winner.strategyId}+${other.strategyId}"
+
+                val mergedSignal = winner.signal.copy(
+                    confidenceScore = boostedConfidence,
+                    stopLossPrice = saferStopLoss,
+                    strategyId = dualStrategyId,
+                    strategyName = dualStrategyName
+                )
+
+                val mergedOpp = winner.copy(
+                    signal = mergedSignal,
+                    confidenceScore = boostedConfidence,
+                    strategyId = dualStrategyId,
+                    strategyName = dualStrategyName,
+                    statusMessage = "Multi-Strategy Confluence: Both ${winner.strategyId.uppercase()} and ${other.strategyId.uppercase()} signaled ${winner.actionLabel}"
+                )
+
+                AppLogManager.scanner(
+                    "[CONFLUENCE_BOOST] [$pair] Multi-strategy agreement: ${winner.strategyId.uppercase()} + ${other.strategyId.uppercase()} both signaled ${winner.actionLabel} -> Boosted confidence to %.1f%%".format(boostedConfidence)
+                )
+                resolvedList.add(mergedOpp)
+            } else {
+                // Directional Conflict (e.g. EMA says LONG, Confluence says SHORT)
+                val winner = actionableCandidates.maxByOrNull { it.qualityScore } ?: actionableCandidates.first()
+                val loser = actionableCandidates.first { it != winner }
+
+                AppLogManager.scanner(
+                    "[CONFLICT_RESOLVED] [$pair] Directional conflict: ${winner.strategyId.uppercase()} (${winner.actionLabel}, Score: ${winner.qualityScore}) vs ${loser.strategyId.uppercase()} (${loser.actionLabel}, Score: ${loser.qualityScore}) -> Retaining ${winner.strategyId.uppercase()}"
+                )
+                resolvedList.add(winner)
             }
         }
-        return null
+
+        return resolvedList
     }
 }

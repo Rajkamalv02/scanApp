@@ -36,7 +36,9 @@ data class Signal(
     val atr: Double = 0.0,
     val atrMultiplier: Double = 0.0,
     val riskDistance: Double = 0.0,
-    val riskRewardRatio: Double = 0.0
+    val riskRewardRatio: Double = 0.0,
+    val strategyId: String = "",
+    val strategyName: String = ""
 )
 
 /**

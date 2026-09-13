@@ -145,7 +145,9 @@ class EmaCrossoverStrategy(
                         action = SignalAction.EXIT,
                         reason = "Bearish EMA Crossover: Fast ($fastPeriod) crossed below Slow ($slowPeriod). Trend reversal exit.",
                         confidenceScore = 90.0,
-                        diagnostics = diag
+                        diagnostics = diag,
+                        strategyId = id,
+                        strategyName = name
                     )
                 }
                 if (activePosition.takeProfitTrigger != null && currentPrice >= activePosition.takeProfitTrigger) {
@@ -153,7 +155,9 @@ class EmaCrossoverStrategy(
                         action = SignalAction.EXIT,
                         reason = "Take Profit target filled @ %.4f".format(currentPrice),
                         confidenceScore = 95.0,
-                        diagnostics = diag
+                        diagnostics = diag,
+                        strategyId = id,
+                        strategyName = name
                     )
                 }
                 if (activePosition.stopLossTrigger != null && currentPrice <= activePosition.stopLossTrigger) {
@@ -161,14 +165,18 @@ class EmaCrossoverStrategy(
                         action = SignalAction.EXIT,
                         reason = "Stop Loss trigger hit @ %.4f".format(currentPrice),
                         confidenceScore = 95.0,
-                        diagnostics = diag
+                        diagnostics = diag,
+                        strategyId = id,
+                        strategyName = name
                     )
                 }
                 return Signal(
                     action = SignalAction.HOLD,
                     reason = "Holding Long position. Fast EMA: %.4f, Slow EMA: %.4f (Spread: %+.2f%%)".format(currFast, currSlow, emaSpreadPct),
                     confidenceScore = 50.0,
-                    diagnostics = diag
+                    diagnostics = diag,
+                    strategyId = id,
+                    strategyName = name
                 )
             } else if (activePosition.isShort) {
                 if (isBullishCrossover) {
@@ -177,7 +185,9 @@ class EmaCrossoverStrategy(
                         action = SignalAction.EXIT,
                         reason = "Bullish EMA Crossover: Fast ($fastPeriod) crossed above Slow ($slowPeriod). Trend reversal exit.",
                         confidenceScore = 90.0,
-                        diagnostics = diag
+                        diagnostics = diag,
+                        strategyId = id,
+                        strategyName = name
                     )
                 }
                 if (activePosition.takeProfitTrigger != null && currentPrice <= activePosition.takeProfitTrigger) {
@@ -185,7 +195,9 @@ class EmaCrossoverStrategy(
                         action = SignalAction.EXIT,
                         reason = "Take Profit target filled @ %.4f".format(currentPrice),
                         confidenceScore = 95.0,
-                        diagnostics = diag
+                        diagnostics = diag,
+                        strategyId = id,
+                        strategyName = name
                     )
                 }
                 if (activePosition.stopLossTrigger != null && currentPrice >= activePosition.stopLossTrigger) {
@@ -193,14 +205,18 @@ class EmaCrossoverStrategy(
                         action = SignalAction.EXIT,
                         reason = "Stop Loss trigger hit @ %.4f".format(currentPrice),
                         confidenceScore = 95.0,
-                        diagnostics = diag
+                        diagnostics = diag,
+                        strategyId = id,
+                        strategyName = name
                     )
                 }
                 return Signal(
                     action = SignalAction.HOLD,
                     reason = "Holding Short position. Fast EMA: %.4f, Slow EMA: %.4f (Spread: %+.2f%%)".format(currFast, currSlow, emaSpreadPct),
                     confidenceScore = 50.0,
-                    diagnostics = diag
+                    diagnostics = diag,
+                    strategyId = id,
+                    strategyName = name
                 )
             }
         }
@@ -257,7 +273,9 @@ class EmaCrossoverStrategy(
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = 80.0,
                 reason = "Bullish EMA Crossover: Fast ($fastPeriod) crossed above Slow ($slowPeriod) on confirmed bar",
-                diagnostics = diag
+                diagnostics = diag,
+                strategyId = id,
+                strategyName = name
             )
         }
 
@@ -312,7 +330,9 @@ class EmaCrossoverStrategy(
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = 80.0,
                 reason = "Bearish EMA Crossover: Fast ($fastPeriod) crossed below Slow ($slowPeriod) on confirmed bar",
-                diagnostics = diag
+                diagnostics = diag,
+                strategyId = id,
+                strategyName = name
             )
         }
 
@@ -322,7 +342,9 @@ class EmaCrossoverStrategy(
             action = SignalAction.HOLD,
             reason = "%s in progress: Fast=%.4f, Slow=%.4f (Spread: %+.2f%%). Awaiting fresh crossover.".format(trendStatus, currFast, currSlow, emaSpreadPct),
             confidenceScore = 30.0,
-            diagnostics = diag
+            diagnostics = diag,
+            strategyId = id,
+            strategyName = name
         )
     }
 }
