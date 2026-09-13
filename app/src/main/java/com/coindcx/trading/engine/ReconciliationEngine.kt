@@ -46,7 +46,7 @@ class ReconciliationEngine(
         }
 
         // 2. Reconcile Open Positions
-        val positionsPayload = mapOf("page" to "1", "size" to "50", "margin_currency_short_name" to listOf("USDT"), "timestamp" to System.currentTimeMillis())
+        val positionsPayload = mapOf("page" to "1", "size" to "50", "margin_currency_short_name" to listOf("INR", "USDT"), "timestamp" to System.currentTimeMillis())
         val positionsResp = apiService.getPositions(positionsPayload)
 
         if (!positionsResp.isSuccessful || positionsResp.body() == null) {

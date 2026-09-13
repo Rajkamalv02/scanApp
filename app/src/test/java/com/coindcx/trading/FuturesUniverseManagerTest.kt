@@ -36,7 +36,7 @@ class FuturesUniverseManagerTest {
         override suspend fun getFuturesWallets(timestamp: Long): Response<List<FuturesWallet>> = Response.success(emptyList())
         override suspend fun getPositions(body: Map<String, Any>): Response<List<FuturesPosition>> = Response.success(emptyList())
         override suspend fun getOpenOrders(body: Map<String, Any>): Response<List<FuturesOrder>> = Response.success(emptyList())
-        override suspend fun createOrder(request: CreateOrderRequest): Response<FuturesOrder> = throw NotImplementedError()
+        override suspend fun createOrder(request: CreateOrderRequest): Response<List<FuturesOrder>> = throw NotImplementedError()
         override suspend fun cancelOrder(body: Map<String, Any>): Response<Map<String, Any>> = Response.success(emptyMap())
     }
 

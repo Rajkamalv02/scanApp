@@ -53,7 +53,7 @@ interface CoinDCXApiService {
     @POST("/exchange/v1/derivatives/futures/orders/create")
     suspend fun createOrder(
         @Body request: CreateOrderRequest
-    ): Response<FuturesOrder>
+    ): Response<List<FuturesOrder>>
 
     @POST("/exchange/v1/derivatives/futures/orders/cancel")
     suspend fun cancelOrder(

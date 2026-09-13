@@ -8,7 +8,8 @@ import com.coindcx.trading.util.AppLogManager
 class LiveExecutionEngine(
     private val orderManager: OrderManager,
     private val apiService: CoinDCXApiService,
-    private val currencyConverter: CurrencyConverter
+    private val currencyConverter: CurrencyConverter,
+    private val universeManager: com.coindcx.trading.engine.scanner.FuturesUniverseManager? = null
 ) : ExecutionEngine {
 
     override val isPaperTrading: Boolean = false
@@ -38,7 +39,7 @@ class LiveExecutionEngine(
             val positionsPayload = mapOf(
                 "page" to "1",
                 "size" to "50",
-                "margin_currency_short_name" to listOf("USDT"),
+                "margin_currency_short_name" to listOf("INR", "USDT"),
                 "timestamp" to System.currentTimeMillis()
             )
             val positionsResp = apiService.getPositions(positionsPayload)
@@ -53,7 +54,7 @@ class LiveExecutionEngine(
             val positionsPayload = mapOf(
                 "page" to "1",
                 "size" to "50",
-                "margin_currency_short_name" to listOf("USDT"),
+                "margin_currency_short_name" to listOf("INR", "USDT"),
                 "timestamp" to System.currentTimeMillis()
             )
             val positionsResp = apiService.getPositions(positionsPayload)
@@ -90,12 +91,28 @@ class LiveExecutionEngine(
         val isBuy = signal.action == SignalAction.ENTER_LONG
         val side = if (isBuy) "buy" else "sell"
 
-        val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, currentPrice)
-        val quantity = rawQty.coerceAtLeast(0.001)
+        val spec = universeManager?.getInstrumentSpec(pair)
+        val step = spec?.step ?: 0.001
+        val minNotionalUsdt = 6.0.coerceAtLeast(spec?.minNotionalUsdt ?: 5.0)
 
-        return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, quantity, leverage, tradeId)) {
+        val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, currentPrice)
+
+        // Quantize to step size and guarantee CoinDCX minimum order notional
+        var steps = if (step > 0) kotlin.math.round(rawQty / step) else rawQty
+        var quantity = if (step > 0) steps * step else rawQty
+        if (quantity * currentPrice < minNotionalUsdt && step * currentPrice > 0) {
+            steps = kotlin.math.ceil(minNotionalUsdt / (step * currentPrice))
+            quantity = steps * step
+        }
+        val precision = (spec?.targetCurrencyPrecision ?: 3).coerceIn(0, 8)
+        val roundedQty = java.math.BigDecimal.valueOf(quantity)
+            .setScale(precision, java.math.RoundingMode.HALF_UP)
+            .toDouble()
+        val finalQty = roundedQty.coerceAtLeast(spec?.minQuantity ?: step)
+
+        return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, finalQty, leverage, tradeId)) {
             is OrderResult.Success -> {
-                AppLogManager.trade("LIVE_EXEC", "Placed live order: ${res.orderId} on $pair $side qty=$quantity @ $currentPrice (Margin: ₹%.0f)".format(marginInr))
+                AppLogManager.trade("LIVE_EXEC", "Placed live order: ${res.orderId} on $pair $side qty=$finalQty @ $currentPrice (Margin: ₹%.0f)".format(marginInr))
                 ExecutionResult.Success(res.orderId, "Live order placed: ${res.orderId} (Margin: ₹%.0f)".format(marginInr))
             }
             is OrderResult.Ambiguous -> {

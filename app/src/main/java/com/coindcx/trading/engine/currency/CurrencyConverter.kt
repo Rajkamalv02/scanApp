@@ -41,6 +41,24 @@ class CurrencyConverter(
         }
     }
 
+    /**
+     * Estimates CoinDCX internal derivative settlement rate (spot USDTINR + ~3% settlement margin buffer)
+     * Matches live "settlement_currency_conversion_price" returned by CoinDCX futures order engine.
+     */
+    suspend fun getSettlementConversionRate(): Double {
+        val spotRate = getUsdtInrRate()
+        return spotRate * 1.03
+    }
+
+    /**
+     * Dynamically computes the minimum order notional in INR required by CoinDCX for futures orders.
+     * CoinDCX derivative futures mandates minimum 6.0 USDT notional for B-*_USDT pairs.
+     */
+    suspend fun getDynamicMinNotionalInr(minNotionalUsdt: Double = 6.0): Double {
+        val settlementRate = getSettlementConversionRate()
+        return minNotionalUsdt * settlementRate
+    }
+
     suspend fun convertInrMarginToContractQuantity(
         marginInr: Double,
         leverage: Int,

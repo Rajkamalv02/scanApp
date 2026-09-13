@@ -995,7 +995,7 @@ class MainActivity : AppCompatActivity() {
             val posPayload = mapOf(
                 "page" to "1",
                 "size" to "50",
-                "margin_currency_short_name" to listOf("USDT"),
+                "margin_currency_short_name" to listOf("INR", "USDT"),
                 "timestamp" to System.currentTimeMillis()
             )
             val posResp = ApiClient.apiService.getPositions(posPayload)

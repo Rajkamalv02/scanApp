@@ -57,26 +57,30 @@ class RiskManager(
         entryPrice: Double,
         stopLossPrice: Double,
         leverage: Int,
-        minMarginInr: Double = 500.0
+        minMarginInr: Double = 500.0,
+        minOrderNotionalInr: Double = 620.0
     ): Double {
+        val effectiveLeverage = leverage.coerceIn(1, settings.maxLeverage)
+        val minMarginForNotional = minOrderNotionalInr / effectiveLeverage
+        val effectiveMinMargin = minMarginInr.coerceAtLeast(minMarginForNotional)
+
         if (balanceInr <= 0.0 || entryPrice <= 0.0 || stopLossPrice <= 0.0) {
-            return minMarginInr
+            return effectiveMinMargin
         }
 
         val targetRiskInr = balanceInr * (settings.riskPerTradePercent / 100.0)
         val slDistPercent = abs(entryPrice - stopLossPrice) / entryPrice
 
         if (slDistPercent <= 0.0001) {
-            return minMarginInr
+            return effectiveMinMargin
         }
 
         val notionalInr = targetRiskInr / slDistPercent
-        val effectiveLeverage = leverage.coerceIn(1, settings.maxLeverage)
         val calculatedMargin = notionalInr / effectiveLeverage
 
-        // Enforce bounds: minMarginInr <= margin <= safe per-trade cap (balance / maxConcurrentPositions)
-        val maxMarginCap = (balanceInr / settings.maxConcurrentPositions).coerceAtLeast(minMarginInr)
-        return calculatedMargin.coerceIn(minMarginInr, maxMarginCap)
+        // Enforce bounds: effectiveMinMargin <= margin <= safe per-trade cap (balance / maxConcurrentPositions)
+        val maxMarginCap = (balanceInr / settings.maxConcurrentPositions).coerceAtLeast(effectiveMinMargin)
+        return calculatedMargin.coerceIn(effectiveMinMargin, maxMarginCap)
     }
 
     /**

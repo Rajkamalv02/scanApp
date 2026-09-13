@@ -45,6 +45,9 @@ data class OrderPayload(
     @SerializedName("post_only")
     val postOnly: Boolean = false,
 
+    @SerializedName("margin_currency_short_name")
+    val marginCurrencyShortName: String = "INR",
+
     @SerializedName("client_order_id")
     val clientOrderId: String
 )

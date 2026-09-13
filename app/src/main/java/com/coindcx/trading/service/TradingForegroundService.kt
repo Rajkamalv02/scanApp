@@ -73,8 +73,8 @@ class TradingForegroundService : Service() {
         currencyConverter = CurrencyConverter(ApiClient.apiService)
         orderManager = OrderManager(ApiClient.apiService, db.orderDao())
         paperEngine = PaperExecutionEngine(applicationContext, db, currencyConverter, ApiClient.apiService)
-        liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter)
         scannerEngine = MarketScannerEngine(ApiClient.apiService)
+        liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter, scannerEngine.universeManager)
         ranker = OpportunityRanker()
         allocator = AllocationEngine()
         riskManager = RiskManager()
@@ -491,12 +491,14 @@ class TradingForegroundService : Service() {
                 val riskPerTradePct = riskManager.settings.riskPerTradePercent
                 val targetRiskInr = inMemoryAvailableBalance * (riskPerTradePct / 100.0)
 
+                val dynamicMinNotionalInr = currencyConverter.getDynamicMinNotionalInr()
                 val marginToAllocate = riskManager.calculateRiskSizedMargin(
                     balanceInr = inMemoryAvailableBalance,
                     entryPrice = opp.currentPrice,
                     stopLossPrice = slPrice,
                     leverage = config.leverage,
-                    minMarginInr = config.minMarginPerTradeInr
+                    minMarginInr = config.minMarginPerTradeInr,
+                    minOrderNotionalInr = dynamicMinNotionalInr
                 )
                 val requestedLeverage = config.leverage
                 val actualLeverage = requestedLeverage.coerceIn(1, riskManager.settings.maxLeverage)

@@ -48,6 +48,7 @@ class FuturesUniverseManager(
 
     private val universeRef = AtomicReference<List<String>>(FALLBACK_MAJORS)
     private val majorsRef = AtomicReference<List<String>>(FALLBACK_MAJORS)
+    private val specsRef = AtomicReference<Map<String, InstrumentSpec>>(emptyMap())
     private val refreshMutex = Mutex()
 
     @Volatile
@@ -60,9 +61,18 @@ class FuturesUniverseManager(
         val spreadPct: Double
     )
 
+    data class InstrumentSpec(
+        val pair: String,
+        val step: Double,
+        val minQuantity: Double,
+        val targetCurrencyPrecision: Int,
+        val minNotionalUsdt: Double
+    )
+
     fun getActiveUniverse(): List<String> = universeRef.get()
     fun getMajorUniverse(): List<String> = majorsRef.get()
     fun isTier1Major(pair: String): Boolean = majorsRef.get().contains(pair)
+    fun getInstrumentSpec(pair: String): InstrumentSpec? = specsRef.get()[pair]
 
     /**
      * Lock-free read of universe with transparent background refresh if expired.
@@ -103,9 +113,10 @@ class FuturesUniverseManager(
                 return
             }
 
-            // Map pair to status and target currency
+            // Map pair to status and target currency, and record instrument specifications
             val pairToDetails = mutableMapOf<String, Pair<String, String>>() // pair -> (status, targetCurrency)
             val nameToPair = mutableMapOf<String, String>() // coindcx_name -> pair
+            val specsMap = mutableMapOf<String, InstrumentSpec>()
 
             for (item in detailsResp.body()!!) {
                 val pair = item["pair"]?.toString() ?: continue
@@ -119,6 +130,15 @@ class FuturesUniverseManager(
                 if (coindcxName.isNotBlank()) {
                     nameToPair[coindcxName] = pair
                 }
+
+                val step = item["step"]?.toString()?.toDoubleOrNull() ?: 0.001
+                val minQty = item["min_quantity"]?.toString()?.toDoubleOrNull() ?: 0.001
+                val precision = item["target_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 3
+                val minNotional = item["min_notional"]?.toString()?.toDoubleOrNull() ?: 5.0
+                specsMap[pair] = InstrumentSpec(pair, step, minQty, precision, minNotional)
+            }
+            if (specsMap.isNotEmpty()) {
+                specsRef.set(specsMap)
             }
 
             // 3. Fetch 24h Ticker data (volume, last_price, bid, ask)

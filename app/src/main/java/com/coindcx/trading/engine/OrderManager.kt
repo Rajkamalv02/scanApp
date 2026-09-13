@@ -79,12 +79,12 @@ class OrderManager(
 
         return try {
             val response = apiService.createOrder(request)
-            if (response.isSuccessful && response.body() != null) {
-                val body = response.body()!!
+            val order = response.body()?.firstOrNull()
+            if (response.isSuccessful && order != null) {
                 orderDao.update(
                     orderEntity.copy(
-                        exchangeOrderId = body.id,
-                        status = body.status
+                        exchangeOrderId = order.id,
+                        status = order.status
                     )
                 )
                 AppLogManager.tradeLifecycle(
@@ -93,15 +93,15 @@ class OrderManager(
                     symbol = pair,
                     mode = "LIVE",
                     attributes = mapOf(
-                        "exchange_order_id" to body.id,
-                        "status" to body.status,
+                        "exchange_order_id" to order.id,
+                        "status" to order.status,
                         "side" to side.uppercase(),
                         "price" to "%.4f".format(price),
                         "quantity" to "%.4f".format(quantity)
                     ),
-                    narrative = "ORDER_ACCEPTED: Live order accepted by CoinDCX: %s (Status: %s)".format(body.id, body.status)
+                    narrative = "ORDER_ACCEPTED: Live order accepted by CoinDCX: %s (Status: %s)".format(order.id, order.status)
                 )
-                OrderResult.Success(body.id, clientOrderId)
+                OrderResult.Success(order.id, clientOrderId)
             } else {
                 val errorMsg = response.errorBody()?.string() ?: "Order rejected"
                 orderDao.update(orderEntity.copy(status = "REJECTED"))

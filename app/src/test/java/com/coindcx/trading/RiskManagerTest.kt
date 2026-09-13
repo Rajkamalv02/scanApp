@@ -63,6 +63,39 @@ class RiskManagerTest {
     }
 
     @Test
+    fun testRiskSizedMargin_DynamicMinNotional_1xLeverage() {
+        // Balance = ₹1,000, 1% Risk = ₹10, SL distance = 2% (0.02)
+        // Raw calculated margin = (10 / 0.02) / 1 = ₹500
+        // But Dynamic Min Notional = ₹615 -> at 1x, min margin is ₹615!
+        val sizedMargin = riskManager.calculateRiskSizedMargin(
+            balanceInr = 1000.0,
+            entryPrice = 100.0,
+            stopLossPrice = 98.0,
+            leverage = 1,
+            minMarginInr = 500.0,
+            minOrderNotionalInr = 615.0
+        )
+        assertEquals(615.0, sizedMargin, 0.01)
+    }
+
+    @Test
+    fun testRiskSizedMargin_DynamicMinNotional_2xLeverage() {
+        // Balance = ₹1,000, 1% Risk = ₹10, SL distance = 4% (0.04)
+        // Raw calculated notional = 10 / 0.04 = ₹250
+        // Raw margin = 250 / 2 = ₹125
+        // Dynamic Min Notional = ₹615 -> at 2x, min margin is 615 / 2 = ₹307.5
+        val sizedMargin = riskManager.calculateRiskSizedMargin(
+            balanceInr = 1000.0,
+            entryPrice = 100.0,
+            stopLossPrice = 96.0,
+            leverage = 2,
+            minMarginInr = 200.0,
+            minOrderNotionalInr = 615.0
+        )
+        assertEquals(307.5, sizedMargin, 0.01)
+    }
+
+    @Test
     fun testPortfolioLimit_MaxConcurrentPositions() {
         val openPositions = listOf(
             createPosition("B-BTC_USDT", true),
