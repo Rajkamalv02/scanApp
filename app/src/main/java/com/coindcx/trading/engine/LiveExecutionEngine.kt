@@ -27,9 +27,12 @@ class LiveExecutionEngine(
                 if (usdtWallet != null) {
                     return currencyConverter.convertUsdtToInr(usdtWallet.availableBalance)
                 }
+            } else if (!resp.isSuccessful) {
+                AppLogManager.w("LIVE_EXEC", "Failed fetching futures wallets: HTTP ${resp.code()} ${resp.errorBody()?.string()}")
             }
             0.0
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            AppLogManager.w("LIVE_EXEC", "Exception fetching futures wallets: ${e.message}")
             0.0
         }
     }
@@ -59,7 +62,8 @@ class LiveExecutionEngine(
             )
             val positionsResp = apiService.getPositions(positionsPayload)
             positionsResp.body()?.filter { it.isOpen || it.inactivePosBuy > 0 || it.inactivePosSell > 0 } ?: emptyList()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            AppLogManager.w("LIVE_EXEC", "Exception fetching open positions: ${e.message}")
             emptyList()
         }
     }
@@ -109,6 +113,12 @@ class LiveExecutionEngine(
             .setScale(precision, java.math.RoundingMode.HALF_UP)
             .toDouble()
         val finalQty = roundedQty.coerceAtLeast(spec?.minQuantity ?: step)
+
+        val notionalUsdt = finalQty * currentPrice
+        AppLogManager.trade("LIVE_EXEC",
+            "Quantized order qty for %s: raw=%.6f -> final=%.6f (step=%s, precision=%d, notional=$%.2f USDT, floor=%.2f USDT)"
+                .format(pair, rawQty, finalQty, step.toString(), precision, notionalUsdt, minNotionalUsdt)
+        )
 
         return when (val res = orderManager.placeLimitOrder(pair, side, currentPrice, finalQty, leverage, tradeId)) {
             is OrderResult.Success -> {

@@ -139,6 +139,7 @@ class FuturesUniverseManager(
             }
             if (specsMap.isNotEmpty()) {
                 specsRef.set(specsMap)
+                AppLogManager.scanner("Loaded ${specsMap.size} futures instrument specifications (step, precision, min_notional)")
             }
 
             // 3. Fetch 24h Ticker data (volume, last_price, bid, ask)

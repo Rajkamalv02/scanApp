@@ -32,10 +32,18 @@ class CurrencyConverter(
                     if (parsed != null && parsed > 50.0) {
                         cachedRate = parsed
                         lastFetchTime = System.currentTimeMillis()
+                        com.coindcx.trading.util.AppLogManager.i(
+                            "CURRENCY",
+                            "Dynamic USDT/INR rate updated: ₹%.2f (Settlement rate: ₹%.2f, Min notional floor: ₹%.2f)"
+                                .format(parsed, parsed * 1.03, 6.0 * parsed * 1.03)
+                        )
                     }
                 }
-            } catch (_: Exception) {
-                // Keep existing cachedRate on network fluctuation
+            } catch (e: Exception) {
+                com.coindcx.trading.util.AppLogManager.w(
+                    "CURRENCY",
+                    "Failed fetching USDT/INR ticker: ${e.message}. Fallback to cached rate: ₹%.2f".format(cachedRate)
+                )
             }
             cachedRate
         }

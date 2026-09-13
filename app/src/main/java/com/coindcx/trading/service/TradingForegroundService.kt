@@ -567,10 +567,11 @@ class TradingForegroundService : Service() {
                         "actual_leverage" to "${actualLeverage}x",
                         "margin_allocated_inr" to "₹%.2f".format(marginToAllocate),
                         "notional_value_inr" to "₹%.2f".format(notionalInr),
+                        "dynamic_min_notional_floor_inr" to "₹%.2f".format(dynamicMinNotionalInr),
                         "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance)
                     ),
-                    narrative = "Account Balance = ₹%.2f -> Allocated Margin = ₹%.2f @ %dx leverage (Requested: %dx) -> Notional Value = ₹%.2f"
-                        .format(inMemoryAvailableBalance, marginToAllocate, actualLeverage, requestedLeverage, notionalInr)
+                    narrative = "Account Balance = ₹%.2f -> Allocated Margin = ₹%.2f @ %dx leverage (Requested: %dx) -> Notional = ₹%.2f (Min Floor: ₹%.2f)"
+                        .format(inMemoryAvailableBalance, marginToAllocate, actualLeverage, requestedLeverage, notionalInr, dynamicMinNotionalInr)
                 )
 
                 // Gate 4: Fresh In-Memory Balance Check

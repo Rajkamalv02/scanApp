@@ -48,6 +48,7 @@ class OrderManager(
         )
         orderDao.insert(orderEntity)
 
+        val notionalUsdt = quantity * price
         AppLogManager.tradeLifecycle(
             event = "ORDER_REQUESTED",
             tradeId = clientOrderId,
@@ -58,10 +59,12 @@ class OrderManager(
                 "order_type" to "LIMIT",
                 "price" to "%.4f".format(price),
                 "quantity" to "%.4f".format(quantity),
-                "leverage" to "${leverage}x"
+                "leverage" to "${leverage}x",
+                "margin_currency" to "INR",
+                "notional_usdt" to "%.2f".format(notionalUsdt)
             ),
-            narrative = "ORDER_REQUESTED: Submitting LIVE LIMIT order for %s %s qty=%.4f @ %.4f (Lev: %dx)"
-                .format(pair, side.uppercase(), quantity, price, leverage)
+            narrative = "ORDER_REQUESTED: Submitting LIVE LIMIT order for %s %s qty=%.4f @ %.4f (Lev: %dx, Margin Currency: INR, Notional: $%.2f USDT)"
+                .format(pair, side.uppercase(), quantity, price, leverage, notionalUsdt)
         )
 
         val request = CreateOrderRequest(
@@ -103,7 +106,8 @@ class OrderManager(
                 )
                 OrderResult.Success(order.id, clientOrderId)
             } else {
-                val errorMsg = response.errorBody()?.string() ?: "Order rejected"
+                val rawErr = response.errorBody()?.string()
+                val errorMsg = if (!rawErr.isNullOrBlank()) rawErr else "Order rejected (HTTP ${response.code()})"
                 orderDao.update(orderEntity.copy(status = "REJECTED"))
                 AppLogManager.tradeLifecycle(
                     event = "ORDER_REJECTED",
