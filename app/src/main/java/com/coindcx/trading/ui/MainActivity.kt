@@ -236,6 +236,14 @@ class MainActivity : AppCompatActivity() {
             val modeText = if (isChecked) "Market-Wide (All Liquid Futures)" else "Specific Top Pairs"
             Toast.makeText(this, "Scan Scope: $modeText", Toast.LENGTH_SHORT).show()
         }
+
+        // 5. Tier-2 Altcoins Live Trading Toggle
+        binding.switchAllowTier2.isChecked = config.allowTier2AltcoinsLive
+        binding.switchAllowTier2.setOnCheckedChangeListener { _, isChecked ->
+            configRepo.updateAllowTier2Live(isChecked)
+            val modeText = if (isChecked) "Tier-2 Altcoins Allowed in Live Trading" else "Live Trading Restricted to Tier-1 Majors Only"
+            Toast.makeText(this, modeText, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun updateLeverageUi(leverage: Int) {

@@ -29,5 +29,7 @@ data class TradingConfig(
     val atrMultiplier: Double = 1.5,
     val rsiPeriod: Int = 14,
     val rsiOversold: Double = 30.0,
-    val rsiOverbought: Double = 70.0
+    val rsiOverbought: Double = 70.0,
+    // Canary guardrail toggle
+    val allowTier2AltcoinsLive: Boolean = true
 )

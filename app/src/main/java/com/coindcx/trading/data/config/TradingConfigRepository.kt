@@ -29,6 +29,7 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_RSI_PERIOD = "rsi_period"
         private const val KEY_RSI_OVERSOLD = "rsi_oversold"
         private const val KEY_RSI_OVERBOUGHT = "rsi_overbought"
+        private const val KEY_ALLOW_TIER2_LIVE = "allow_tier2_live"
 
         @Volatile
         private var INSTANCE: TradingConfigRepository? = null
@@ -53,7 +54,8 @@ class TradingConfigRepository(context: Context) {
             atrMultiplier = prefs.getFloat(KEY_ATR_MULT, 1.5f).toDouble(),
             rsiPeriod = prefs.getInt(KEY_RSI_PERIOD, 14),
             rsiOversold = prefs.getFloat(KEY_RSI_OVERSOLD, 30.0f).toDouble(),
-            rsiOverbought = prefs.getFloat(KEY_RSI_OVERBOUGHT, 70.0f).toDouble()
+            rsiOverbought = prefs.getFloat(KEY_RSI_OVERBOUGHT, 70.0f).toDouble(),
+            allowTier2AltcoinsLive = prefs.getBoolean(KEY_ALLOW_TIER2_LIVE, true)
         )
     }
 
@@ -89,6 +91,11 @@ class TradingConfigRepository(context: Context) {
     fun updateScanMode(isMarketWide: Boolean) {
         prefs.edit().putBoolean(KEY_MARKET_WIDE, isMarketWide).apply()
         _configFlow.value = _configFlow.value.copy(isMarketWideScan = isMarketWide)
+    }
+
+    fun updateAllowTier2Live(allow: Boolean) {
+        prefs.edit().putBoolean(KEY_ALLOW_TIER2_LIVE, allow).apply()
+        _configFlow.value = _configFlow.value.copy(allowTier2AltcoinsLive = allow)
     }
 
     fun updateStrategyTuning(

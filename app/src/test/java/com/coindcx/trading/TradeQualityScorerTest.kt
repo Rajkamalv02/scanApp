@@ -35,31 +35,31 @@ class TradeQualityScorerTest {
     @Test
     fun testNetRiskReward_FeeDeduction() {
         // Entry: 100,000, TP: 105,000 (+5%), SL: 98,000 (-2%)
-        // Fee adjustment = 0.20% (0.002)
+        // Fee adjustment = 0.08% (0.0008)
         // Gross Reward = 5.0%, Gross Risk = 2.0%
-        // Net Reward = 5% - 0.2% = 4.8%
-        // Net Risk = 2% + 0.2% = 2.2%
-        // Net R:R = 4.8 / 2.2 = ~2.18x (>= 2.0 -> 20 pts)
+        // Net Reward = 5% - 0.08% = 4.92%
+        // Net Risk = 2% + 0.08% = 2.08%
+        // Net R:R = 4.92 / 2.08 = ~2.365x (>= 1.75 -> 10 pts)
         val netRr = scorer.calculateNetRiskReward(
             entryPrice = 100000.0,
             takeProfit = 105000.0,
             stopLoss = 98000.0
         )
-        assertEquals(2.18, netRr, 0.05)
+        assertEquals(2.365, netRr, 0.05)
     }
 
     @Test
     fun testNetRiskReward_BelowGate_Rejection() {
         // Entry: 100,000, TP: 102,000 (+2%), SL: 98,000 (-2%)
-        // Net Reward = 2% - 0.2% = 1.8%
-        // Net Risk = 2% + 0.2% = 2.2%
-        // Net R:R = 1.8 / 2.2 = 0.82x (< 1.5x minimum gate)
+        // Net Reward = 2% - 0.08% = 1.92%
+        // Net Risk = 2% + 0.08% = 2.08%
+        // Net R:R = 1.92 / 2.08 = 0.923x (< 1.25x minimum gate)
         val netRr = scorer.calculateNetRiskReward(
             entryPrice = 100000.0,
             takeProfit = 102000.0,
             stopLoss = 98000.0
         )
-        assertTrue(netRr < 1.5)
+        assertTrue(netRr < scorer.MIN_NET_RR_THRESHOLD)
 
         val candles = List(60) { createCandle(100.0, 105.0, 95.0, 100.0, 1000.0) }
         val signal = Signal(
@@ -78,6 +78,33 @@ class TradeQualityScorerTest {
         )
 
         assertEquals(QualityCategory.REJECT, assessment.category)
+        assertFalse(assessment.isApproved)
+        assertTrue(assessment.rejectionReason?.contains("Net R:R") == true)
+    }
+
+    @Test
+    fun testFatalRejection_NeverCategorizedAsPrime() {
+        // High confidence, aligned HTF candles, but low net R:R
+        val htfCandles = List(60) { createCandle(100.0, 101.0, 99.0, 100.0, 1000.0) }
+        val candles = List(60) { createCandle(105.0, 106.0, 104.0, 105.0, 1000.0) }
+        val signal = Signal(
+            action = SignalAction.ENTER_LONG,
+            stopLossPrice = 104.5, // Tight stop
+            takeProfitPrice = 105.1, // Very small TP -> Net R:R < 1.25
+            confidenceScore = 95.0
+        )
+
+        val assessment = scorer.evaluateQuality(
+            candles = candles,
+            htfCandles = htfCandles,
+            signal = signal,
+            currentPrice = 105.0,
+            pair = "B-BTC_USDT"
+        )
+
+        // Must be REJECT, not PRIME, despite high raw score
+        assertEquals(QualityCategory.REJECT, assessment.category)
+        assertFalse(assessment.isApproved)
         assertTrue(assessment.rejectionReason?.contains("Net R:R") == true)
     }
 

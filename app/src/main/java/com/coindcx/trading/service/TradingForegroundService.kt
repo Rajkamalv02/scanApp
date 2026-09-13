@@ -426,8 +426,10 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
-                // Gate 1.5: Canary Guardrail — Restrict Live Trading to Tier-1 Majors
-                if (!executionEngine.isPaperTrading && !scannerEngine.universeManager.isTier1Major(opp.pair)) {
+                // Gate 1.5: Canary Guardrail — Restrict Live Trading to Tier-1 Majors unless Tier-2 toggle is enabled
+                val isTier1 = scannerEngine.universeManager.isTier1Major(opp.pair)
+                val allowTier2 = config.allowTier2AltcoinsLive
+                if (!executionEngine.isPaperTrading && !isTier1 && !allowTier2) {
                     AppLogManager.tradeLifecycle(
                         event = "RISK_FILTER_REJECTED",
                         tradeId = tradeId,

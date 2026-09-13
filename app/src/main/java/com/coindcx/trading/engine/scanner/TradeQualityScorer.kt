@@ -46,7 +46,8 @@ data class TradeQualityResult(
  */
 object TradeQualityScorer {
 
-    private const val FEE_FRICTION_PERCENT = 0.20 // 0.10% round-trip taker + 0.10% slippage
+    const val FEE_FRICTION_PERCENT = 0.08 // ~0.05% taker fee + 0.03% slippage allowance
+    const val MIN_NET_RR_THRESHOLD = 1.25
 
     fun evaluateQuality(
         candles: List<MarketCandle>,
@@ -111,11 +112,12 @@ object TradeQualityScorer {
             if (signal.takeProfitPrice != null && signal.stopLossPrice != null && currentPrice > 0.0) {
                 netRr = calculateNetRiskReward(currentPrice, signal.takeProfitPrice, signal.stopLossPrice)
 
-                if (netRr < 1.5) {
-                    fatalRejectionReason = "Net R:R %.2f < 1.5 after fees".format(netRr)
+                if (netRr < MIN_NET_RR_THRESHOLD) {
+                    fatalRejectionReason = "Net R:R %.2f < %.2f after fees".format(netRr, MIN_NET_RR_THRESHOLD)
                     0
                 } else when {
-                    netRr >= 2.0 -> 10
+                    netRr >= 1.75 -> 10
+                    netRr >= 1.50 -> 8
                     else -> 6
                 }
             } else {
@@ -169,6 +171,7 @@ object TradeQualityScorer {
         val clampedScore = rawTotal.coerceIn(0, 100)
 
         val category = when {
+            fatalRejectionReason != null -> QualityCategory.REJECT
             clampedScore >= 80 -> QualityCategory.PRIME
             clampedScore >= 70 -> QualityCategory.ACCEPTABLE
             clampedScore >= 50 -> QualityCategory.WATCH
