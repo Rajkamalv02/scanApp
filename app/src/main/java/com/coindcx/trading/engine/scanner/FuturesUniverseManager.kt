@@ -359,7 +359,7 @@ class FuturesUniverseManager(
             val pinnedSet = openPositionPairs.filter { activeSet.contains(it) }.toSet()
 
             // Calculate dynamic mover capacity: max 20, or (23 - anchors - pinned)
-            val maxDynamicMovers = (HARD_CEILING_TOTAL_POOL - anchorSet.size - (pinnedSet - anchorSet).size).coerceAtLeast(15)
+            val maxDynamicMovers = (HARD_CEILING_TOTAL_POOL - anchorSet.size - (pinnedSet - anchorSet).size).coerceAtLeast(0)
 
             val qualifiedDynamicCandidates = mutableListOf<String>()
             val passingPairSet = stage1Passing.map { it.pair }.toSet()

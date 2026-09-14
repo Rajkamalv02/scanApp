@@ -310,8 +310,10 @@ class MarketScannerEngine(
                 pair = pair
             )
 
+            val masScore = universeManager.getMasScore(pair)?.totalScore ?: 0.0
+
             if (signal.action != SignalAction.HOLD) {
-                AppLogManager.quality("[$pair] [${strategy.id.uppercase()}] Quality: ${quality.totalScore}/100 (${quality.category}) | Net R:R: ${quality.netRiskRewardRatio} | HTF: ${quality.htfAlignment} | Approved: ${quality.isApproved}")
+                AppLogManager.quality("[$pair] [${strategy.id.uppercase()}] TQS: ${quality.totalScore}/100 (${quality.category}) | MAS: ${"%.1f".format(masScore)} | Net R:R: ${quality.netRiskRewardRatio} | HTF: ${quality.htfAlignment} | Approved: ${quality.isApproved}")
             }
 
             MarketOpportunity(
@@ -328,7 +330,8 @@ class MarketScannerEngine(
                 isApproved = quality.isApproved,
                 htfAlignment = quality.htfAlignment,
                 strategyId = strategy.id,
-                strategyName = strategy.name
+                strategyName = strategy.name,
+                marketActivityScore = masScore
             )
         } catch (e: Exception) {
             AppLogManager.e("SCANNER", "[$pair] [${strategy.id}] Unhandled exception during pair scan: ${e.message}", e)

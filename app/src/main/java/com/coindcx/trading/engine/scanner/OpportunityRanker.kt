@@ -15,6 +15,7 @@ class OpportunityRanker {
                 compareByDescending<MarketOpportunity> { it.isEntry }
                     .thenByDescending { it.isApproved }
                     .thenByDescending { it.qualityScore }
+                    .thenByDescending { it.marketActivityScore } // Higher MAS market prioritized on tie
                     .thenByDescending { it.netRiskRewardRatio }
                     .thenByDescending { it.confidenceScore }
             )
@@ -26,7 +27,7 @@ class OpportunityRanker {
                 opp.copy(
                     rank = rankNumber,
                     lifecycleState = OpportunityLifecycle.RANKED,
-                    statusMessage = "Rank #$rankNumber [$stratLabel]: ${opp.actionLabel} [${opp.qualityCategory}] (Score: ${opp.qualityScore}/100)"
+                    statusMessage = "Rank #$rankNumber [$stratLabel]: ${opp.actionLabel} [${opp.qualityCategory}] (TQS: ${opp.qualityScore}/100, MAS: ${"%.0f".format(opp.marketActivityScore)})"
                 )
             }
 
@@ -34,8 +35,8 @@ class OpportunityRanker {
         if (ranked.isNotEmpty()) {
             val summary = ranked.joinToString("\n") { opp ->
                 val strat = (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase()
-                "  #%d [%-12s] %-14s | %-5s | Score: %2d/100 (%s) | Conf: %4.1f%% | Net R:R: %.2f".format(
-                    opp.rank, strat, opp.pair, opp.actionLabel, opp.qualityScore, opp.qualityCategory, opp.confidenceScore, opp.netRiskRewardRatio
+                "  #%d [%-12s] %-14s | %-5s | TQS: %2d/100 (%s) | MAS: %4.1f | Conf: %4.1f%% | Net R:R: %.2f".format(
+                    opp.rank, strat, opp.pair, opp.actionLabel, opp.qualityScore, opp.qualityCategory, opp.marketActivityScore, opp.confidenceScore, opp.netRiskRewardRatio
                 )
             }
             AppLogManager.scanner(

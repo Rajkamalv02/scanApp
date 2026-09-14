@@ -31,7 +31,8 @@ data class MarketOpportunity(
     val isApproved: Boolean = false,
     val htfAlignment: HtfAlignment = HtfAlignment.NEUTRAL,
     val strategyId: String = "",
-    val strategyName: String = ""
+    val strategyName: String = "",
+    val marketActivityScore: Double = 0.0
 ) {
     val isBuy: Boolean get() = signal.action == SignalAction.ENTER_LONG
     val isSell: Boolean get() = signal.action == SignalAction.ENTER_SHORT

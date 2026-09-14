@@ -138,12 +138,17 @@ class RollingMarketDataStore(
             return RvolResult(1.0, isWarmed = false, elapsedMinutes = observedElapsedMinutes, confidenceWeight = 0.0, 0.0, 0.0)
         }
 
-        val observedDeltaVolume = (newest.quoteVolumeUsdt - baseline.quoteVolumeUsdt).coerceAtLeast(0.0)
+        // Difference between two 24h rolling volume snapshots is: deltaV24h = V_actual,deltaT - V_24h_ago,deltaT
+        // Assuming historical baseline V_24h_ago,deltaT ≈ V_expected,deltaT:
+        // V_actual,deltaT ≈ V_expected,deltaT + deltaV24h
+        // True RVOL = V_actual / V_expected = 1.0 + (deltaV24h / expectedDeltaVolume)
+        val deltaV24h = newest.quoteVolumeUsdt - baseline.quoteVolumeUsdt
         // V_expected matches EXACTLY the observed elapsed minutes: (V_24h / 1440 min) * observedElapsedMinutes
         val expectedDeltaVolume = (newest.quoteVolumeUsdt / 1440.0) * observedElapsedMinutes
+        val observedDeltaVolume = (expectedDeltaVolume + deltaV24h).coerceAtLeast(0.0)
 
         val rawRvol = if (expectedDeltaVolume > 0.0) {
-            observedDeltaVolume / expectedDeltaVolume
+            (observedDeltaVolume / expectedDeltaVolume).coerceAtLeast(0.0)
         } else {
             1.0
         }

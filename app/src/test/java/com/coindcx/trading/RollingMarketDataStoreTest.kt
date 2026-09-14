@@ -77,6 +77,21 @@ class RollingMarketDataStoreTest {
     }
 
     @Test
+    fun testSteadyNormalVolumeYieldsOnePointZeroRvol() {
+        val t0 = 1_000_000_000L
+        val baseQuoteVol = 14_400_000.0 // Exactly $10,000 expected per minute
+        // Add 16 snapshots with zero deltaV (steady 24h rolling volume)
+        for (i in 0..15) {
+            val elapsedMs = i * 2 * 60_000L
+            store.addSnapshot("B-STEADY_USDT", createSnapshot(t0 + elapsedMs, quoteVolume = baseQuoteVol))
+        }
+
+        val rvol = store.calculateRvol("B-STEADY_USDT")
+        assertTrue("RVOL must be fully warmed at 30 minutes", rvol.isWarmed)
+        assertEquals("Steady volume with 0 rolling delta must yield RVOL = 1.0x baseline", 1.0, rvol.rvol, 0.05)
+    }
+
+    @Test
     fun testPartialFillMatchedDenominatorInTransitionZone() {
         val t0 = 1_000_000_000L
         val baseQuoteVol = 1_440_000.0 // Exactly $1,000 expected volume per minute!
@@ -84,21 +99,20 @@ class RollingMarketDataStoreTest {
         // Add 8 snapshots: 0m to 14m (elapsed 14 minutes)
         for (i in 0..7) {
             val elapsedMs = i * 2 * 60_000L
-            // Simulate 2.0x normal volume: $2,000 added per minute -> $28,000 over 14 minutes
-            val currentQuoteVol = baseQuoteVol + (i * 2 * 2000.0)
+            // Simulate 24h volume expansion of $1,000/min above baseline -> +$14,000 deltaV24h over 14 min
+            val currentQuoteVol = baseQuoteVol + (i * 2 * 1000.0)
             store.addSnapshot("B-SOL_USDT", createSnapshot(t0 + elapsedMs, quoteVolume = currentQuoteVol))
         }
 
         val rvol = store.calculateRvol("B-SOL_USDT")
         assertFalse("At 14m, RVOL is in transition zone, not fully warmed", rvol.isWarmed)
-        // At 14m, confidenceWeight should be (14 - 10) / 20 = 0.20
         assertEquals(0.20, rvol.confidenceWeight, 0.01)
 
         // Denominator must match the 14-minute elapsed window, NOT 30 minutes!
         // Expected over 14m = (currentQuoteVol / 1440) * 14m ≈ $14,000
-        // Observed over 14m = $28,000
-        // Ratio ≈ 2.0x
-        assertEquals(28_000.0, rvol.observedVolumeDelta, 100.0)
+        // deltaV24h = $14,000
+        // observedDeltaVolume = $14,000 + $14,000 = $28,000
+        // RVOL = 28,000 / 14,000 = 2.0x
         assertTrue("Expected delta volume must match ~14m (~14,000), not 30m (~30,000)", rvol.expectedVolumeDelta in 13_500.0..15_000.0)
         assertEquals(2.0, rvol.rvol, 0.1)
     }
@@ -111,8 +125,9 @@ class RollingMarketDataStoreTest {
         // Add 16 snapshots: 0m to 30m (every 2m)
         for (i in 0..15) {
             val elapsedMs = i * 2 * 60_000L
-            // Simulate 3.0x volume surge: $30,000 per minute -> $900,000 over 30m
-            val currentQuoteVol = baseQuoteVol + (i * 2 * 30_000.0)
+            // Simulate volume expansion: +$20,000/min -> deltaV24h = +$600,000 over 30m
+            // RVOL = 1.0 + (600,000 / 300,000) = 3.0x
+            val currentQuoteVol = baseQuoteVol + (i * 2 * 20_000.0)
             store.addSnapshot("B-ETH_USDT", createSnapshot(t0 + elapsedMs, quoteVolume = currentQuoteVol))
         }
 
@@ -121,10 +136,8 @@ class RollingMarketDataStoreTest {
         assertEquals(1.0, rvol.confidenceWeight, 0.0001)
         assertEquals(30.0, rvol.elapsedMinutes, 0.5)
 
-        // Observed delta = $900,000
-        // Expected delta over 30m = ($15.3M / 1440) * 30 ≈ $318,750
-        // RVOL ≈ 2.82x - 3.0x
-        assertTrue("RVOL should reflect ~3.0x surge", rvol.rvol in 2.7..3.1)
+        // RVOL ≈ 3.0x
+        assertTrue("RVOL should reflect ~3.0x surge", rvol.rvol in 2.8..3.2)
     }
 
     @Test
