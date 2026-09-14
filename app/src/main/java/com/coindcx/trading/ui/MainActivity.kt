@@ -571,6 +571,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
+            MarketScanState.universeDiscoverySummary.collectLatest { summary ->
+                if (summary != null) {
+                    binding.tvUniverseStatus.text = "Active Pool: ${summary.totalActivePoolSize} pairs (${summary.anchorCount} Anchors, ${summary.dynamicMoverCount} Dynamic | Top MAS: ${"%.0f".format(summary.topMasScore)}, Avg: ${"%.0f".format(summary.avgMasScore)})"
+                } else {
+                    binding.tvUniverseStatus.text = "Active Pool: ≤ 23 pairs (3 Anchors, Dynamic Movers)"
+                }
+            }
+        }
+
+        lifecycleScope.launch {
             MarketScanState.isRefreshingExchange.collectLatest { refreshing ->
                 binding.progressRefreshExchange.visibility = if (refreshing) View.VISIBLE else View.GONE
                 binding.btnRefreshExchange.isEnabled = !refreshing

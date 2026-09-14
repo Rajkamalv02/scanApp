@@ -705,6 +705,16 @@
                     android:textColor="@color/accent_blue"
                     android:textSize="11sp"
                     android:fontFamily="monospace" />
+
+                <TextView
+                    android:id="@+id/tvUniverseStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Active Pool: ≤ 23 pairs (3 Anchors, Dynamic Movers)"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace" />
             </LinearLayout>
 
             <ProgressBar

@@ -117,14 +117,15 @@ class MarketScannerEngine(
     ): List<MarketOpportunity> = withContext(Dispatchers.IO) {
         val scanStartTime = System.currentTimeMillis()
 
+        // Include pairs of all active open positions so position-management exits are never orphaned
+        val openPositionPairs = executionEngine.getAllOpenPositions().map { it.pair }
+
         val dynamicUniverse = if (config.isMarketWideScan) {
-            universeManager.getOrRefreshUniverse()
+            universeManager.getOrRefreshUniverse(openPositionPairs = openPositionPairs)
         } else {
             config.selectedPairs.ifEmpty { universeManager.getMajorUniverse() }
         }
 
-        // Include pairs of all active open positions so position-management exits are never orphaned
-        val openPositionPairs = executionEngine.getAllOpenPositions().map { it.pair }
         val pairsToScan = (dynamicUniverse + openPositionPairs).distinct()
 
         val concurrencySemaphore = Semaphore(6)
@@ -154,9 +155,15 @@ class MarketScannerEngine(
                         )
                     }
 
+                    val candidatePairs = if (config.isMarketWideScan) {
+                        universeManager.getStrategyCandidates(strategy, openPositionPairs)
+                    } else {
+                        pairsToScan
+                    }
+
                     val results = scanUniverseForStrategy(
                         strategy = strategy,
-                        pairs = pairsToScan,
+                        pairs = candidatePairs,
                         timeframe = config.timeframe,
                         executionEngine = executionEngine,
                         candleCache = candleCache,

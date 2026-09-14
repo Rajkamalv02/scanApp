@@ -41,6 +41,12 @@ data class Signal(
     val strategyName: String = ""
 )
 
+enum class MarketRegimePreference {
+    ANY,
+    TRENDING_MOMENTUM,
+    MEAN_REVERTING_RANGE
+}
+
 /**
  * Pure, deterministic strategy interface.
  * Has zero dependency on network, database, or UI.
@@ -53,6 +59,7 @@ interface Strategy {
     val parametersSummary: String
     val requiredCandleCount: Int
     val defaultTimeframe: String // e.g. "5m"
+    val preferredRegime: MarketRegimePreference get() = MarketRegimePreference.ANY
 
     fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?, pair: String = ""): Signal
 }

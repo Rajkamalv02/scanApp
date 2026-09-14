@@ -37,6 +37,23 @@ object MarketScanState {
     private val _executionAuditMap = MutableStateFlow<Map<String, TradeExecutionAudit>>(emptyMap())
     val executionAuditMap: StateFlow<Map<String, TradeExecutionAudit>> = _executionAuditMap.asStateFlow()
 
+    data class UniverseDiscoverySummary(
+        val totalActivePoolSize: Int = 0,
+        val anchorCount: Int = 3,
+        val dynamicMoverCount: Int = 0,
+        val pinnedCount: Int = 0,
+        val topMasScore: Double = 0.0,
+        val avgMasScore: Double = 0.0,
+        val isFallbackActive: Boolean = false
+    )
+
+    private val _universeDiscoverySummary = MutableStateFlow<UniverseDiscoverySummary?>(null)
+    val universeDiscoverySummary: StateFlow<UniverseDiscoverySummary?> = _universeDiscoverySummary.asStateFlow()
+
+    fun updateUniverseSummary(summary: UniverseDiscoverySummary) {
+        _universeDiscoverySummary.value = summary
+    }
+
     private val _paperAccountSummary = MutableStateFlow<com.coindcx.trading.engine.paper.PaperAccountSummary?>(null)
     val paperAccountSummary: StateFlow<com.coindcx.trading.engine.paper.PaperAccountSummary?> = _paperAccountSummary.asStateFlow()
 

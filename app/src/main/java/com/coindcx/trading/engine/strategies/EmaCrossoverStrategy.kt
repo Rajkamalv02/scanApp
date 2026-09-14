@@ -32,6 +32,7 @@ class EmaCrossoverStrategy(
     override val name: String = "EMA Crossover Strategy"
     override val description: String = "Pure trend-following momentum strategy using Fast/Slow EMA confirmed bar crossovers with ATR volatility targets."
     override val defaultTimeframe: String = "15m"
+    override val preferredRegime: com.coindcx.trading.engine.MarketRegimePreference = com.coindcx.trading.engine.MarketRegimePreference.TRENDING_MOMENTUM
 
     @Volatile
     var fastPeriod: Int = initialFastPeriod

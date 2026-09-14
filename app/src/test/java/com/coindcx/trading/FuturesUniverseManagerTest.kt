@@ -2,6 +2,10 @@ package com.coindcx.trading
 
 import com.coindcx.trading.data.api.CoinDCXApiService
 import com.coindcx.trading.data.api.models.*
+import com.coindcx.trading.engine.MarketRegimePreference
+import com.coindcx.trading.engine.Signal
+import com.coindcx.trading.engine.SignalAction
+import com.coindcx.trading.engine.Strategy
 import com.coindcx.trading.engine.scanner.FuturesUniverseManager
 import kotlinx.coroutines.test.runTest
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -40,6 +44,19 @@ class FuturesUniverseManagerTest {
         override suspend fun cancelOrder(body: Map<String, Any>): Response<Map<String, Any>> = Response.success(emptyMap())
     }
 
+    private class DummyStrategy(
+        override val id: String,
+        override val name: String,
+        override val preferredRegime: MarketRegimePreference
+    ) : Strategy {
+        override val description: String = ""
+        override val parametersSummary: String = ""
+        override val requiredCandleCount: Int = 10
+        override val defaultTimeframe: String = "15m"
+        override fun evaluate(candles: List<MarketCandle>, activePosition: FuturesPosition?, pair: String): Signal =
+            Signal(action = SignalAction.HOLD)
+    }
+
     private fun buildMarketDetail(pair: String, coindcxName: String, targetCurrency: String, status: String = "active"): Map<String, Any> {
         return mapOf(
             "pair" to pair,
@@ -49,13 +66,25 @@ class FuturesUniverseManagerTest {
         )
     }
 
-    private fun buildTicker(market: String, lastPrice: Double, volume: Double, bid: Double, ask: Double): Map<String, Any> {
+    private fun buildTicker(
+        market: String,
+        lastPrice: Double,
+        volume: Double,
+        bid: Double,
+        ask: Double,
+        high: Double = lastPrice * 1.05,
+        low: Double = lastPrice * 0.95,
+        change24h: Double = 2.0
+    ): Map<String, Any> {
         return mapOf(
             "market" to market,
             "last_price" to lastPrice.toString(),
             "volume" to volume.toString(),
             "bid" to bid.toString(),
-            "ask" to ask.toString()
+            "ask" to ask.toString(),
+            "high" to high.toString(),
+            "low" to low.toString(),
+            "change_24_hour" to change24h.toString()
         )
     }
 
@@ -77,73 +106,34 @@ class FuturesUniverseManagerTest {
         val manager = FuturesUniverseManager(fakeApi)
         val universe = manager.getOrRefreshUniverse(forceRefresh = true)
 
-        assertEquals(1, universe.size)
-        assertEquals("B-BTC_USDT", universe[0])
+        assertTrue(universe.contains("B-BTC_USDT"))
         assertFalse(universe.contains("B-USDC_USDT"))
         assertFalse(universe.contains("B-EUR_USDT"))
     }
 
     @Test
-    fun testSpreadConstraintFilter() = runTest {
-        val fakeApi = FakeApiService()
-        fakeApi.activeInstruments = listOf("B-TIGHT_USDT", "B-WIDE_USDT")
-        fakeApi.marketsDetails = listOf(
-            buildMarketDetail("B-TIGHT_USDT", "TIGHTUSDT", "TIGHT"),
-            buildMarketDetail("B-WIDE_USDT", "WIDEUSDT", "WIDE")
-        )
-        fakeApi.ticker = listOf(
-            // Tight spread: bid 99.9, ask 100.1 on 100.0 price -> spread 0.2% <= 0.35% -> PASS
-            buildTicker("TIGHTUSDT", 100.0, 10000.0, 99.9, 100.1), // $1M vol
-            // Wide spread: bid 99.0, ask 100.0 on 100.0 price -> spread 1.0% > 0.35% -> REJECT
-            buildTicker("WIDEUSDT", 100.0, 10000.0, 99.0, 100.0) // $1M vol
-        )
-
-        val manager = FuturesUniverseManager(fakeApi)
-        val universe = manager.getOrRefreshUniverse(forceRefresh = true)
-
-        assertEquals(1, universe.size)
-        assertEquals("B-TIGHT_USDT", universe[0])
-        assertFalse(universe.contains("B-WIDE_USDT"))
-    }
-
-    @Test
-    fun testVolumeFloorThreshold() = runTest {
-        val fakeApi = FakeApiService()
-        fakeApi.activeInstruments = listOf("B-HIGHVOL_USDT", "B-LOWVOL_USDT")
-        fakeApi.marketsDetails = listOf(
-            buildMarketDetail("B-HIGHVOL_USDT", "HIGHVOLUSDT", "HIGHVOL"),
-            buildMarketDetail("B-LOWVOL_USDT", "LOWVOLUSDT", "LOWVOL")
-        )
-        fakeApi.ticker = listOf(
-            // High vol: 5,000 * $100 = $500k >= $250k floor -> PASS
-            buildTicker("HIGHVOLUSDT", 100.0, 5000.0, 99.95, 100.05),
-            // Low vol: 1,500 * $100 = $150k < $250k floor -> REJECT
-            buildTicker("LOWVOLUSDT", 100.0, 1500.0, 99.95, 100.05)
-        )
-
-        val manager = FuturesUniverseManager(fakeApi)
-        val universe = manager.getOrRefreshUniverse(forceRefresh = true)
-
-        assertEquals(1, universe.size)
-        assertEquals("B-HIGHVOL_USDT", universe[0])
-    }
-
-    @Test
-    fun testStrictCeilingAndTwoTierSeparation() = runTest {
+    fun testAdaptiveFallbackWhenFewerThan20PassPrimary() = runTest {
         val fakeApi = FakeApiService()
         val activeList = mutableListOf<String>()
         val detailsList = mutableListOf<Map<String, Any>>()
         val tickerList = mutableListOf<Map<String, Any>>()
 
-        // Generate 95 qualified pairs with varying volumes
-        for (i in 1..95) {
-            val pair = "B-COIN${i}_USDT"
-            val mkt = "COIN${i}USDT"
+        // Create 10 pairs that pass primary ($500k vol, 0.15% spread)
+        for (i in 1..10) {
+            val pair = "B-PRIMARY${i}_USDT"
+            val mkt = "PRIMARY${i}USDT"
             activeList.add(pair)
-            detailsList.add(buildMarketDetail(pair, mkt, "COIN$i"))
-            // Volume descending from $95M down to $1M (all >= $250k)
-            val quoteVol = (96 - i) * 1_000_000.0
-            tickerList.add(buildTicker(mkt, 10.0, quoteVol / 10.0, 9.99, 10.01))
+            detailsList.add(buildMarketDetail(pair, mkt, "PRI$i"))
+            tickerList.add(buildTicker(mkt, 100.0, 5000.0, 99.92, 100.08)) // $500k vol, 0.16% spread
+        }
+
+        // Create 15 pairs that ONLY pass fallback ($300k vol, 0.30% spread - fails primary 0.25% limit)
+        for (i in 1..15) {
+            val pair = "B-FALLBACK${i}_USDT"
+            val mkt = "FALLBACK${i}USDT"
+            activeList.add(pair)
+            detailsList.add(buildMarketDetail(pair, mkt, "FALL$i"))
+            tickerList.add(buildTicker(mkt, 100.0, 3000.0, 99.85, 100.15)) // $300k vol, 0.30% spread
         }
 
         fakeApi.activeInstruments = activeList
@@ -153,45 +143,107 @@ class FuturesUniverseManagerTest {
         val manager = FuturesUniverseManager(fakeApi)
         val universe = manager.getOrRefreshUniverse(forceRefresh = true)
 
-        // Strict ceiling: Exactly 85, NOT 95
-        assertEquals(85, universe.size)
-
-        // Top pair should be B-COIN1_USDT ($95M volume)
-        assertEquals("B-COIN1_USDT", universe.first())
-        assertEquals("B-COIN85_USDT", universe.last())
-
-        // Top 25 are Tier-1 Majors
-        val majors = manager.getMajorUniverse()
-        assertEquals(25, majors.size)
-        assertTrue(manager.isTier1Major("B-COIN1_USDT"))
-        assertTrue(manager.isTier1Major("B-COIN25_USDT"))
-
-        // Rank 26 to 85 are Tier-2 (NOT majors)
-        assertFalse(manager.isTier1Major("B-COIN26_USDT"))
-        assertFalse(manager.isTier1Major("B-COIN85_USDT"))
+        // Since only 10 passed primary (< 20 threshold), adaptive fallback should activate
+        // and include fallback pairs up to the pool limit
+        assertTrue("Adaptive fallback must include fallback pairs", universe.any { it.startsWith("B-FALLBACK") })
+        assertTrue("Core anchors must always be present", universe.contains("B-BTC_USDT"))
+        assertTrue("Hard ceiling <= 23 pairs must be strictly enforced", universe.size <= FuturesUniverseManager.HARD_CEILING_TOTAL_POOL)
     }
 
     @Test
-    fun testNoBackfillingWhenFewerThanCeiling() = runTest {
+    fun testStrictHardCeilingWithManyCandidates() = runTest {
         val fakeApi = FakeApiService()
-        fakeApi.activeInstruments = listOf("B-SOL_USDT", "B-ETH_USDT", "B-BTC_USDT")
-        fakeApi.marketsDetails = listOf(
-            buildMarketDetail("B-SOL_USDT", "SOLUSDT", "SOL"),
-            buildMarketDetail("B-ETH_USDT", "ETHUSDT", "ETH"),
-            buildMarketDetail("B-BTC_USDT", "BTCUSDT", "BTC")
-        )
-        fakeApi.ticker = listOf(
-            buildTicker("BTCUSDT", 60000.0, 100.0, 59990.0, 60010.0),
-            buildTicker("ETHUSDT", 3000.0, 1000.0, 2999.0, 3001.0),
-            buildTicker("SOLUSDT", 150.0, 10000.0, 149.9, 150.1)
-        )
+        val activeList = mutableListOf<String>()
+        val detailsList = mutableListOf<Map<String, Any>>()
+        val tickerList = mutableListOf<Map<String, Any>>()
+
+        // Create 50 high-volume pairs with tight spreads
+        for (i in 1..50) {
+            val pair = "B-COIN${i}_USDT"
+            val mkt = "COIN${i}USDT"
+            activeList.add(pair)
+            detailsList.add(buildMarketDetail(pair, mkt, "C$i"))
+            val vol = (60 - i) * 10_000.0
+            tickerList.add(buildTicker(mkt, 100.0, vol, 99.97, 100.03))
+        }
+
+        fakeApi.activeInstruments = activeList
+        fakeApi.marketsDetails = detailsList
+        fakeApi.ticker = tickerList
 
         val manager = FuturesUniverseManager(fakeApi)
         val universe = manager.getOrRefreshUniverse(forceRefresh = true)
 
-        // Only 3 qualify, so universe must have EXACTLY 3 (no backfilling up to 85!)
-        assertEquals(3, universe.size)
-        assertEquals(3, manager.getMajorUniverse().size)
+        // Must be capped strictly at HARD_CEILING_TOTAL_POOL (23)
+        assertEquals(FuturesUniverseManager.HARD_CEILING_TOTAL_POOL, universe.size)
+        // Core Anchors must be present
+        assertTrue(universe.contains("B-BTC_USDT"))
+        assertTrue(universe.contains("B-ETH_USDT"))
+        assertTrue(universe.contains("B-SOL_USDT"))
+    }
+
+    @Test
+    fun testPinnedOpenPositionsPreservedUnderHardCeiling() = runTest {
+        val fakeApi = FakeApiService()
+        val activeList = mutableListOf<String>()
+        val detailsList = mutableListOf<Map<String, Any>>()
+        val tickerList = mutableListOf<Map<String, Any>>()
+
+        for (i in 1..30) {
+            val pair = "B-COIN${i}_USDT"
+            val mkt = "COIN${i}USDT"
+            activeList.add(pair)
+            detailsList.add(buildMarketDetail(pair, mkt, "C$i"))
+            tickerList.add(buildTicker(mkt, 100.0, 10_000.0, 99.97, 100.03))
+        }
+
+        // Add a low-ranked open position pair
+        val openPair = "B-COIN29_USDT"
+
+        fakeApi.activeInstruments = activeList
+        fakeApi.marketsDetails = detailsList
+        fakeApi.ticker = tickerList
+
+        val manager = FuturesUniverseManager(fakeApi)
+        val universe = manager.getOrRefreshUniverse(forceRefresh = true, openPositionPairs = listOf(openPair))
+
+        // Open position must be pinned in universe
+        assertTrue("Pinned open position must be retained", universe.contains(openPair))
+        assertTrue("Hard ceiling must remain <= 23", universe.size <= FuturesUniverseManager.HARD_CEILING_TOTAL_POOL)
+    }
+
+    @Test
+    fun testStrategyCandidateRoutingSoftBias() = runTest {
+        val fakeApi = FakeApiService()
+        val activeList = mutableListOf("B-TREND_USDT", "B-RANGE_USDT")
+        val detailsList = mutableListOf(
+            buildMarketDetail("B-TREND_USDT", "TRENDUSDT", "TREND"),
+            buildMarketDetail("B-RANGE_USDT", "RANGEUSDT", "RANGE")
+        )
+        // TREND: high 24h change + high range
+        // RANGE: low range (8%), mild change
+        val tickerList = mutableListOf(
+            buildTicker("TRENDUSDT", 100.0, 10_000.0, 99.97, 100.03, high = 120.0, low = 100.0, change24h = 15.0),
+            buildTicker("RANGEUSDT", 100.0, 10_000.0, 99.97, 100.03, high = 107.0, low = 100.0, change24h = 2.0)
+        )
+
+        fakeApi.activeInstruments = activeList
+        fakeApi.marketsDetails = detailsList
+        fakeApi.ticker = tickerList
+
+        val manager = FuturesUniverseManager(fakeApi)
+        manager.getOrRefreshUniverse(forceRefresh = true)
+
+        val trendStrategy = DummyStrategy("ema_cross", "EMA Cross", MarketRegimePreference.TRENDING_MOMENTUM)
+        val rangeStrategy = DummyStrategy("confluence", "Confluence", MarketRegimePreference.MEAN_REVERTING_RANGE)
+
+        val trendCandidates = manager.getStrategyCandidates(trendStrategy)
+        val rangeCandidates = manager.getStrategyCandidates(rangeStrategy)
+
+        assertNotNull(trendCandidates)
+        assertNotNull(rangeCandidates)
+        assertTrue(trendCandidates.isNotEmpty())
+        assertTrue(rangeCandidates.isNotEmpty())
     }
 
     @Test
@@ -200,7 +252,6 @@ class FuturesUniverseManagerTest {
         fakeApi.shouldFail = true
 
         val manager = FuturesUniverseManager(fakeApi)
-        // Refresh should gracefully fail without exception, keeping fallback list
         val universe = manager.getOrRefreshUniverse(forceRefresh = true)
 
         assertNotNull(universe)

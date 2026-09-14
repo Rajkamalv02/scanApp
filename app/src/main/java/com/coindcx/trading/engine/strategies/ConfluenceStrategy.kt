@@ -45,6 +45,7 @@ class ConfluenceStrategy(
     override val description: String = "Smart Money Concepts reversal strategy combining Liquidity Sweeps, Supply/Demand Zones, Structure Breaks, and Impulse Volatility Normalization."
     override val defaultTimeframe: String = "15m"
     override val requiredCandleCount: Int = 100
+    override val preferredRegime: com.coindcx.trading.engine.MarketRegimePreference = com.coindcx.trading.engine.MarketRegimePreference.MEAN_REVERTING_RANGE
 
     override val parametersSummary: String
         get() = "Swing: $swingLen, ZoneLookback: $maxLookback, ConfirmWindow: ${confirmWindow}b, ImpulseMAD: $madLen, R:R: 1:${riskRewardRatio.toInt()}"
