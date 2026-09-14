@@ -970,9 +970,11 @@ class MainActivity : AppCompatActivity() {
 
                 val config = configRepo.configFlow.value
                 val allocation = allocationEngine.allocateCapital(
-                    availableInr,
-                    config.minMarginPerTradeInr,
-                    MarketScanState.topOpportunities.value
+                    availableBalanceInr = availableInr,
+                    userBudgetInr = config.minMarginPerTradeInr,
+                    leverage = config.leverage,
+                    rankedOpportunities = MarketScanState.topOpportunities.value,
+                    minExchangeNotionalInr = currencyConverter.getDynamicMinNotionalInr()
                 )
 
                 withContext(Dispatchers.Main) {

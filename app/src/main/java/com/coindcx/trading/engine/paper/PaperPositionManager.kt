@@ -22,33 +22,14 @@ class PaperPositionManager(
         const val TAKER_FEE_RATE = 0.0005 // 0.05% taker fee
         const val FUNDING_RATE_8H = 0.0001 // 0.01% per 8-hour period
 
-        /**
-         * Tiered Maintenance Margin schedule based on leverage:
-         * <= 5x  : 1.0% (0.010)
-         * 6x-10x : 1.5% (0.015)
-         * 11x-20x: 2.5% (0.025)
-         */
-        fun getMaintenanceMargin(leverage: Int): Double {
-            return when {
-                leverage <= 5 -> 0.010
-                leverage <= 10 -> 0.015
-                else -> 0.025
-            }
-        }
+        fun getMaintenanceMargin(leverage: Int): Double =
+            com.coindcx.trading.engine.MaintenanceMarginSchedule.getMaintenanceMarginRate(leverage)
 
         fun calculateEstimatedLiquidation(
             side: String,
             entryPrice: Double,
             leverage: Int
-        ): Double {
-            val mm = getMaintenanceMargin(leverage)
-            val levInv = 1.0 / leverage.coerceAtLeast(1)
-            return if (side.equals("LONG", ignoreCase = true)) {
-                entryPrice * (1.0 - levInv + mm)
-            } else {
-                entryPrice * (1.0 + levInv - mm)
-            }
-        }
+        ): Double = com.coindcx.trading.engine.MaintenanceMarginSchedule.calculateEstimatedLiquidationPrice(side, entryPrice, leverage)
 
         /**
          * Calculates number of 8h UTC funding intervals crossed between startTime and now.

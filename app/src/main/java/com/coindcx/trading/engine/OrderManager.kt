@@ -20,7 +20,8 @@ sealed class OrderResult {
  */
 class OrderManager(
     private val apiService: CoinDCXApiService,
-    private val orderDao: OrderDao
+    private val orderDao: OrderDao,
+    private val currencyConverter: com.coindcx.trading.engine.currency.CurrencyConverter? = null
 ) {
     fun generateClientOrderId(): String {
         return "bot_${System.currentTimeMillis()}_${UUID.randomUUID().toString().substring(0, 6)}"
@@ -108,6 +109,9 @@ class OrderManager(
                         status = order.status
                     )
                 )
+                order.settlementCurrencyConversionPrice?.let { rate ->
+                    currencyConverter?.updateSettlementRateFromExchange(rate)
+                }
                 val acceptedAttrs = mutableMapOf(
                     "exchange_order_id" to order.id,
                     "status" to order.status,

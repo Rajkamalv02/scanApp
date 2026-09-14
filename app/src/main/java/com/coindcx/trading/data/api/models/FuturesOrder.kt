@@ -50,7 +50,10 @@ data class FuturesOrder(
     val stopLossPrice: Double? = null,
 
     @SerializedName("take_profit_price")
-    val takeProfitPrice: Double? = null
+    val takeProfitPrice: Double? = null,
+
+    @SerializedName("settlement_currency_conversion_price")
+    val settlementCurrencyConversionPrice: Double? = null
 ) {
     val isPending: Boolean get() = status == "open" || status == "partially_filled"
     val isFilled: Boolean get() = status == "filled"

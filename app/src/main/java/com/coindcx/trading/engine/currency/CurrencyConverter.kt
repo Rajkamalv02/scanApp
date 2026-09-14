@@ -59,6 +59,28 @@ class CurrencyConverter(
     }
 
     /**
+     * Explicit startup pre-flight to seed live USDT/INR rate before first trade.
+     */
+    suspend fun refreshRatesOnStartup() {
+        getUsdtInrRate()
+    }
+
+    /**
+     * Dynamically updates cached rate directly from exchange order responses
+     * to eliminate buffer drift.
+     */
+    fun updateSettlementRateFromExchange(exchangeConversionRate: Double) {
+        if (exchangeConversionRate > 50.0) {
+            cachedRate = exchangeConversionRate / 1.03
+            lastFetchTime = System.currentTimeMillis()
+            com.coindcx.trading.util.AppLogManager.i(
+                "CURRENCY",
+                "Updated settlement rate directly from exchange: ₹%.2f".format(exchangeConversionRate)
+            )
+        }
+    }
+
+    /**
      * Dynamically computes the minimum order notional in INR required by CoinDCX for futures orders.
      * CoinDCX derivative futures mandates minimum 6.0 USDT notional for B-*_USDT pairs.
      */

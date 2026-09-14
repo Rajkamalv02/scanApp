@@ -4,6 +4,7 @@ import com.coindcx.trading.data.api.models.FuturesPosition
 import com.coindcx.trading.engine.RiskCheckResult
 import com.coindcx.trading.engine.RiskManager
 import com.coindcx.trading.engine.RiskSettings
+import com.coindcx.trading.engine.SizingResult
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -12,12 +13,13 @@ class RiskManagerTest {
     private val riskManager = RiskManager(
         RiskSettings(
             riskPerTradePercent = 1.0,
-            maxLeverage = 5,
+            maxLeverage = 20,
             maxDailyLossPercent = 4.0,
             maxConcurrentPositions = 3,
             maxDirectionalPositions = 2,
             consecutiveLossLimit = 3,
-            consecutiveLossCooldownMinutes = 90L
+            consecutiveLossCooldownMinutes = 90L,
+            liquidationBufferMultiplier = 1.25
         )
     )
 
@@ -46,53 +48,133 @@ class RiskManagerTest {
         )
     }
 
+    /**
+     * Case 1: Floor > Cap at 1x leverage triggers auto-bump to 2x (liquidation safe).
+     * Balance: 10,000, 1% Risk = 100, SL: 5%, Budget: 500, MinNotional: 615.
+     * At 1x: Floor = 615 > 500. Auto-bump to 2x: Floor = 307.50 <= 500.
+     * Ideal Margin = 2000 / 2 = 1,000. Clamped to budget cap: 500.0 INR.
+     */
     @Test
-    fun testRiskParitySizing_OnePercentRisk() {
-        // Balance = ₹10,000, 1% Risk = ₹100
-        // Entry = 100.0, SL = 95.0 (5% distance)
-        // Notional = 100 / 0.05 = ₹2,000
-        // Leverage = 2x -> Margin = 2,000 / 2 = ₹1,000
-        val sizedMargin = riskManager.calculateRiskSizedMargin(
+    fun testCase1_FloorExceedsCap_AutoBumpsLeverage_ClampsToBudget() {
+        val result = riskManager.calculateRiskSizedMargin(
             balanceInr = 10000.0,
             entryPrice = 100.0,
             stopLossPrice = 95.0,
-            leverage = 2,
-            minMarginInr = 500.0
+            requestedLeverage = 1,
+            userBudgetInr = 500.0,
+            minOrderNotionalInr = 615.0
         )
-        assertEquals(1000.0, sizedMargin, 0.01)
+        assertTrue(result is SizingResult.Sized)
+        val sized = result as SizingResult.Sized
+        assertEquals(2, sized.effectiveLeverage)
+        assertEquals(500.0, sized.allocatedMarginInr, 0.01)
+        assertEquals(1000.0, sized.notionalInr, 0.01)
+        assertFalse(sized.isAdjustedForExchangeFloor)
     }
 
+    /**
+     * Case 2: Exact Risk Parity Hit.
+     * Balance: 10,000, 1% Risk = 100, SL: 10%, Budget: 500, MinNotional: 615, Leverage: 2x.
+     * Ideal Notional = 100 / 0.10 = 1,000. Ideal Margin = 1000 / 2 = 500.
+     * Clamped to [307.50, 500.0] -> exactly 500.0 INR.
+     */
     @Test
-    fun testRiskSizedMargin_DynamicMinNotional_1xLeverage() {
-        // Balance = ₹1,000, 1% Risk = ₹10, SL distance = 2% (0.02)
-        // Raw calculated margin = (10 / 0.02) / 1 = ₹500
-        // But Dynamic Min Notional = ₹615 -> at 1x, min margin is ₹615!
-        val sizedMargin = riskManager.calculateRiskSizedMargin(
-            balanceInr = 1000.0,
+    fun testCase2_ExactRiskParityHit() {
+        val result = riskManager.calculateRiskSizedMargin(
+            balanceInr = 10000.0,
+            entryPrice = 100.0,
+            stopLossPrice = 90.0,
+            requestedLeverage = 2,
+            userBudgetInr = 500.0,
+            minOrderNotionalInr = 615.0
+        )
+        assertTrue(result is SizingResult.Sized)
+        val sized = result as SizingResult.Sized
+        assertEquals(2, sized.effectiveLeverage)
+        assertEquals(500.0, sized.allocatedMarginInr, 0.01)
+        assertEquals(1000.0, sized.notionalInr, 0.01)
+        assertFalse(sized.isAdjustedForExchangeFloor)
+    }
+
+    /**
+     * Case 3: Tight SL (2%) -> Ideal margin 2,500 exceeds budget cap of 500.
+     * Clamps to budget ceiling 500.0 INR.
+     */
+    @Test
+    fun testCase3_TightStopLoss_ClampsToBudgetCappingRisk() {
+        val result = riskManager.calculateRiskSizedMargin(
+            balanceInr = 10000.0,
             entryPrice = 100.0,
             stopLossPrice = 98.0,
-            leverage = 1,
-            minMarginInr = 500.0,
+            requestedLeverage = 2,
+            userBudgetInr = 500.0,
             minOrderNotionalInr = 615.0
         )
-        assertEquals(615.0, sizedMargin, 0.01)
+        assertTrue(result is SizingResult.Sized)
+        val sized = result as SizingResult.Sized
+        assertEquals(2, sized.effectiveLeverage)
+        assertEquals(500.0, sized.allocatedMarginInr, 0.01)
+        assertEquals(1000.0, sized.notionalInr, 0.01)
     }
 
+    /**
+     * Case 4: Wide Stop Loss (25%) fails liquidation safety when leverage bump is attempted.
+     * User budget = 100, MinNotional = 615 -> requires 7x leverage.
+     * At 7x: Liq dist = 12.78% < 25% * 1.25 (31.25%) -> strictly Rejected!
+     */
     @Test
-    fun testRiskSizedMargin_DynamicMinNotional_2xLeverage() {
-        // Balance = ₹1,000, 1% Risk = ₹10, SL distance = 4% (0.04)
-        // Raw calculated notional = 10 / 0.04 = ₹250
-        // Raw margin = 250 / 2 = ₹125
-        // Dynamic Min Notional = ₹615 -> at 2x, min margin is 615 / 2 = ₹307.5
-        val sizedMargin = riskManager.calculateRiskSizedMargin(
-            balanceInr = 1000.0,
+    fun testCase4_WideStopLoss_RejectedByLiquidationSafetyGuard() {
+        val result = riskManager.calculateRiskSizedMargin(
+            balanceInr = 10000.0,
             entryPrice = 100.0,
-            stopLossPrice = 96.0,
-            leverage = 2,
-            minMarginInr = 200.0,
+            stopLossPrice = 75.0,
+            requestedLeverage = 1,
+            userBudgetInr = 100.0,
             minOrderNotionalInr = 615.0
         )
-        assertEquals(307.5, sizedMargin, 0.01)
+        assertTrue(result is SizingResult.Rejected)
+        val rejected = result as SizingResult.Rejected
+        assertTrue(rejected.reason.contains("too wide for required leverage"))
+    }
+
+    /**
+     * Case 5: Extremely small budget where min order notional exceeds ceiling even at maxLeverage.
+     * MinNotional = 615, MaxLev = 20 -> Floor = 30.75 > Budget (20.0) -> strictly Rejected!
+     */
+    @Test
+    fun testCase5_BudgetTooSmallForMaxLeverageFloor_Rejected() {
+        val result = riskManager.calculateRiskSizedMargin(
+            balanceInr = 10000.0,
+            entryPrice = 100.0,
+            stopLossPrice = 95.0,
+            requestedLeverage = 1,
+            userBudgetInr = 20.0,
+            minOrderNotionalInr = 615.0
+        )
+        assertTrue(result is SizingResult.Rejected)
+        val rejected = result as SizingResult.Rejected
+        assertTrue(rejected.reason.contains("exceeding"))
+    }
+
+    /**
+     * Case 6: Higher Leverage (10x) scales down margin required to 200 INR while keeping risk at 100 INR.
+     */
+    @Test
+    fun testCase6_HigherLeverage_ScalesDownMargin_MaintainsExactRisk() {
+        val result = riskManager.calculateRiskSizedMargin(
+            balanceInr = 10000.0,
+            entryPrice = 100.0,
+            stopLossPrice = 95.0,
+            requestedLeverage = 10,
+            userBudgetInr = 500.0,
+            minOrderNotionalInr = 615.0
+        )
+        assertTrue(result is SizingResult.Sized)
+        val sized = result as SizingResult.Sized
+        assertEquals(10, sized.effectiveLeverage)
+        assertEquals(200.0, sized.allocatedMarginInr, 0.01)
+        assertEquals(2000.0, sized.notionalInr, 0.01)
+        // Risk = 2000 * 5% = 100 INR (exact 1.0% account risk!)
     }
 
     @Test
@@ -109,29 +191,24 @@ class RiskManagerTest {
 
     @Test
     fun testBtcCorrelation_BlockTwoAltLongsWithoutBtc() {
-        // Already holding 1 Altcoin Long (SOL) and 0 BTC Long
         val openPositions = listOf(
             createPosition("B-SOL_USDT", true)
         )
 
-        // Attempting 2nd Altcoin Long (ETH) -> Must be rejected!
         val ethResult = riskManager.checkPortfolioAndCorrelation("B-ETH_USDT", true, openPositions)
         assertTrue(ethResult is RiskCheckResult.Rejected)
         assertTrue((ethResult as RiskCheckResult.Rejected).reason.contains("BTC correlation rule"))
 
-        // Attempting BTC Long instead -> Allowed!
         val btcResult = riskManager.checkPortfolioAndCorrelation("B-BTC_USDT", true, openPositions)
         assertTrue(btcResult is RiskCheckResult.Approved)
     }
 
     @Test
     fun testBtcCorrelation_AllowAltLongWhenBtcLongAlreadyHeld() {
-        // Holding BTC Long
         val openPositions = listOf(
             createPosition("B-BTC_USDT", true)
         )
 
-        // Adding 1 Altcoin Long -> Allowed (BTC + Altcoin is valid 2-Long basket)
         val altResult = riskManager.checkPortfolioAndCorrelation("B-ETH_USDT", true, openPositions)
         assertTrue(altResult is RiskCheckResult.Approved)
     }
@@ -143,23 +220,19 @@ class RiskManagerTest {
 
         assertFalse(riskManager.isCooldownActive())
 
-        // 1st loss
         riskManager.recordTradeResult(-200.0, 10000.0)
         assertEquals(1, riskManager.getConsecutiveLossCount())
         assertFalse(riskManager.isCooldownActive())
 
-        // 2nd loss
         riskManager.recordTradeResult(-150.0, 10000.0)
         assertEquals(2, riskManager.getConsecutiveLossCount())
         assertFalse(riskManager.isCooldownActive())
 
-        // 3rd consecutive loss -> Cooldown trips!
         riskManager.recordTradeResult(-100.0, 10000.0)
         assertEquals(3, riskManager.getConsecutiveLossCount())
         assertTrue(riskManager.isCooldownActive())
         assertTrue(riskManager.getCooldownRemainingMinutes() > 0)
 
-        // Winning trade strictly resets consecutive losses to 0
         riskManager.recordTradeResult(350.0, 10000.0)
         assertEquals(0, riskManager.getConsecutiveLossCount())
     }

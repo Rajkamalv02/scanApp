@@ -71,7 +71,7 @@ class TradingForegroundService : Service() {
         AppLogManager.init(applicationContext, db)
         configRepo = TradingConfigRepository.getInstance(applicationContext)
         currencyConverter = CurrencyConverter(ApiClient.apiService)
-        orderManager = OrderManager(ApiClient.apiService, db.orderDao())
+        orderManager = OrderManager(ApiClient.apiService, db.orderDao(), currencyConverter)
         paperEngine = PaperExecutionEngine(applicationContext, db, currencyConverter, ApiClient.apiService)
         scannerEngine = MarketScannerEngine(ApiClient.apiService)
         liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter, scannerEngine.universeManager)
@@ -79,6 +79,14 @@ class TradingForegroundService : Service() {
         allocator = AllocationEngine()
         riskManager = RiskManager()
         executionEngine = paperEngine
+
+        serviceScope.launch {
+            try {
+                currencyConverter.refreshRatesOnStartup()
+            } catch (e: Exception) {
+                AppLogManager.e("SERVICE", "Failed to refresh currency converter rates on startup: ${e.message}", e)
+            }
+        }
 
         paperEngine.onTradeClosed = { pnl ->
             serviceScope.launch {
@@ -310,7 +318,14 @@ class TradingForegroundService : Service() {
             val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
 
             // 4. Initial Dynamic Allocation
-            val allocation = allocator.allocateCapital(initialBalanceInr, config.minMarginPerTradeInr, rankedTop5)
+            val allocation = allocator.allocateCapital(
+                availableBalanceInr = initialBalanceInr,
+                userBudgetInr = config.minMarginPerTradeInr,
+                leverage = config.leverage,
+                rankedOpportunities = rankedTop5,
+                riskSettings = riskManager.settings,
+                minExchangeNotionalInr = currencyConverter.getDynamicMinNotionalInr()
+            )
             MarketScanState.update(allocation.allRankedOpportunities, allocation, cycle)
 
             // 5. Sequential Just-In-Time Pre-Trade Validation with In-Memory Counters
@@ -485,24 +500,55 @@ class TradingForegroundService : Service() {
                 }
 
                 // Gate 3: Volatility-Adjusted Risk Parity Sizing (1% account risk / SL distance %)
-                val slPrice = opp.signal.stopLossPrice ?: (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
+                val hasExplicitSl = (opp.signal.stopLossPrice ?: 0.0) > 0.0
+                val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
+                val slMethodTag = if (hasExplicitSl) "STRATEGY_SIGNAL" else "FALLBACK_FIXED_2PCT"
                 val slDistance = kotlin.math.abs(opp.currentPrice - slPrice)
                 val slDistPct = if (opp.currentPrice > 0) (slDistance / opp.currentPrice) * 100.0 else 0.0
                 val riskPerTradePct = riskManager.settings.riskPerTradePercent
                 val targetRiskInr = inMemoryAvailableBalance * (riskPerTradePct / 100.0)
 
                 val dynamicMinNotionalInr = currencyConverter.getDynamicMinNotionalInr()
-                val marginToAllocate = riskManager.calculateRiskSizedMargin(
+                val sizingResult = riskManager.calculateRiskSizedMargin(
                     balanceInr = inMemoryAvailableBalance,
                     entryPrice = opp.currentPrice,
                     stopLossPrice = slPrice,
-                    leverage = config.leverage,
-                    minMarginInr = config.minMarginPerTradeInr,
+                    requestedLeverage = config.leverage,
+                    userBudgetInr = config.minMarginPerTradeInr,
                     minOrderNotionalInr = dynamicMinNotionalInr
                 )
-                val requestedLeverage = config.leverage
-                val actualLeverage = requestedLeverage.coerceIn(1, riskManager.settings.maxLeverage)
-                val notionalInr = marginToAllocate * actualLeverage
+
+                val (marginToAllocate, actualLeverage, notionalInr) = when (sizingResult) {
+                    is SizingResult.Rejected -> {
+                        AppLogManager.tradeLifecycle(
+                            event = "RISK_FILTER_REJECTED",
+                            tradeId = tradeId,
+                            symbol = opp.pair,
+                            mode = modeLabel,
+                            attributes = mapOf(
+                                "gate" to "GATE_3_SIZING",
+                                "reason" to sizingResult.reason,
+                                "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
+                                "user_budget_inr" to "₹%.2f".format(config.minMarginPerTradeInr),
+                                "dynamic_min_notional_floor_inr" to "₹%.2f".format(dynamicMinNotionalInr)
+                            ),
+                            narrative = "Gate 3 (Risk Sizing) REJECTED: %s".format(sizingResult.reason)
+                        )
+                        audits.add(
+                            com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                                rank = opp.rank,
+                                pair = opp.pair,
+                                action = opp.actionLabel,
+                                status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
+                                reason = "Skipped — ${sizingResult.reason}"
+                            )
+                        )
+                        continue
+                    }
+                    is SizingResult.Sized -> {
+                        Triple(sizingResult.allocatedMarginInr, sizingResult.effectiveLeverage, sizingResult.notionalInr)
+                    }
+                }
 
                 val tpPrice = opp.signal.takeProfitPrice ?: (if (opp.isBuy) opp.currentPrice + (slDistance * 2.0) else opp.currentPrice - (slDistance * 2.0))
                 val targetDistance = kotlin.math.abs(tpPrice - opp.currentPrice)
@@ -520,7 +566,7 @@ class TradingForegroundService : Service() {
                     attributes = mapOf(
                         "side" to (if (opp.isBuy) "LONG" else "SHORT"),
                         "entry_price" to "%.4f".format(opp.currentPrice),
-                        "sl_method" to "ATR_MULTIPLIER",
+                        "sl_method" to slMethodTag,
                         "atr_14" to "%.4f".format(opp.signal.atr),
                         "atr_mult" to "%.2fx".format(opp.signal.atrMultiplier),
                         "sl_dist" to "%.4f".format(slDistance),
@@ -530,8 +576,8 @@ class TradingForegroundService : Service() {
                         "risk_pct" to "%.1f%%".format(riskPerTradePct),
                         "risk_amount_inr" to "₹%.2f".format(targetRiskInr)
                     ),
-                    narrative = "Entry = %.4f -> SL distance = %.4f (%.2f%%) -> SL = %.4f -> Risk = ₹%.2f (%.1f%% of ₹%.2f)"
-                        .format(opp.currentPrice, slDistance, slDistPct, slPrice, targetRiskInr, riskPerTradePct, inMemoryAvailableBalance)
+                    narrative = "Entry = %.4f -> SL distance = %.4f (%.2f%%) [%s] -> SL = %.4f -> Risk = ₹%.2f (%.1f%% of ₹%.2f)"
+                        .format(opp.currentPrice, slDistance, slDistPct, slMethodTag, slPrice, targetRiskInr, riskPerTradePct, inMemoryAvailableBalance)
                 )
 
                 // Target Calculation Log
@@ -563,7 +609,7 @@ class TradingForegroundService : Service() {
                     symbol = opp.pair,
                     mode = modeLabel,
                     attributes = mapOf(
-                        "requested_leverage" to "${requestedLeverage}x",
+                        "requested_leverage" to "${config.leverage}x",
                         "actual_leverage" to "${actualLeverage}x",
                         "margin_allocated_inr" to "₹%.2f".format(marginToAllocate),
                         "notional_value_inr" to "₹%.2f".format(notionalInr),
@@ -571,10 +617,10 @@ class TradingForegroundService : Service() {
                         "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance)
                     ),
                     narrative = "Account Balance = ₹%.2f -> Allocated Margin = ₹%.2f @ %dx leverage (Requested: %dx) -> Notional = ₹%.2f (Min Floor: ₹%.2f)"
-                        .format(inMemoryAvailableBalance, marginToAllocate, actualLeverage, requestedLeverage, notionalInr, dynamicMinNotionalInr)
+                        .format(inMemoryAvailableBalance, marginToAllocate, actualLeverage, config.leverage, notionalInr, dynamicMinNotionalInr)
                 )
 
-                // Gate 4: Fresh In-Memory Balance Check
+                // Gate 4: Fresh In-Memory Balance Check (Defense-in-depth invariant)
                 if (inMemoryAvailableBalance < marginToAllocate) {
                     AppLogManager.tradeLifecycle(
                         event = "RISK_FILTER_REJECTED",
@@ -587,7 +633,7 @@ class TradingForegroundService : Service() {
                             "margin_required_inr" to "₹%.2f".format(marginToAllocate),
                             "shortfall_inr" to "₹%.2f".format(marginToAllocate - inMemoryAvailableBalance)
                         ),
-                        narrative = "Gate 4 (Balance Check) REJECTED: Available ₹%.2f < Sized Margin ₹%.2f (Shortfall: ₹%.2f)"
+                        narrative = "Gate 4 (Defense-in-depth Balance Guard) REJECTED: Available ₹%.2f < Sized Margin ₹%.2f (Shortfall: ₹%.2f)"
                             .format(inMemoryAvailableBalance, marginToAllocate, marginToAllocate - inMemoryAvailableBalance)
                     )
                     audits.add(
@@ -596,7 +642,7 @@ class TradingForegroundService : Service() {
                             pair = opp.pair,
                             action = opp.actionLabel,
                             status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
-                            reason = "Skipped — Insufficient balance (Available: ₹%.2f < Sized Margin: ₹%.2f)".format(inMemoryAvailableBalance, marginToAllocate)
+                            reason = "Skipped — Insufficient balance guard (Available: ₹%.2f < Required: ₹%.2f)".format(inMemoryAvailableBalance, marginToAllocate)
                         )
                     )
                     continue
@@ -660,6 +706,11 @@ class TradingForegroundService : Service() {
                     is ExecutionResult.Success -> {
                         // Synchronously update in-memory counters to eliminate race conditions for subsequent candidates!
                         inMemoryAvailableBalance = (inMemoryAvailableBalance - marginToAllocate).coerceAtLeast(0.0)
+                        val estimatedLiqPrice = com.coindcx.trading.engine.MaintenanceMarginSchedule.calculateEstimatedLiquidationPrice(
+                            side = if (opp.isBuy) "BUY" else "SELL",
+                            entryPrice = opp.currentPrice,
+                            leverage = actualLeverage
+                        )
                         inMemoryOpenPositions.add(
                             com.coindcx.trading.data.api.models.FuturesPosition(
                                 id = execResult.orderId,
@@ -668,14 +719,14 @@ class TradingForegroundService : Service() {
                                 inactivePosBuy = 0.0,
                                 inactivePosSell = 0.0,
                                 avgPrice = opp.currentPrice,
-                                liquidationPrice = 0.0,
+                                liquidationPrice = estimatedLiqPrice,
                                 lockedMargin = marginToAllocate,
                                 lockedUserMargin = marginToAllocate,
                                 lockedOrderMargin = 0.0,
                                 takeProfitTrigger = tpPrice,
                                 stopLossTrigger = slPrice,
-                                leverage = config.leverage.toDouble(),
-                                maintenanceMargin = null,
+                                leverage = actualLeverage.toDouble(),
+                                maintenanceMargin = com.coindcx.trading.engine.MaintenanceMarginSchedule.getMaintenanceMarginRate(actualLeverage) * notionalInr,
                                 markPrice = opp.currentPrice,
                                 marginType = "ISOLATED",
                                 settlementCurrencyAvgPrice = null,
@@ -691,7 +742,7 @@ class TradingForegroundService : Service() {
                                 pair = opp.pair,
                                 action = opp.actionLabel,
                                 status = com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED,
-                                reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ ${config.leverage}x".format(marginToAllocate)
+                                reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ %dx".format(marginToAllocate, actualLeverage)
                             )
                         )
                         AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}) executed in ${orderDurationMs}ms: ${execResult.message}")

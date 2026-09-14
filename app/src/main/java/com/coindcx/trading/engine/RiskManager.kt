@@ -11,12 +11,24 @@ data class RiskSettings(
     val maxConcurrentPositions: Int = 3,             // Max 3 total concurrent positions
     val maxDirectionalPositions: Int = 2,            // Max 2 Longs or 2 Shorts
     val consecutiveLossLimit: Int = 3,               // 3 consecutive losses triggers cooldown
-    val consecutiveLossCooldownMinutes: Long = 90L   // 90-minute cooldown duration
+    val consecutiveLossCooldownMinutes: Long = 90L,  // 90-minute cooldown duration
+    val liquidationBufferMultiplier: Double = 1.25   // Tunable: Minimum 25% clearance between SL and Liquidation
 )
 
 sealed class RiskCheckResult {
     data class Approved(val allocatedMarginInr: Double, val adjustedLeverage: Int) : RiskCheckResult()
     data class Rejected(val reason: String) : RiskCheckResult()
+}
+
+sealed class SizingResult {
+    data class Sized(
+        val allocatedMarginInr: Double,
+        val effectiveLeverage: Int,
+        val notionalInr: Double,
+        val isAdjustedForExchangeFloor: Boolean
+    ) : SizingResult()
+
+    data class Rejected(val reason: String) : SizingResult()
 }
 
 /**
@@ -48,39 +60,95 @@ class RiskManager(
     fun getConsecutiveLossCount(): Int = consecutiveLossCount
 
     /**
-     * Calculates required margin based on 1% fixed risk and exact stop-loss distance:
-     * Notional = TargetRiskInr / SL_Distance%
-     * Margin = Notional / Leverage
+     * Calculates required margin using 1% risk parity, bounded by user budget cap
+     * and CoinDCX exchange notional floor.
+     *
+     * Enforces:
+     * 1. Budget ceiling = min(userBudget, balance / maxConcurrentPositions)
+     * 2. Exchange floor = minExchangeNotional / leverage
+     * 3. Liquidation Safety Guard: Auto-bumping leverage is strictly prohibited if
+     *    estimated liquidation distance would be <= Stop Loss * liquidationBufferMultiplier
      */
     fun calculateRiskSizedMargin(
         balanceInr: Double,
         entryPrice: Double,
         stopLossPrice: Double,
-        leverage: Int,
-        minMarginInr: Double = 500.0,
-        minOrderNotionalInr: Double = 620.0
-    ): Double {
-        val effectiveLeverage = leverage.coerceIn(1, settings.maxLeverage)
-        val minMarginForNotional = minOrderNotionalInr / effectiveLeverage
-        val effectiveMinMargin = minMarginInr.coerceAtLeast(minMarginForNotional)
-
+        requestedLeverage: Int,
+        userBudgetInr: Double,
+        minOrderNotionalInr: Double
+    ): SizingResult {
         if (balanceInr <= 0.0 || entryPrice <= 0.0 || stopLossPrice <= 0.0) {
-            return effectiveMinMargin
+            return SizingResult.Rejected("Invalid price, balance, or stop loss for sizing.")
         }
 
-        val targetRiskInr = balanceInr * (settings.riskPerTradePercent / 100.0)
+        // 1. Budget Ceiling
+        val safePerTradeCap = balanceInr / settings.maxConcurrentPositions
+        val ceilingMargin = userBudgetInr.coerceAtMost(safePerTradeCap)
+
+        if (ceilingMargin <= 0.0 || balanceInr < ceilingMargin) {
+            return SizingResult.Rejected("Insufficient balance (₹%.2f) for trade budget (₹%.2f)".format(balanceInr, userBudgetInr))
+        }
+
         val slDistPercent = abs(entryPrice - stopLossPrice) / entryPrice
-
         if (slDistPercent <= 0.0001) {
-            return effectiveMinMargin
+            return SizingResult.Rejected("Stop loss distance too close to entry price.")
         }
 
-        val notionalInr = targetRiskInr / slDistPercent
-        val calculatedMargin = notionalInr / effectiveLeverage
+        // 2. Resolve Floor vs Ceiling with Liquidation Safety Guard
+        var effectiveLeverage = requestedLeverage.coerceIn(1, settings.maxLeverage)
+        var floorMargin = minOrderNotionalInr / effectiveLeverage
 
-        // Enforce bounds: effectiveMinMargin <= margin <= safe per-trade cap (balance / maxConcurrentPositions)
-        val maxMarginCap = (balanceInr / settings.maxConcurrentPositions).coerceAtLeast(effectiveMinMargin)
-        return calculatedMargin.coerceIn(effectiveMinMargin, maxMarginCap)
+        if (floorMargin > ceilingMargin) {
+            var foundSafeLeverage = false
+            val minRequiredLev = kotlin.math.ceil(minOrderNotionalInr / ceilingMargin).toInt()
+
+            // Loop guarantees correctness regardless of future MMR schedule properties
+            for (candidateLev in minRequiredLev..settings.maxLeverage) {
+                val candidateFloorMargin = minOrderNotionalInr / candidateLev
+                val candidateLiqDist = MaintenanceMarginSchedule.getEstimatedLiquidationDistancePct(candidateLev)
+                val isLiquidationSafe = candidateLiqDist >= (slDistPercent * settings.liquidationBufferMultiplier)
+
+                if (candidateFloorMargin <= ceilingMargin && isLiquidationSafe) {
+                    effectiveLeverage = candidateLev
+                    floorMargin = candidateFloorMargin
+                    foundSafeLeverage = true
+                    break
+                }
+            }
+
+            if (!foundSafeLeverage) {
+                val minReqLiqDist = MaintenanceMarginSchedule.getEstimatedLiquidationDistancePct(minRequiredLev.coerceAtMost(settings.maxLeverage))
+                val requiredBuffer = slDistPercent * settings.liquidationBufferMultiplier
+
+                return if (minRequiredLev <= settings.maxLeverage && minReqLiqDist < requiredBuffer) {
+                    SizingResult.Rejected(
+                        "Stop loss (%.2f%%) is too wide for required leverage: liquidation distance at %dx (%.2f%%) is within safety buffer (%.2f%%)."
+                            .format(slDistPercent * 100.0, minRequiredLev, minReqLiqDist * 100.0, requiredBuffer * 100.0)
+                    )
+                } else {
+                    SizingResult.Rejected(
+                        "Exchange minimum order (₹%.0f) requires ₹%.0f margin at max %dx leverage, exceeding ₹%.0f budget."
+                            .format(minOrderNotionalInr, minOrderNotionalInr / settings.maxLeverage, settings.maxLeverage, ceilingMargin)
+                    )
+                }
+            }
+        }
+
+        // 3. 1% Risk Parity Calculation
+        val targetRiskInr = balanceInr * (settings.riskPerTradePercent / 100.0)
+        val idealNotional = targetRiskInr / slDistPercent
+        val idealMargin = idealNotional / effectiveLeverage
+
+        // 4. Guaranteed Safe Clamping (floorMargin <= ceilingMargin is mathematically proven)
+        val finalMargin = idealMargin.coerceIn(floorMargin, ceilingMargin)
+        val finalNotional = finalMargin * effectiveLeverage
+
+        return SizingResult.Sized(
+            allocatedMarginInr = finalMargin,
+            effectiveLeverage = effectiveLeverage,
+            notionalInr = finalNotional,
+            isAdjustedForExchangeFloor = finalMargin == floorMargin && idealMargin < floorMargin
+        )
     }
 
     /**
