@@ -4,7 +4,11 @@ package com.coindcx.trading.data.config
  * User-configurable trading settings with strict INR denomination.
  */
 data class TradingConfig(
-    val minMarginPerTradeInr: Double = 500.0,
+    val riskProfile: String = "BALANCED", // "CONSERVATIVE" (0.5%), "BALANCED" (1.0%), "GROWTH" (1.5%)
+    val riskPerTradePercent: Double = 1.0,
+    val safetyReservePercent: Double = 5.0,
+    val maxSingleExposurePercent: Double = 30.0,
+    val minMarginPerTradeInr: Double = 500.0, // Legacy fallback
     val leverage: Int = 2,
     val timeframe: String = "15m", // "1m", "15m", "1h", "1d"
     val scanIntervalMinutes: Int = 2, // 1, 2, 5, 15, 30, 60

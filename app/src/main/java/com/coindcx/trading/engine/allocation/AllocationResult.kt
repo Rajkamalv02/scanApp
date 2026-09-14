@@ -13,5 +13,12 @@ data class AllocationResult(
     val unfundedOpportunities: List<MarketOpportunity>,
     val allRankedOpportunities: List<MarketOpportunity>,
     val isInsufficientBalance: Boolean,
-    val statusMessage: String
+    val statusMessage: String,
+    // Dynamic Risk-Parity & Solvency Metadata
+    val accountEquityInr: Double = 0.0,
+    val safetyReserveInr: Double = 0.0,
+    val exchangeFloorMarginInr: Double = 0.0,
+    val economicFloorMarginInr: Double = 0.0,
+    val targetRiskPerTradeInr: Double = 0.0,
+    val recommendedMarginPerTradeInr: Double = 0.0
 )

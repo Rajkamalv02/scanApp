@@ -232,7 +232,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Min Margin / Trade"
+                            android:text="Risk / Margin Floor"
                             android:textColor="@color/text_secondary"
                             android:textSize="11sp" />
 
@@ -240,7 +240,7 @@
                             android:id="@+id/tvMinMarginDisplay"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="₹ 500"
+                            android:text="1.0% (₹ 310)"
                             android:textColor="@color/text_primary"
                             android:textSize="15sp"
                             android:textStyle="bold" />
@@ -293,14 +293,29 @@
                     </LinearLayout>
                 </LinearLayout>
 
-                <TextView
-                    android:id="@+id/tvRemainingBalanceDisplay"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Remaining Unused Balance: ₹ 0.00"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:orientation="horizontal"
+                    android:layout_marginTop="8dp">
+
+                    <TextView
+                        android:id="@+id/tvSafetyReserveDisplay"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Safety Reserve: ₹ 0.00 (5%)"
+                        android:textColor="@color/accent_amber"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:id="@+id/tvRemainingBalanceDisplay"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Unused: ₹ 0.00"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -512,17 +527,17 @@
                         android:text="1h" />
                 </com.google.android.material.chip.ChipGroup>
 
-                <!-- Minimum Margin Presets -->
+                <!-- Risk Profile & Capital Allocation -->
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
-                    android:text="Minimum Margin Allocation per Trade (₹ INR)"
+                    android:text="Risk Profile &amp; Sizing Model (Risk per Trade)"
                     android:textColor="@color/text_secondary"
                     android:textSize="12sp" />
 
                 <com.google.android.material.chip.ChipGroup
-                    android:id="@+id/chipGroupMargin"
+                    android:id="@+id/chipGroupRiskProfile"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
@@ -530,33 +545,26 @@
                     app:selectionRequired="true">
 
                     <com.google.android.material.chip.Chip
-                        android:id="@+id/chipMargin500"
+                        android:id="@+id/chipRiskConservative"
+                        style="@style/Widget.TradingBot.Chip.Choice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Conservative (0.5%)" />
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipRiskBalanced"
                         style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:checked="true"
-                        android:text="₹500" />
+                        android:text="Balanced (1.0%)" />
 
                     <com.google.android.material.chip.Chip
-                        android:id="@+id/chipMargin1000"
+                        android:id="@+id/chipRiskGrowth"
                         style="@style/Widget.TradingBot.Chip.Choice"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="₹1,000" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipMargin2500"
-                        style="@style/Widget.TradingBot.Chip.Choice"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="₹2,500" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipMargin5000"
-                        style="@style/Widget.TradingBot.Chip.Choice"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="₹5,000" />
+                        android:text="Growth (1.5%)" />
                 </com.google.android.material.chip.ChipGroup>
 
                 <!-- Scan Scope Mode -->

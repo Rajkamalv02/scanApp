@@ -211,27 +211,24 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Auto-Scan Interval: ${minutes}m", Toast.LENGTH_SHORT).show()
         }
 
-        // 3. Minimum Margin Allocation Presets
-        when (config.minMarginPerTradeInr.toInt()) {
-            500 -> binding.chipMargin500.isChecked = true
-            1000 -> binding.chipMargin1000.isChecked = true
-            2500 -> binding.chipMargin2500.isChecked = true
-            5000 -> binding.chipMargin5000.isChecked = true
-            else -> binding.chipMargin500.isChecked = true
+        // 3. Risk Profile & Sizing Model Presets
+        when (config.riskProfile.uppercase()) {
+            "CONSERVATIVE" -> binding.chipRiskConservative.isChecked = true
+            "GROWTH" -> binding.chipRiskGrowth.isChecked = true
+            else -> binding.chipRiskBalanced.isChecked = true
         }
 
-        binding.chipGroupMargin.setOnCheckedStateChangeListener { _, checkedIds ->
+        binding.chipGroupRiskProfile.setOnCheckedStateChangeListener { _, checkedIds ->
             val selectedId = checkedIds.firstOrNull() ?: return@setOnCheckedStateChangeListener
-            val marginInr = when (selectedId) {
-                R.id.chipMargin500 -> 500.0
-                R.id.chipMargin1000 -> 1000.0
-                R.id.chipMargin2500 -> 2500.0
-                R.id.chipMargin5000 -> 5000.0
-                else -> 500.0
+            val (profile, riskPct) = when (selectedId) {
+                R.id.chipRiskConservative -> "CONSERVATIVE" to 0.5
+                R.id.chipRiskGrowth -> "GROWTH" to 1.5
+                else -> "BALANCED" to 1.0
             }
-            configRepo.updateMinMargin(marginInr)
-            binding.tvMinMarginDisplay.text = "₹ %.0f".format(marginInr)
-            Toast.makeText(this, "Min Margin per Trade: ₹%.0f".format(marginInr), Toast.LENGTH_SHORT).show()
+            configRepo.updateRiskProfile(profile, riskPct)
+            sendServiceIntent(TradingForegroundService.ACTION_UPDATE_CONFIG)
+            Toast.makeText(this, "Risk Profile: $profile ($riskPct% risk per trade)", Toast.LENGTH_SHORT).show()
+            lifecycleScope.launch { refreshAccountData() }
         }
 
         // 4. Market Wide Scan Toggle
@@ -614,6 +611,27 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             MarketScanState.topOpportunities.collectLatest { opportunities ->
                 renderTopOpportunities(opportunities)
+            }
+        }
+
+        lifecycleScope.launch {
+            MarketScanState.latestAllocation.collectLatest { allocation ->
+                if (allocation != null) {
+                    binding.tvMaxTradesFormula.text = "Max Trades: ${allocation.maxTradesAllowed}"
+                    val riskPct = if (allocation.accountEquityInr > 0) (allocation.targetRiskPerTradeInr / allocation.accountEquityInr) * 100.0 else 1.0
+                    binding.tvMinMarginDisplay.text = "%.1f%% (₹%.0f)".format(riskPct, allocation.exchangeFloorMarginInr)
+                    binding.tvSelectedOpportunitiesCount.text = "Top ${allocation.allocatedTradesCount} of 5"
+                    binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
+                    binding.tvSafetyReserveDisplay.text = "Safety Reserve: ₹ %.2f (5%%)".format(allocation.safetyReserveInr)
+                    binding.tvRemainingBalanceDisplay.text = "Unused: ₹ %.2f".format(allocation.remainingBalanceInr)
+
+                    if (allocation.isInsufficientBalance) {
+                        binding.bannerInsufficientBalance.visibility = View.VISIBLE
+                        binding.tvInsufficientMessage.text = "⚠️ " + allocation.statusMessage
+                    } else {
+                        binding.bannerInsufficientBalance.visibility = View.GONE
+                    }
+                }
             }
         }
 
@@ -1043,20 +1061,25 @@ class MainActivity : AppCompatActivity() {
 
                 val config = configRepo.configFlow.value
                 val allocation = allocationEngine.allocateCapital(
-                    availableBalanceInr = availableInr,
-                    userBudgetInr = config.minMarginPerTradeInr,
+                    accountEquityInr = availableInr,
+                    availableCashInr = availableInr,
+                    activePositionsCount = 0,
                     leverage = config.leverage,
                     rankedOpportunities = MarketScanState.topOpportunities.value,
-                    minExchangeNotionalInr = currencyConverter.getDynamicMinNotionalInr()
+                    minExchangeNotionalInr = currencyConverter.getDynamicMinNotionalInr(),
+                    riskPerTradePercent = config.riskPerTradePercent,
+                    safetyReservePercent = config.safetyReservePercent,
+                    maxSingleExposurePercent = config.maxSingleExposurePercent
                 )
 
                 withContext(Dispatchers.Main) {
                     binding.tvAvailableBalance.text = "₹ %.2f".format(availableInr)
                     binding.tvMaxTradesFormula.text = "Max Trades: ${allocation.maxTradesAllowed}"
-                    binding.tvMinMarginDisplay.text = "₹ %.0f".format(allocation.minMarginPerTradeInr)
+                    binding.tvMinMarginDisplay.text = "%.1f%% (₹%.0f)".format(config.riskPerTradePercent, allocation.exchangeFloorMarginInr)
                     binding.tvSelectedOpportunitiesCount.text = "Top ${allocation.allocatedTradesCount} of 5"
                     binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
-                    binding.tvRemainingBalanceDisplay.text = "Remaining Unused Balance: ₹ %.2f".format(allocation.remainingBalanceInr)
+                    binding.tvSafetyReserveDisplay.text = "Safety Reserve: ₹ %.2f (5%%)".format(allocation.safetyReserveInr)
+                    binding.tvRemainingBalanceDisplay.text = "Unused: ₹ %.2f".format(allocation.remainingBalanceInr)
 
                     if (allocation.isInsufficientBalance) {
                         binding.bannerInsufficientBalance.visibility = View.VISIBLE

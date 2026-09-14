@@ -17,6 +17,10 @@ class TradingConfigRepository(context: Context) {
     companion object {
         private const val PREFS_NAME = "trading_config_preferences"
         private const val KEY_MIN_MARGIN_INR = "min_margin_inr"
+        private const val KEY_RISK_PROFILE = "risk_profile"
+        private const val KEY_RISK_PER_TRADE = "risk_per_trade_percent"
+        private const val KEY_SAFETY_RESERVE = "safety_reserve_percent"
+        private const val KEY_MAX_SINGLE_EXPOSURE = "max_single_exposure_percent"
         private const val KEY_LEVERAGE = "leverage"
         private const val KEY_TIMEFRAME = "timeframe"
         private const val KEY_SCAN_INTERVAL = "scan_interval_minutes"
@@ -43,6 +47,10 @@ class TradingConfigRepository(context: Context) {
 
     private fun loadConfig(): TradingConfig {
         return TradingConfig(
+            riskProfile = prefs.getString(KEY_RISK_PROFILE, "BALANCED") ?: "BALANCED",
+            riskPerTradePercent = prefs.getFloat(KEY_RISK_PER_TRADE, 1.0f).toDouble(),
+            safetyReservePercent = prefs.getFloat(KEY_SAFETY_RESERVE, 5.0f).toDouble(),
+            maxSingleExposurePercent = prefs.getFloat(KEY_MAX_SINGLE_EXPOSURE, 30.0f).toDouble(),
             minMarginPerTradeInr = prefs.getFloat(KEY_MIN_MARGIN_INR, 500.0f).toDouble(),
             leverage = prefs.getInt(KEY_LEVERAGE, 2),
             timeframe = prefs.getString(KEY_TIMEFRAME, "15m") ?: "15m",
@@ -63,6 +71,17 @@ class TradingConfigRepository(context: Context) {
 
     fun setBotRunning(running: Boolean) {
         prefs.edit().putBoolean(KEY_BOT_RUNNING, running).apply()
+    }
+
+    fun updateRiskProfile(profile: String, riskPct: Double) {
+        prefs.edit()
+            .putString(KEY_RISK_PROFILE, profile)
+            .putFloat(KEY_RISK_PER_TRADE, riskPct.toFloat())
+            .apply()
+        _configFlow.value = _configFlow.value.copy(
+            riskProfile = profile,
+            riskPerTradePercent = riskPct
+        )
     }
 
     fun updateMinMargin(marginInr: Double) {

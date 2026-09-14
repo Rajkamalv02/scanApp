@@ -116,6 +116,15 @@ class LiveExecutionEngine(
         val finalQty = roundedQty.coerceAtLeast(spec?.minQuantity ?: step)
 
         val notionalUsdt = finalQty * currentPrice
+        val requiredMarginInr = (notionalUsdt * currencyConverter.getCachedUsdtInrRate()) / leverage
+        val availableInr = getAvailableBalanceInr()
+        if (requiredMarginInr > availableInr && availableInr > 0) {
+            AppLogManager.w("LIVE_EXEC", "Quantized order for $pair requires ₹%.2f margin, exceeding available cash ₹%.2f"
+                .format(requiredMarginInr, availableInr))
+            return ExecutionResult.Failed("Quantized margin requirement (₹%.0f) exceeds available cash (₹%.0f)"
+                .format(requiredMarginInr, availableInr))
+        }
+
         AppLogManager.trade("LIVE_EXEC",
             "Quantized order qty for %s: raw=%.6f -> final=%.6f (step=%s, precision=%d, notional=$%.2f USDT, floor=%.2f USDT)"
                 .format(pair, rawQty, finalQty, step.toString(), precision, notionalUsdt, minNotionalUsdt)

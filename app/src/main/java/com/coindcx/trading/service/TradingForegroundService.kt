@@ -22,6 +22,7 @@ import com.coindcx.trading.engine.scanner.OpportunityRanker
 import com.coindcx.trading.ui.MainActivity
 import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.withLock
 
 class TradingForegroundService : Service() {
 
@@ -187,13 +188,15 @@ class TradingForegroundService : Service() {
                 val pairToClose = intent.getStringExtra(EXTRA_PAIR)
                 if (!pairToClose.isNullOrBlank()) {
                     serviceScope.launch {
-                        val candleResp = ApiClient.apiService.getCandles(pairToClose, "1m")
-                        val currentPrice = candleResp.body()?.lastOrNull()?.close ?: 0.0
-                        val res = executionEngine.exitPosition(pairToClose, currentPrice, "Manual close requested by user")
-                        AppLogManager.trade("MANUAL_CLOSE", "Closed $pairToClose: $res")
-                        val syncRes = executionEngine.refreshExchangeState()
-                        if (syncRes.isSuccess) {
-                            MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                        scanMutex.withLock {
+                            val candleResp = ApiClient.apiService.getCandles(pairToClose, "1m")
+                            val currentPrice = candleResp.body()?.lastOrNull()?.close ?: 0.0
+                            val res = executionEngine.exitPosition(pairToClose, currentPrice, "Manual close requested by user")
+                            AppLogManager.trade("MANUAL_CLOSE", "Closed $pairToClose: $res")
+                            val syncRes = executionEngine.refreshExchangeState()
+                            if (syncRes.isSuccess) {
+                                MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                            }
                         }
                     }
                 }
@@ -341,14 +344,26 @@ class TradingForegroundService : Service() {
             // 3. Rank Opportunities from #1 to #5
             val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
 
-            // 4. Initial Dynamic Allocation
+            // 4. Initial Dynamic Allocation (Risk-Parity & Balance-Aware)
+            val openPositions = executionEngine.getAllOpenPositions().filter { it.isOpen }
+            val totalEquityInr = if (executionEngine.isPaperTrading) {
+                paperEngine.accountManager.getAccountSummary().totalEquityInr
+            } else {
+                (initialBalanceInr + openPositions.sumOf { it.lockedUserMargin.coerceAtLeast(0.0) }).coerceAtLeast(initialBalanceInr)
+            }
+
+            val dynamicMinNotionalInr = currencyConverter.getDynamicMinNotionalInr()
             val allocation = allocator.allocateCapital(
-                availableBalanceInr = initialBalanceInr,
-                userBudgetInr = config.minMarginPerTradeInr,
+                accountEquityInr = totalEquityInr,
+                availableCashInr = initialBalanceInr,
+                activePositionsCount = openPositions.size,
                 leverage = config.leverage,
                 rankedOpportunities = rankedTop5,
                 riskSettings = riskManager.settings,
-                minExchangeNotionalInr = currencyConverter.getDynamicMinNotionalInr()
+                minExchangeNotionalInr = dynamicMinNotionalInr,
+                riskPerTradePercent = config.riskPerTradePercent,
+                safetyReservePercent = config.safetyReservePercent,
+                maxSingleExposurePercent = config.maxSingleExposurePercent
             )
             MarketScanState.update(allocation.allRankedOpportunities, allocation, cycle)
 
@@ -523,56 +538,46 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
-                // Gate 3: Volatility-Adjusted Risk Parity Sizing (1% account risk / SL distance %)
+                // Gate 3: Volatility-Adjusted Risk Parity Sizing (Single-pass Allocation SSOT Contract)
+                val fundedOpp = allocation.fundedOpportunities.firstOrNull { it.pair == opp.pair }
+                if (fundedOpp == null) {
+                    val rejectionReason = opp.statusMessage.ifBlank { opp.rejectionReason ?: "Capital allocation floor or budget exhausted" }
+                    AppLogManager.tradeLifecycle(
+                        event = "RISK_FILTER_REJECTED",
+                        tradeId = tradeId,
+                        symbol = opp.pair,
+                        mode = modeLabel,
+                        attributes = mapOf(
+                            "gate" to "GATE_3_SIZING",
+                            "reason" to rejectionReason,
+                            "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
+                            "safety_reserve_inr" to "₹%.2f".format(allocation.safetyReserveInr),
+                            "dynamic_min_notional_floor_inr" to "₹%.2f".format(dynamicMinNotionalInr)
+                        ),
+                        narrative = "Gate 3 (Risk Sizing & Allocation) REJECTED: %s".format(rejectionReason)
+                    )
+                    audits.add(
+                        com.coindcx.trading.engine.scanner.TradeExecutionAudit(
+                            rank = opp.rank,
+                            pair = opp.pair,
+                            action = opp.actionLabel,
+                            status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
+                            reason = "Skipped — $rejectionReason"
+                        )
+                    )
+                    continue
+                }
+
                 val hasExplicitSl = (opp.signal.stopLossPrice ?: 0.0) > 0.0
                 val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
                 val slMethodTag = if (hasExplicitSl) "STRATEGY_SIGNAL" else "FALLBACK_FIXED_2PCT"
                 val slDistance = kotlin.math.abs(opp.currentPrice - slPrice)
                 val slDistPct = if (opp.currentPrice > 0) (slDistance / opp.currentPrice) * 100.0 else 0.0
-                val riskPerTradePct = riskManager.settings.riskPerTradePercent
-                val targetRiskInr = inMemoryAvailableBalance * (riskPerTradePct / 100.0)
 
-                val dynamicMinNotionalInr = currencyConverter.getDynamicMinNotionalInr()
-                val sizingResult = riskManager.calculateRiskSizedMargin(
-                    balanceInr = inMemoryAvailableBalance,
-                    entryPrice = opp.currentPrice,
-                    stopLossPrice = slPrice,
-                    requestedLeverage = config.leverage,
-                    userBudgetInr = config.minMarginPerTradeInr,
-                    minOrderNotionalInr = dynamicMinNotionalInr
-                )
-
-                val (marginToAllocate, actualLeverage, notionalInr) = when (sizingResult) {
-                    is SizingResult.Rejected -> {
-                        AppLogManager.tradeLifecycle(
-                            event = "RISK_FILTER_REJECTED",
-                            tradeId = tradeId,
-                            symbol = opp.pair,
-                            mode = modeLabel,
-                            attributes = mapOf(
-                                "gate" to "GATE_3_SIZING",
-                                "reason" to sizingResult.reason,
-                                "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
-                                "user_budget_inr" to "₹%.2f".format(config.minMarginPerTradeInr),
-                                "dynamic_min_notional_floor_inr" to "₹%.2f".format(dynamicMinNotionalInr)
-                            ),
-                            narrative = "Gate 3 (Risk Sizing) REJECTED: %s".format(sizingResult.reason)
-                        )
-                        audits.add(
-                            com.coindcx.trading.engine.scanner.TradeExecutionAudit(
-                                rank = opp.rank,
-                                pair = opp.pair,
-                                action = opp.actionLabel,
-                                status = com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE,
-                                reason = "Skipped — ${sizingResult.reason}"
-                            )
-                        )
-                        continue
-                    }
-                    is SizingResult.Sized -> {
-                        Triple(sizingResult.allocatedMarginInr, sizingResult.effectiveLeverage, sizingResult.notionalInr)
-                    }
-                }
+                val marginToAllocate: Double = fundedOpp.allocatedMarginInr
+                val actualLeverage: Int = config.leverage.coerceIn(1, riskManager.settings.maxLeverage)
+                val notionalInr: Double = marginToAllocate * actualLeverage
+                val targetRiskInr: Double = notionalInr * (slDistPct / 100.0)
 
                 val tpPrice = opp.signal.takeProfitPrice ?: (if (opp.isBuy) opp.currentPrice + (slDistance * 2.0) else opp.currentPrice - (slDistance * 2.0))
                 val targetDistance = kotlin.math.abs(tpPrice - opp.currentPrice)
@@ -597,11 +602,11 @@ class TradingForegroundService : Service() {
                         "sl_dist_pct" to "%.2f%%".format(slDistPct),
                         "stop_loss" to "%.4f".format(slPrice),
                         "account_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
-                        "risk_pct" to "%.1f%%".format(riskPerTradePct),
+                        "risk_pct" to "%.1f%%".format(config.riskPerTradePercent),
                         "risk_amount_inr" to "₹%.2f".format(targetRiskInr)
                     ),
-                    narrative = "Entry = %.4f -> SL distance = %.4f (%.2f%%) [%s] -> SL = %.4f -> Risk = ₹%.2f (%.1f%% of ₹%.2f)"
-                        .format(opp.currentPrice, slDistance, slDistPct, slMethodTag, slPrice, targetRiskInr, riskPerTradePct, inMemoryAvailableBalance)
+                    narrative = "Entry = %.4f -> SL distance = %.4f (%.2f%%) [%s] -> SL = %.4f -> Risk = ₹%.2f (%.1f%% of equity)"
+                        .format(opp.currentPrice, slDistance, slDistPct, slMethodTag, slPrice, targetRiskInr, config.riskPerTradePercent)
                 )
 
                 // Target Calculation Log

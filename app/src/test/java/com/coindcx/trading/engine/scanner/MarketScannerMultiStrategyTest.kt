@@ -341,7 +341,7 @@ class MarketScannerMultiStrategyTest {
 
         val dummyExecutionEngine = object : com.coindcx.trading.engine.ExecutionEngine {
             override val isPaperTrading = true
-            override var onTradeClosed: ((Double) -> Unit)? = null
+            override var onTradeClosed: ((pair: String, pnl: Double) -> Unit)? = null
             override suspend fun getAvailableBalanceInr(): Double = 10000.0
             override suspend fun getActivePosition(pair: String): com.coindcx.trading.data.api.models.FuturesPosition? = null
             override suspend fun getAllOpenPositions(): List<com.coindcx.trading.data.api.models.FuturesPosition> = emptyList()

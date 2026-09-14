@@ -171,4 +171,134 @@ class AllocationEngineTest {
         assertEquals(1, result.unfundedOpportunities.size)
         assertEquals(OpportunityLifecycle.UNFUNDED, result.unfundedOpportunities[0].lifecycleState)
     }
+
+    private fun createDummyOpportunityWithSl(pair: String, rank: Int, price: Double, slPrice: Double): MarketOpportunity {
+        return MarketOpportunity(
+            pair = pair,
+            signal = Signal(
+                SignalAction.ENTER_LONG,
+                confidenceScore = 90.0,
+                reason = "Test",
+                stopLossPrice = slPrice
+            ),
+            currentPrice = price,
+            confidenceScore = 90.0,
+            rank = rank,
+            lifecycleState = OpportunityLifecycle.RANKED
+        )
+    }
+
+    @Test
+    fun testDynamicRiskParity_10000Balance_2xLeverage_SafeReserveProtected() {
+        // Equity = 10,000, Cash = 10,000, Reserve = max(500, 100) = 500. Cash for trading = 9,500.
+        // Risk per trade 1% = 100.
+        // 5 candidates with 2% SL (price 100, SL 98)
+        val candidates = listOf(
+            createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 98.0),
+            createDummyOpportunityWithSl("B-ETH_USDT", 2, 100.0, 98.0),
+            createDummyOpportunityWithSl("B-SOL_USDT", 3, 100.0, 98.0),
+            createDummyOpportunityWithSl("B-XRP_USDT", 4, 100.0, 98.0),
+            createDummyOpportunityWithSl("B-ADA_USDT", 5, 100.0, 98.0)
+        )
+
+        val result = allocator.allocateCapital(
+            accountEquityInr = 10000.0,
+            availableCashInr = 10000.0,
+            activePositionsCount = 0,
+            leverage = 2,
+            rankedOpportunities = candidates,
+            riskSettings = RiskSettings(maxConcurrentPositions = 5),
+            minExchangeNotionalInr = 620.0,
+            riskPerTradePercent = 1.0,
+            safetyReservePercent = 5.0
+        )
+
+        assertFalse(result.isInsufficientBalance)
+        assertEquals(500.0, result.safetyReserveInr, 0.01)
+        assertEquals(310.0, result.exchangeFloorMarginInr, 0.01)
+        assertEquals(5, result.fundedOpportunities.size)
+        // Ensure total allocated margin does not exceed available cash minus safety reserve
+        assertTrue(result.totalAllocatedInr <= 9500.0)
+        // Reserve is preserved in remaining balance
+        assertTrue(result.remainingBalanceInr >= 500.0)
+    }
+
+    @Test
+    fun testDynamicRiskParity_SmallAccount500_FloorExceedsRiskCap_Rejects() {
+        // Equity = 500, Cash = 500, Reserve = max(25, 100) = 100. Cash for trading = 400.
+        // Floor at 2x = 310.
+        // With 2% SL, floor risk = 310 * 2 * 0.02 = 12.40.
+        // 1.5% max risk cap on 500 equity = 7.50.
+        // 12.40 > 7.50 -> Must be rejected by Stage 4 risk cap gate!
+        val candidates = listOf(
+            createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 98.0)
+        )
+
+        val result = allocator.allocateCapital(
+            accountEquityInr = 500.0,
+            availableCashInr = 500.0,
+            activePositionsCount = 0,
+            leverage = 2,
+            rankedOpportunities = candidates,
+            riskSettings = RiskSettings(maxConcurrentPositions = 5),
+            minExchangeNotionalInr = 620.0,
+            riskPerTradePercent = 1.0,
+            safetyReservePercent = 5.0
+        )
+
+        assertEquals(0, result.fundedOpportunities.size)
+        assertEquals(1, result.unfundedOpportunities.size)
+        assertTrue(result.unfundedOpportunities[0].statusMessage.contains("exceeding 1.5% cap"))
+    }
+
+    @Test
+    fun testDynamicRiskParity_SmallAccount500_TightStop_ApprovesBumpUnderCap() {
+        // Equity = 500, Cash = 500, Reserve = 100. Cash for trading = 400.
+        // Floor at 2x = 310.
+        // Tight stop: 0.8% SL (price 100, SL 99.2)
+        // Floor risk = 310 * 2 * 0.008 = 4.96.
+        // 1.5% max risk cap on 500 equity = 7.50.
+        // 4.96 <= 7.50 and 310 <= 400 -> Approved!
+        val candidates = listOf(
+            createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 99.2)
+        )
+
+        val result = allocator.allocateCapital(
+            accountEquityInr = 500.0,
+            availableCashInr = 500.0,
+            activePositionsCount = 0,
+            leverage = 2,
+            rankedOpportunities = candidates,
+            riskSettings = RiskSettings(maxConcurrentPositions = 5),
+            minExchangeNotionalInr = 620.0,
+            riskPerTradePercent = 1.0,
+            safetyReservePercent = 5.0
+        )
+
+        assertEquals(1, result.fundedOpportunities.size)
+        assertEquals(310.0, result.fundedOpportunities[0].allocatedMarginInr, 0.01)
+        assertEquals(OpportunityLifecycle.SELECTED_FOR_TRADE, result.fundedOpportunities[0].lifecycleState)
+    }
+
+    @Test
+    fun testDynamicRiskParity_InsufficientCashAfterReserve_Yields0Trades() {
+        // Equity = 350, Cash = 350, Reserve = 100. Cash for trading = 250.
+        // Floor at 2x = 310.
+        // Cash for trading (250) < Floor (310) -> Insufficient balance!
+        val candidates = listOf(
+            createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 99.2)
+        )
+
+        val result = allocator.allocateCapital(
+            accountEquityInr = 350.0,
+            availableCashInr = 350.0,
+            activePositionsCount = 0,
+            leverage = 2,
+            rankedOpportunities = candidates,
+            minExchangeNotionalInr = 620.0
+        )
+
+        assertTrue(result.isInsufficientBalance)
+        assertEquals(0, result.fundedOpportunities.size)
+    }
 }
