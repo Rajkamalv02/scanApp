@@ -38,4 +38,25 @@ interface TradeDao {
 
     @Update
     suspend fun update(trade: TradeEntity)
+
+    @Query("SELECT COUNT(*) FROM trades WHERE status = 'CLOSED'")
+    suspend fun getClosedTradesCount(): Int
+
+    @Query("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
+    suspend fun getOpenTradesCount(): Int
+
+    @Query("DELETE FROM trades WHERE id = :id AND status = 'CLOSED'")
+    suspend fun deleteClosedTradeById(id: Long): Int
+
+    @Query("DELETE FROM trades WHERE id IN (:ids) AND status = 'CLOSED'")
+    suspend fun deleteClosedTradesByIds(ids: List<Long>): Int
+
+    @Query("DELETE FROM trades WHERE status = 'CLOSED'")
+    suspend fun deleteAllClosedTrades(): Int
+
+    @Query("DELETE FROM trades WHERE status = 'CLOSED' AND exitTime < :beforeTimestamp")
+    suspend fun deleteClosedTradesOlderThan(beforeTimestamp: Long): Int
+
+    @Query("DELETE FROM trades WHERE status = 'CLOSED' AND tradeResult = :result")
+    suspend fun deleteClosedTradesByResult(result: String): Int
 }

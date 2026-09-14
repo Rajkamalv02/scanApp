@@ -26,4 +26,22 @@ interface OrderDao {
 
     @Update
     suspend fun update(order: OrderEntity)
+
+    @Query("SELECT COUNT(*) FROM orders WHERE status NOT IN ('PENDING', 'SUBMITTED', 'UNKNOWN', 'open', 'partially_filled')")
+    suspend fun getFinalizedOrdersCount(): Int
+
+    @Query("SELECT COUNT(*) FROM orders WHERE status IN ('PENDING', 'SUBMITTED', 'UNKNOWN', 'open', 'partially_filled')")
+    suspend fun getActiveOrdersCount(): Int
+
+    @Query("DELETE FROM orders WHERE clientOrderId = :clientOrderId AND status NOT IN ('PENDING', 'SUBMITTED', 'UNKNOWN', 'open', 'partially_filled')")
+    suspend fun deleteFinalizedOrderByClientOrderId(clientOrderId: String): Int
+
+    @Query("DELETE FROM orders WHERE clientOrderId IN (:clientOrderIds) AND status NOT IN ('PENDING', 'SUBMITTED', 'UNKNOWN', 'open', 'partially_filled')")
+    suspend fun deleteFinalizedOrdersByClientOrderIds(clientOrderIds: List<String>): Int
+
+    @Query("DELETE FROM orders WHERE status NOT IN ('PENDING', 'SUBMITTED', 'UNKNOWN', 'open', 'partially_filled')")
+    suspend fun deleteAllFinalizedOrders(): Int
+
+    @Query("DELETE FROM orders WHERE status NOT IN ('PENDING', 'SUBMITTED', 'UNKNOWN', 'open', 'partially_filled') AND createdAt < :beforeTimestamp")
+    suspend fun deleteFinalizedOrdersOlderThan(beforeTimestamp: Long): Int
 }

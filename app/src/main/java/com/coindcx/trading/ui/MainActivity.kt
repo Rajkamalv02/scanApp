@@ -31,6 +31,7 @@ import com.coindcx.trading.data.db.entities.SystemLogEntity
 import com.coindcx.trading.data.db.entities.TradeEntity
 import com.coindcx.trading.databinding.ActivityMainBinding
 import com.coindcx.trading.databinding.DialogClosedTradeDetailBinding
+import com.coindcx.trading.databinding.DialogDatabaseManagerBinding
 import com.coindcx.trading.databinding.ItemActivePositionBinding
 import com.coindcx.trading.databinding.ItemPaperClosedBinding
 import com.coindcx.trading.databinding.ItemPaperHoldingBinding
@@ -41,6 +42,7 @@ import com.coindcx.trading.engine.Strategy
 import com.coindcx.trading.engine.StrategyRegistry
 import com.coindcx.trading.engine.allocation.AllocationEngine
 import com.coindcx.trading.engine.currency.CurrencyConverter
+import com.coindcx.trading.engine.database.DatabaseManager
 import com.coindcx.trading.engine.scanner.MarketOpportunity
 import com.coindcx.trading.engine.scanner.MarketScanState
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
@@ -62,6 +64,7 @@ class MainActivity : AppCompatActivity() {
     private val currencyConverter by lazy { CurrencyConverter(ApiClient.apiService) }
     private val allocationEngine by lazy { AllocationEngine() }
     private val paperAccountManager by lazy { PaperAccountManager(this, db) }
+    private val databaseManager by lazy { DatabaseManager(this, db) }
 
     private var isUserSwitchingMode = true
     private var currentPortfolioTab = 0 // 0 = Holding, 1 = Pending, 2 = Closed
@@ -933,6 +936,24 @@ class MainActivity : AppCompatActivity() {
                         itemBinding.tvClosedExitReason.text = "Reason: ${trade.exitReason ?: "Closed"}"
                         itemBinding.tvClosedFees.text = "Fees: ₹%.2f".format(trade.fees + trade.fundingFees)
 
+                        itemBinding.btnDeleteClosedTrade.setOnClickListener {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Delete Trade Record #${trade.id}?")
+                                .setMessage("Are you sure you want to delete closed trade #${trade.id} (${trade.pair}) from database?\n\n🛡️ Active open positions are never touched.")
+                                .setPositiveButton("Delete") { _, _ ->
+                                    lifecycleScope.launch {
+                                        val success = databaseManager.deleteClosedTradeById(trade.id)
+                                        if (success) {
+                                            Toast.makeText(this@MainActivity, "Trade #${trade.id} deleted", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(this@MainActivity, "Could not delete trade #${trade.id}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                                .setNegativeButton("Cancel", null)
+                                .show()
+                        }
+
                         itemBinding.root.setOnClickListener {
                             showClosedTradeDetailDialog(trade)
                         }
@@ -1184,6 +1205,10 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Cancel", null)
                 .show()
         }
+
+        binding.btnManageDatabase.setOnClickListener {
+            showDatabaseManagerDialog()
+        }
     }
 
     private fun updateStoragePermissionUi() {
@@ -1356,6 +1381,169 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Failed to show trade detail dialog", e)
             Toast.makeText(this, "Unable to load trade details: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showDatabaseManagerDialog() {
+        try {
+            val dialogBinding = DialogDatabaseManagerBinding.inflate(layoutInflater)
+            val dialog = AlertDialog.Builder(this)
+                .setView(dialogBinding.root)
+                .create()
+
+            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+            // Setup Filter Spinners
+            val tradeFilterLabels = listOf(
+                "All Closed Trades",
+                "Older than 7 Days",
+                "Older than 30 Days",
+                "Losses Only (LOSS)",
+                "Wins Only (WIN)"
+            )
+            val tradeAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, tradeFilterLabels).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            dialogBinding.spnFilterTrades.adapter = tradeAdapter
+
+            val orderFilterLabels = listOf(
+                "All Finalized Orders",
+                "Older than 7 Days",
+                "Older than 30 Days"
+            )
+            val orderAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, orderFilterLabels).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            dialogBinding.spnFilterOrders.adapter = orderAdapter
+
+            fun refreshDialogStats() {
+                lifecycleScope.launch {
+                    val stats = databaseManager.getDatabaseStats()
+                    dialogBinding.tvDbSizeHeader.text = "SQLite Database: ${stats.databaseSizeFormatted}"
+                    dialogBinding.tvStatClosedTrades.text = "Closed Trades: ${stats.closedTradesCount}"
+                    dialogBinding.tvStatFinalizedOrders.text = "Finalized Orders: ${stats.finalizedOrdersCount}"
+                    dialogBinding.tvStatSystemLogs.text = "DB Logs: ${stats.systemLogsCount}"
+                    dialogBinding.tvStatSnapshots.text = "Snapshots: ${stats.equitySnapshotsCount}"
+                    dialogBinding.tvStatProtected.text = "🔒 Active Protected: ${stats.openTradesCount} Open Positions | ${stats.activeOrdersCount} Working Orders"
+                }
+            }
+
+            // Initial load of stats
+            refreshDialogStats()
+
+            dialogBinding.btnCloseDialog.setOnClickListener {
+                dialog.dismiss()
+            }
+
+            // Category 1: Clear Closed Trades
+            dialogBinding.btnClearTrades.setOnClickListener {
+                val selectedIndex = dialogBinding.spnFilterTrades.selectedItemPosition
+                val label = tradeFilterLabels.getOrElse(selectedIndex) { "Closed Trades" }
+                val olderThanDays = when (selectedIndex) {
+                    1 -> 7
+                    2 -> 30
+                    else -> null
+                }
+                val resultFilter = when (selectedIndex) {
+                    3 -> "LOSS"
+                    4 -> "WIN"
+                    else -> null
+                }
+
+                AlertDialog.Builder(this)
+                    .setTitle("Delete $label?")
+                    .setMessage("This will permanently remove matching closed trades from the database.\n\n🛡️ Active open positions will NEVER be touched.")
+                    .setPositiveButton("Delete") { _, _ ->
+                        lifecycleScope.launch {
+                            val deleted = databaseManager.clearClosedTrades(olderThanDays, resultFilter)
+                            Toast.makeText(this@MainActivity, "Deleted $deleted closed trades", Toast.LENGTH_SHORT).show()
+                            refreshDialogStats()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+
+            // Category 2: Clear Finalized Orders
+            dialogBinding.btnClearOrders.setOnClickListener {
+                val selectedIndex = dialogBinding.spnFilterOrders.selectedItemPosition
+                val label = orderFilterLabels.getOrElse(selectedIndex) { "Finalized Orders" }
+                val olderThanDays = when (selectedIndex) {
+                    1 -> 7
+                    2 -> 30
+                    else -> null
+                }
+
+                AlertDialog.Builder(this)
+                    .setTitle("Delete $label?")
+                    .setMessage("This will permanently remove completed/cancelled orders from the database.\n\n🛡️ Pending and working orders will NEVER be touched.")
+                    .setPositiveButton("Delete") { _, _ ->
+                        lifecycleScope.launch {
+                            val deleted = databaseManager.clearFinalizedOrders(olderThanDays)
+                            Toast.makeText(this@MainActivity, "Deleted $deleted finalized orders", Toast.LENGTH_SHORT).show()
+                            refreshDialogStats()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+
+            // Category 3: Clear System Logs
+            dialogBinding.btnClearSystemLogs.setOnClickListener {
+                AlertDialog.Builder(this)
+                    .setTitle("Clear Database System Logs?")
+                    .setMessage("This will erase all diagnostic system log entries stored in the SQLite database.")
+                    .setPositiveButton("Clear Logs") { _, _ ->
+                        lifecycleScope.launch {
+                            val deleted = databaseManager.clearSystemLogs()
+                            Toast.makeText(this@MainActivity, "Cleared $deleted system log records", Toast.LENGTH_SHORT).show()
+                            refreshDialogStats()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+
+            // Category 4: Clear Historical Snapshots
+            dialogBinding.btnClearSnapshots.setOnClickListener {
+                AlertDialog.Builder(this)
+                    .setTitle("Clear Historical Snapshots?")
+                    .setMessage("This will remove equity snapshots from previous sessions.\n\n🛡️ Snapshots for the current active session will be preserved.")
+                    .setPositiveButton("Clear Snapshots") { _, _ ->
+                        lifecycleScope.launch {
+                            val currentSessionId = getSharedPreferences("paper_trading_prefs", Context.MODE_PRIVATE)
+                                .getString("paper_session_id", "session_1") ?: "session_1"
+                            val deleted = databaseManager.clearHistoricalEquitySnapshots(currentSessionId)
+                            Toast.makeText(this@MainActivity, "Cleared $deleted historical snapshots", Toast.LENGTH_SHORT).show()
+                            refreshDialogStats()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+
+            // Category 5: Master Purge
+            dialogBinding.btnMasterPurge.setOnClickListener {
+                AlertDialog.Builder(this)
+                    .setTitle("⚠️ PURGE ALL HISTORICAL RECORDS?")
+                    .setMessage("This will permanently remove:\n• All closed trades\n• All finalized orders\n• All database logs\n• All historical equity snapshots\n\n🛡️ GUARANTEE: Active open positions and pending orders are 100% protected and will NOT be deleted.\n\nAre you sure you want to proceed?")
+                    .setPositiveButton("PURGE EVERYTHING") { _, _ ->
+                        lifecycleScope.launch {
+                            val currentSessionId = getSharedPreferences("paper_trading_prefs", Context.MODE_PRIVATE)
+                                .getString("paper_session_id", "session_1") ?: "session_1"
+                            val summary = databaseManager.purgeAllHistoricalData(currentSessionId)
+                            Toast.makeText(this@MainActivity, "Purged ${summary.totalDeleted} records across database", Toast.LENGTH_LONG).show()
+                            refreshDialogStats()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+
+            dialog.show()
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to show Database Manager Dialog", e)
+            Toast.makeText(this, "Unable to open Database Manager: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 }

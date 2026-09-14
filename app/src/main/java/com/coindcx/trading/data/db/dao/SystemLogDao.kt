@@ -14,4 +14,10 @@ interface SystemLogDao {
 
     @Query("DELETE FROM system_logs WHERE timestamp < :beforeTimestamp")
     suspend fun pruneOldLogs(beforeTimestamp: Long)
+
+    @Query("SELECT COUNT(*) FROM system_logs")
+    suspend fun getLogsCount(): Int
+
+    @Query("DELETE FROM system_logs")
+    suspend fun deleteAllLogs(): Int
 }

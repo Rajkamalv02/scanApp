@@ -79,6 +79,17 @@
                 android:textSize="13sp"
                 android:fontFamily="monospace"
                 android:textStyle="bold" />
+
+            <ImageButton
+                android:id="@+id/btnDeleteClosedTrade"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_marginStart="8dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_delete"
+                app:tint="@color/text_secondary"
+                android:contentDescription="Delete Trade"
+                android:padding="4dp" />
         </LinearLayout>
 
         <!-- Entry -> Exit Prices & Duration -->

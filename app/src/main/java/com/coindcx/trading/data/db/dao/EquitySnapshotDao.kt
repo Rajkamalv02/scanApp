@@ -23,4 +23,13 @@ interface EquitySnapshotDao {
 
     @Query("DELETE FROM equity_snapshots WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: String)
+
+    @Query("SELECT COUNT(*) FROM equity_snapshots")
+    suspend fun getSnapshotsCount(): Int
+
+    @Query("DELETE FROM equity_snapshots WHERE sessionId != :currentSessionId")
+    suspend fun clearHistoricalSessions(currentSessionId: String): Int
+
+    @Query("DELETE FROM equity_snapshots")
+    suspend fun deleteAllSnapshots(): Int
 }

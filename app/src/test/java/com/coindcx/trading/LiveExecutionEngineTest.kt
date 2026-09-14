@@ -34,6 +34,12 @@ class LiveExecutionEngineTest {
         override suspend fun getActiveOrders(): List<OrderEntity> = emptyList()
         override fun getPendingOrdersFlow(): Flow<List<OrderEntity>> = emptyFlow()
         override fun getAllOrdersFlow(): Flow<List<OrderEntity>> = emptyFlow()
+        override suspend fun getFinalizedOrdersCount(): Int = 0
+        override suspend fun getActiveOrdersCount(): Int = 0
+        override suspend fun deleteFinalizedOrderByClientOrderId(clientOrderId: String): Int = 0
+        override suspend fun deleteFinalizedOrdersByClientOrderIds(clientOrderIds: List<String>): Int = 0
+        override suspend fun deleteAllFinalizedOrders(): Int = 0
+        override suspend fun deleteFinalizedOrdersOlderThan(beforeTimestamp: Long): Int = 0
     }
 
     private class TestApiService : CoinDCXApiService {
