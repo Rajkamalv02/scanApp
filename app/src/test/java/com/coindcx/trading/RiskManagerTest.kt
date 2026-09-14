@@ -236,4 +236,161 @@ class RiskManagerTest {
         riskManager.recordTradeResult(350.0, 10000.0)
         assertEquals(0, riskManager.getConsecutiveLossCount())
     }
+
+    @Test
+    fun testPersistence_SavesAndRestoresRiskState() {
+        val prefs = FakeSharedPreferences()
+        val manager1 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+
+        manager1.recordTradeResult(-200.0, 10000.0)
+        manager1.recordTradeResult(-200.0, 10000.0)
+        manager1.recordTradeResult(-200.0, 10000.0) // Consecutive losses = 3, today loss = 600 -> trips daily circuit breaker
+
+        assertTrue(manager1.isCircuitBreakerTripped())
+        assertTrue(manager1.isCooldownActive())
+        assertEquals(3, manager1.getConsecutiveLossCount())
+        assertEquals(600.0, manager1.getTodayRealizedLossInr(), 0.01)
+
+        manager1.saveToPreferences(prefs)
+
+        // Restore into fresh manager
+        val manager2 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+        manager2.loadFromPreferences(prefs)
+
+        assertTrue(manager2.isCircuitBreakerTripped())
+        assertTrue(manager2.isCooldownActive())
+        assertEquals(3, manager2.getConsecutiveLossCount())
+        assertEquals(600.0, manager2.getTodayRealizedLossInr(), 0.01)
+    }
+
+    @Test
+    fun testPersistence_DayRolloverResetsDailyLossAndCircuitBreaker() {
+        val prefs = FakeSharedPreferences()
+        val manager1 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+
+        manager1.recordTradeResult(-600.0, 10000.0) // Trips daily limit
+        assertTrue(manager1.isCircuitBreakerTripped())
+        manager1.saveToPreferences(prefs)
+
+        // Simulate that the saved epoch day was yesterday
+        val currentEpochDay = System.currentTimeMillis() / 86400000L
+        prefs.edit().putLong(RiskManager.KEY_LAST_EPOCH_DAY, currentEpochDay - 1).apply()
+
+        // Load into manager2 on the "new" day
+        val manager2 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+        manager2.loadFromPreferences(prefs)
+
+        // Daily loss and circuit breaker must be automatically reset!
+        assertFalse(manager2.isCircuitBreakerTripped())
+        assertEquals(0.0, manager2.getTodayRealizedLossInr(), 0.01)
+        // Consecutive loss count is preserved across days until cleared or cooled down
+        assertEquals(1, manager2.getConsecutiveLossCount())
+    }
+
+    @Test
+    fun testPerSymbolCooldown_BlocksSymbolAfterLoss() {
+        val manager = RiskManager(settings = RiskSettings(symbolLossCooldownMinutes = 30L))
+
+        // No cooldown initially
+        assertFalse(manager.isSymbolInCooldown("B-ETH_USDT"))
+        val checkInitial = manager.checkPortfolioAndCorrelation(
+            candidatePair = "B-ETH_USDT",
+            isBuy = true,
+            activePositions = emptyList(),
+            btcMacroTrendIsBullish = true
+        )
+        assertTrue(checkInitial is RiskCheckResult.Approved)
+
+        // Record a loss on B-ETH_USDT
+        manager.recordTradeResult(realizedPnlInr = -250.0, currentBalanceInr = 10000.0, pair = "B-ETH_USDT")
+
+        // B-ETH_USDT must now be in cooldown!
+        assertTrue(manager.isSymbolInCooldown("B-ETH_USDT"))
+        assertTrue(manager.getSymbolCooldownRemainingMinutes("B-ETH_USDT") > 0L)
+
+        // Candidate check on B-ETH_USDT must be Rejected
+        val checkBlocked = manager.checkPortfolioAndCorrelation(
+            candidatePair = "B-ETH_USDT",
+            isBuy = true,
+            activePositions = emptyList(),
+            btcMacroTrendIsBullish = true
+        )
+        assertTrue(checkBlocked is RiskCheckResult.Rejected)
+        assertTrue((checkBlocked as RiskCheckResult.Rejected).reason.contains("Per-symbol cooldown active"))
+    }
+
+    @Test
+    fun testPerSymbolCooldown_AllowsOtherSymbols() {
+        val manager = RiskManager(settings = RiskSettings(symbolLossCooldownMinutes = 30L, consecutiveLossLimit = 3))
+
+        // Record a single loss on B-ETH_USDT (consecutive loss count = 1, below global limit of 3)
+        manager.recordTradeResult(realizedPnlInr = -200.0, currentBalanceInr = 10000.0, pair = "B-ETH_USDT")
+
+        // B-ETH_USDT is blocked
+        assertTrue(manager.isSymbolInCooldown("B-ETH_USDT"))
+
+        // BUT B-BTC_USDT and B-SOL_USDT must remain Approved!
+        assertFalse(manager.isSymbolInCooldown("B-BTC_USDT"))
+        assertFalse(manager.isSymbolInCooldown("B-SOL_USDT"))
+
+        val checkBtc = manager.checkPortfolioAndCorrelation(
+            candidatePair = "B-BTC_USDT",
+            isBuy = true,
+            activePositions = emptyList(),
+            btcMacroTrendIsBullish = true
+        )
+        assertTrue(checkBtc is RiskCheckResult.Approved)
+
+        val checkSol = manager.checkPortfolioAndCorrelation(
+            candidatePair = "B-SOL_USDT",
+            isBuy = true,
+            activePositions = emptyList(),
+            btcMacroTrendIsBullish = true
+        )
+        assertTrue(checkSol is RiskCheckResult.Approved)
+    }
+
+    @Test
+    fun testPerSymbolCooldown_CanBeClearedManually() {
+        val manager = RiskManager(settings = RiskSettings(symbolLossCooldownMinutes = 30L))
+
+        manager.recordTradeResult(realizedPnlInr = -150.0, currentBalanceInr = 10000.0, pair = "B-SOL_USDT")
+        assertTrue(manager.isSymbolInCooldown("B-SOL_USDT"))
+
+        // Reset cooldowns
+        manager.resetCooldown()
+        assertFalse(manager.isSymbolInCooldown("B-SOL_USDT"))
+        assertEquals(0, manager.getConsecutiveLossCount())
+    }
+
+    private class FakeSharedPreferences : android.content.SharedPreferences {
+        val data = mutableMapOf<String, Any>()
+
+        override fun getAll(): MutableMap<String, *> = data
+        override fun getString(key: String?, defValue: String?): String? = data[key] as? String ?: defValue
+        @Suppress("UNCHECKED_CAST")
+        override fun getStringSet(key: String?, defValues: MutableSet<String>?): MutableSet<String>? = data[key] as? MutableSet<String> ?: defValues
+        override fun getInt(key: String?, defValue: Int): Int = (data[key] as? Number)?.toInt() ?: defValue
+        override fun getLong(key: String?, defValue: Long): Long = (data[key] as? Number)?.toLong() ?: defValue
+        override fun getFloat(key: String?, defValue: Float): Float = (data[key] as? Number)?.toFloat() ?: defValue
+        override fun getBoolean(key: String?, defValue: Boolean): Boolean = data[key] as? Boolean ?: defValue
+        override fun contains(key: String?): Boolean = data.containsKey(key)
+        override fun edit(): android.content.SharedPreferences.Editor = FakeEditor(this)
+        override fun registerOnSharedPreferenceChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener?) {}
+        override fun unregisterOnSharedPreferenceChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener?) {}
+
+        class FakeEditor(private val prefs: FakeSharedPreferences) : android.content.SharedPreferences.Editor {
+            private val temp = mutableMapOf<String, Any>()
+            override fun putString(key: String?, value: String?): android.content.SharedPreferences.Editor { if (key != null && value != null) temp[key] = value; return this }
+            override fun putStringSet(key: String?, values: MutableSet<String>?): android.content.SharedPreferences.Editor { if (key != null && values != null) temp[key] = values; return this }
+            override fun putInt(key: String?, value: Int): android.content.SharedPreferences.Editor { if (key != null) temp[key] = value; return this }
+            override fun putLong(key: String?, value: Long): android.content.SharedPreferences.Editor { if (key != null) temp[key] = value; return this }
+            override fun putFloat(key: String?, value: Float): android.content.SharedPreferences.Editor { if (key != null) temp[key] = value; return this }
+            override fun putBoolean(key: String?, value: Boolean): android.content.SharedPreferences.Editor { if (key != null) temp[key] = value; return this }
+            override fun remove(key: String?): android.content.SharedPreferences.Editor { if (key != null) temp.remove(key); return this }
+            override fun clear(): android.content.SharedPreferences.Editor { temp.clear(); return this }
+            override fun commit(): Boolean { prefs.data.putAll(temp); return true }
+            override fun apply() { prefs.data.putAll(temp) }
+        }
+    }
 }

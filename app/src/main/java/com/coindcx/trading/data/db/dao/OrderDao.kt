@@ -12,6 +12,9 @@ interface OrderDao {
     @Query("SELECT * FROM orders WHERE status = 'UNKNOWN'")
     suspend fun getUnknownOrders(): List<OrderEntity>
 
+    @Query("SELECT * FROM orders WHERE status = 'PENDING' OR status = 'open' OR status = 'partially_filled' OR status = 'SUBMITTED'")
+    suspend fun getActiveOrders(): List<OrderEntity>
+
     @Query("SELECT * FROM orders WHERE status = 'SUBMITTED' OR status = 'PENDING' ORDER BY createdAt DESC")
     fun getPendingOrdersFlow(): Flow<List<OrderEntity>>
 

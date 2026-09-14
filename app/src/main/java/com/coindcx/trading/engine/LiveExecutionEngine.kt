@@ -13,6 +13,7 @@ class LiveExecutionEngine(
 ) : ExecutionEngine {
 
     override val isPaperTrading: Boolean = false
+    override var onTradeClosed: ((pair: String, pnl: Double) -> Unit)? = null
 
     override suspend fun getAvailableBalanceInr(): Double {
         return try {
@@ -173,6 +174,50 @@ class LiveExecutionEngine(
         tradeId: String?
     ): ExecutionResult {
         return try {
+            // 1. Query active position on the pair
+            val activePos = getActivePosition(pair)
+            var realizedPnlInr = 0.0
+
+            if (activePos != null && activePos.isOpen && kotlin.math.abs(activePos.activePos) > 0.0) {
+                val qtyToClose = kotlin.math.abs(activePos.activePos)
+                val closeSide = if (activePos.isLong) "sell" else "buy"
+                val lev = activePos.leverage.toInt().coerceAtLeast(1)
+                val exitClientOrderId = tradeId ?: "exit_${System.currentTimeMillis()}_$pair"
+
+                // 2. Submit market closing order with reduce_only = true
+                val closingOrderResult = orderManager.placeMarketOrder(
+                    pair = pair,
+                    side = closeSide,
+                    quantity = qtyToClose,
+                    leverage = lev,
+                    tradeId = exitClientOrderId,
+                    reduceOnly = true
+                )
+
+                if (closingOrderResult is OrderResult.Failed) {
+                    AppLogManager.e("LIVE_EXEC", "Failed submitting closing market order on $pair: ${closingOrderResult.error}")
+                    return ExecutionResult.Failed("Market close failed on $pair: ${closingOrderResult.error}")
+                }
+
+                // 3. Compute realized PnL in INR
+                val effectiveExitPrice = if (currentPrice > 0.0) currentPrice else (activePos.markPrice ?: activePos.avgPrice)
+                val pnlUsdt = if (activePos.isLong) {
+                    (effectiveExitPrice - activePos.avgPrice) * qtyToClose
+                } else {
+                    (activePos.avgPrice - effectiveExitPrice) * qtyToClose
+                }
+
+                realizedPnlInr = if (activePos.marginCurrencyShortName?.equals("INR", ignoreCase = true) == true) {
+                    pnlUsdt * (activePos.settlementCurrencyAvgPrice ?: currencyConverter.getUsdtInrRate())
+                } else {
+                    currencyConverter.convertUsdtToInr(pnlUsdt)
+                }
+
+                // Notify listeners (e.g. RiskManager) of realized trade PnL
+                onTradeClosed?.invoke(pair, realizedPnlInr)
+            }
+
+            // 4. Cancel any remaining open trigger / working limit orders for this pair
             val ordersPayload = mapOf("page" to "1", "size" to "50", "timestamp" to System.currentTimeMillis())
             val openOrdersResp = apiService.getOpenOrders(ordersPayload)
             if (openOrdersResp.isSuccessful && openOrdersResp.body() != null) {
@@ -180,6 +225,7 @@ class LiveExecutionEngine(
                     apiService.cancelOrder(mapOf("id" to o.id, "timestamp" to System.currentTimeMillis()))
                 }
             }
+
             AppLogManager.tradeLifecycle(
                 event = "EXIT_ORDER_FILLED",
                 tradeId = tradeId ?: "live_exit_$pair",
@@ -187,11 +233,12 @@ class LiveExecutionEngine(
                 mode = "LIVE",
                 attributes = mapOf(
                     "reason" to reason,
-                    "price" to currentPrice
+                    "price" to currentPrice,
+                    "realized_pnl_inr" to "₹%.2f".format(realizedPnlInr)
                 ),
-                narrative = "Closed/Cancelled live orders on %s: %s @ %.4f".format(pair, reason, currentPrice)
+                narrative = "Closed live position & cancelled orders on %s: %s @ %.4f (Realized PnL: ₹%.2f)".format(pair, reason, currentPrice, realizedPnlInr)
             )
-            ExecutionResult.Success("exit_success", "Closed/Cancelled live orders on $pair")
+            ExecutionResult.Success("exit_success", "Closed live position & cancelled orders on $pair (PnL: ₹%.2f)".format(realizedPnlInr))
         } catch (e: Exception) {
             ExecutionResult.Failed("Failed to exit live position on $pair: ${e.message}")
         }

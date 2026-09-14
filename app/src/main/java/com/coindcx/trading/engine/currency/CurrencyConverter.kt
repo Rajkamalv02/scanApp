@@ -11,6 +11,7 @@ class CurrencyConverter(
     private var lastFetchTime: Long = 0
     private val cacheDurationMs = 60_000L // 60 seconds cache
     private val mutex = Mutex()
+    fun getCachedUsdtInrRate(): Double = cachedRate
 
     suspend fun getUsdtInrRate(): Double {
         val now = System.currentTimeMillis()

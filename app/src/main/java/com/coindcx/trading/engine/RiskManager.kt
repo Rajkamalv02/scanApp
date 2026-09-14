@@ -1,5 +1,7 @@
 package com.coindcx.trading.engine
 
+import android.content.Context
+import android.content.SharedPreferences
 import com.coindcx.trading.data.api.models.FuturesPosition
 import kotlin.math.abs
 
@@ -12,7 +14,10 @@ data class RiskSettings(
     val maxDirectionalPositions: Int = 2,            // Max 2 Longs or 2 Shorts
     val consecutiveLossLimit: Int = 3,               // 3 consecutive losses triggers cooldown
     val consecutiveLossCooldownMinutes: Long = 90L,  // 90-minute cooldown duration
-    val liquidationBufferMultiplier: Double = 1.25   // Tunable: Minimum 25% clearance between SL and Liquidation
+    val liquidationBufferMultiplier: Double = 1.25,  // Tunable: Minimum 25% clearance between SL and Liquidation
+    val symbolLossCooldownMinutes: Long = 30L,       // 30-minute lockout on a specific pair after taking a loss
+    val breakevenTriggerRMultiple: Double = 1.0,     // Trigger breakeven stop once profit reaches +1.0R
+    val entryOrderTtlSeconds: Long = 120L            // Cancel unfilled entry limit orders after 120 seconds
 )
 
 sealed class RiskCheckResult {
@@ -41,14 +46,37 @@ sealed class SizingResult {
  * 5. Volatility-adjusted risk parity sizing (1% risk / SL distance %)
  */
 class RiskManager(
-    var settings: RiskSettings = RiskSettings()
+    var settings: RiskSettings = RiskSettings(),
+    private val context: Context? = null
 ) {
+    companion object {
+        const val PREFS_NAME = "trading_risk_prefs"
+        const val KEY_DAILY_LOSS = "today_realized_loss_inr"
+        const val KEY_CONSECUTIVE_LOSS = "consecutive_loss_count"
+        const val KEY_CIRCUIT_BREAKER = "circuit_breaker_tripped"
+        const val KEY_COOLDOWN_UNTIL = "cooldown_until_timestamp_ms"
+        const val KEY_LAST_EPOCH_DAY = "last_epoch_day"
+    }
+
     private var todayRealizedLossInr: Double = 0.0
     private var consecutiveLossCount: Int = 0
     private var circuitBreakerTripped: Boolean = false
     private var cooldownUntilTimestampMs: Long = 0L
+    private var lastEpochDay: Long = System.currentTimeMillis() / 86400000L
 
-    fun isCircuitBreakerTripped(): Boolean = circuitBreakerTripped
+    init {
+        context?.let { ctx ->
+            val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            loadFromPreferences(prefs)
+        }
+    }
+
+    fun getTodayRealizedLossInr(): Double = todayRealizedLossInr
+
+    fun isCircuitBreakerTripped(): Boolean {
+        checkAndResetIfNewDay()
+        return circuitBreakerTripped
+    }
 
     fun isCooldownActive(): Boolean = System.currentTimeMillis() < cooldownUntilTimestampMs
 
@@ -58,6 +86,85 @@ class RiskManager(
     }
 
     fun getConsecutiveLossCount(): Int = consecutiveLossCount
+
+    private val symbolCooldownMap = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun recordSymbolLoss(pair: String, durationMinutes: Long = settings.symbolLossCooldownMinutes) {
+        if (pair.isNotBlank()) {
+            val cooldownUntil = System.currentTimeMillis() + (durationMinutes * 60 * 1000L)
+            symbolCooldownMap[pair] = cooldownUntil
+        }
+    }
+
+    fun isSymbolInCooldown(pair: String): Boolean {
+        val until = symbolCooldownMap[pair] ?: return false
+        return if (System.currentTimeMillis() < until) {
+            true
+        } else {
+            symbolCooldownMap.remove(pair)
+            false
+        }
+    }
+
+    fun getSymbolCooldownRemainingMinutes(pair: String): Long {
+        val until = symbolCooldownMap[pair] ?: return 0L
+        val remainingMs = until - System.currentTimeMillis()
+        return if (remainingMs > 0) (remainingMs / 60000L) + 1 else 0L
+    }
+
+    fun clearSymbolCooldown(pair: String) {
+        symbolCooldownMap.remove(pair)
+    }
+
+    fun clearAllSymbolCooldowns() {
+        symbolCooldownMap.clear()
+    }
+
+    private fun checkAndResetIfNewDay() {
+        val currentEpochDay = System.currentTimeMillis() / 86400000L
+        if (currentEpochDay > lastEpochDay) {
+            todayRealizedLossInr = 0.0
+            circuitBreakerTripped = false
+            lastEpochDay = currentEpochDay
+            persistState()
+        }
+    }
+
+    fun saveToPreferences(prefs: SharedPreferences) {
+        prefs.edit()
+            .putFloat(KEY_DAILY_LOSS, todayRealizedLossInr.toFloat())
+            .putInt(KEY_CONSECUTIVE_LOSS, consecutiveLossCount)
+            .putBoolean(KEY_CIRCUIT_BREAKER, circuitBreakerTripped)
+            .putLong(KEY_COOLDOWN_UNTIL, cooldownUntilTimestampMs)
+            .putLong(KEY_LAST_EPOCH_DAY, lastEpochDay)
+            .apply()
+    }
+
+    fun loadFromPreferences(prefs: SharedPreferences) {
+        val currentEpochDay = System.currentTimeMillis() / 86400000L
+        val savedEpochDay = prefs.getLong(KEY_LAST_EPOCH_DAY, currentEpochDay)
+        if (currentEpochDay > savedEpochDay) {
+            todayRealizedLossInr = 0.0
+            circuitBreakerTripped = false
+            consecutiveLossCount = prefs.getInt(KEY_CONSECUTIVE_LOSS, 0)
+            cooldownUntilTimestampMs = prefs.getLong(KEY_COOLDOWN_UNTIL, 0L)
+            lastEpochDay = currentEpochDay
+            saveToPreferences(prefs)
+        } else {
+            todayRealizedLossInr = prefs.getFloat(KEY_DAILY_LOSS, 0f).toDouble()
+            consecutiveLossCount = prefs.getInt(KEY_CONSECUTIVE_LOSS, 0)
+            circuitBreakerTripped = prefs.getBoolean(KEY_CIRCUIT_BREAKER, false)
+            cooldownUntilTimestampMs = prefs.getLong(KEY_COOLDOWN_UNTIL, 0L)
+            lastEpochDay = savedEpochDay
+        }
+    }
+
+    private fun persistState() {
+        context?.let { ctx ->
+            val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            saveToPreferences(prefs)
+        }
+    }
 
     /**
      * Calculates required margin using 1% risk parity, bounded by user budget cap
@@ -166,12 +273,18 @@ class RiskManager(
         activePositions: List<FuturesPosition>,
         btcMacroTrendIsBullish: Boolean? = null
     ): RiskCheckResult {
+        checkAndResetIfNewDay()
         if (circuitBreakerTripped) {
             return RiskCheckResult.Rejected("Daily circuit breaker tripped (4% loss limit reached).")
         }
 
         if (isCooldownActive()) {
             return RiskCheckResult.Rejected("Cooldown active ($consecutiveLossCount consecutive losses, ${getCooldownRemainingMinutes()}m remaining).")
+        }
+
+        if (isSymbolInCooldown(candidatePair)) {
+            val remainingMins = getSymbolCooldownRemainingMinutes(candidatePair)
+            return RiskCheckResult.Rejected("Per-symbol cooldown active for $candidatePair ($remainingMins min remaining after recent loss).")
         }
 
         val openPositions = activePositions.filter { it.isOpen }
@@ -231,13 +344,22 @@ class RiskManager(
     /**
      * Records realized trade outcome in INR:
      * - Loss increments consecutive losses and adds to daily loss pool.
+     * - Any loss on a specific pair initiates a per-symbol cooldown (default 30m) to avoid churn.
      * - 3 consecutive losses triggers 90-minute cooldown.
      * - Profit strictly resets consecutive losses to 0.
      */
-    fun recordTradeResult(realizedPnlInr: Double, currentBalanceInr: Double = 0.0) {
+    fun recordTradeResult(
+        realizedPnlInr: Double,
+        currentBalanceInr: Double = 0.0,
+        pair: String? = null
+    ) {
+        checkAndResetIfNewDay()
         if (realizedPnlInr < 0) {
             todayRealizedLossInr += abs(realizedPnlInr)
             consecutiveLossCount++
+            if (!pair.isNullOrBlank()) {
+                recordSymbolLoss(pair)
+            }
             if (consecutiveLossCount >= settings.consecutiveLossLimit) {
                 cooldownUntilTimestampMs = System.currentTimeMillis() + (settings.consecutiveLossCooldownMinutes * 60 * 1000L)
             }
@@ -252,15 +374,19 @@ class RiskManager(
         } else if (realizedPnlInr > 0) {
             consecutiveLossCount = 0
         }
+        persistState()
     }
 
     fun resetDaily() {
         todayRealizedLossInr = 0.0
         circuitBreakerTripped = false
+        persistState()
     }
 
     fun resetCooldown() {
         consecutiveLossCount = 0
         cooldownUntilTimestampMs = 0L
+        symbolCooldownMap.clear()
+        persistState()
     }
 }

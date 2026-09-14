@@ -64,6 +64,7 @@ class TradingForegroundService : Service() {
     }
 
     private var positionMonitorJob: kotlinx.coroutines.Job? = null
+    private val breakevenStopLevels = java.util.concurrent.ConcurrentHashMap<String, Double>()
 
     override fun onCreate() {
         super.onCreate()
@@ -77,8 +78,15 @@ class TradingForegroundService : Service() {
         liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter, scannerEngine.universeManager)
         ranker = OpportunityRanker()
         allocator = AllocationEngine()
-        riskManager = RiskManager()
+        riskManager = RiskManager(context = applicationContext)
         executionEngine = paperEngine
+
+        val reconciliationEngine = ReconciliationEngine(
+            apiService = ApiClient.apiService,
+            tradeDao = db.tradeDao(),
+            orderDao = db.orderDao(),
+            logDao = db.systemLogDao()
+        )
 
         serviceScope.launch {
             try {
@@ -86,13 +94,29 @@ class TradingForegroundService : Service() {
             } catch (e: Exception) {
                 AppLogManager.e("SERVICE", "Failed to refresh currency converter rates on startup: ${e.message}", e)
             }
+            try {
+                reconciliationEngine.reconcile(executionEngine.isPaperTrading)
+            } catch (e: Exception) {
+                AppLogManager.e("SERVICE", "Failed running startup reconciliation: ${e.message}", e)
+            }
         }
 
-        paperEngine.onTradeClosed = { pnl ->
+        paperEngine.onTradeClosed = { pair, pnl ->
             serviceScope.launch {
                 val bal = executionEngine.getAvailableBalanceInr()
-                riskManager.recordTradeResult(pnl, bal)
+                riskManager.recordTradeResult(pnl, bal, pair)
                 refreshPaperState()
+            }
+        }
+
+        liveEngine.onTradeClosed = { pair, pnl ->
+            serviceScope.launch {
+                val bal = executionEngine.getAvailableBalanceInr()
+                riskManager.recordTradeResult(pnl, bal, pair)
+                val syncRes = executionEngine.refreshExchangeState()
+                if (syncRes.isSuccess) {
+                    MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                }
             }
         }
 
@@ -869,7 +893,125 @@ class TradingForegroundService : Service() {
                     } else {
                         val syncRes = executionEngine.refreshExchangeState()
                         if (syncRes.isSuccess) {
-                            MarketScanState.updateExchangeSnapshot(syncRes.getOrThrow())
+                            val snapshot = syncRes.getOrThrow()
+                            MarketScanState.updateExchangeSnapshot(snapshot)
+
+                            // 1. Stale Entry Order Reaper & Partial Fill Pruning (P1)
+                            val activePairs = snapshot.openPositions
+                                .filter { it.isOpen && kotlin.math.abs(it.activePos) > 0.0 }
+                                .map { it.pair }
+                                .toSet()
+                            val ttlMs = riskManager.settings.entryOrderTtlSeconds * 1000L
+                            orderManager.reapStaleEntryOrders(ttlMs = ttlMs, activePositionPairs = activePairs)
+
+                            // 2. Client-side Stop Loss, Dynamic Breakeven & Take Profit Watchdog
+                            val currentOpenPairs = mutableSetOf<String>()
+                            for (pos in snapshot.openPositions) {
+                                if (!pos.isOpen || kotlin.math.abs(pos.activePos) <= 0.0) continue
+                                currentOpenPairs.add(pos.pair)
+
+                                val markPrice = pos.markPrice ?: continue
+                                val entryPrice = pos.avgPrice
+                                val originalSl = pos.stopLossTrigger
+                                val tp = pos.takeProfitTrigger
+
+                                // Dynamic Breakeven Ratchet (+1.0R)
+                                if (entryPrice > 0.0 && originalSl != null && originalSl > 0.0) {
+                                    val riskPerUnit = kotlin.math.abs(entryPrice - originalSl)
+                                    if (riskPerUnit > 0.0) {
+                                        val targetR = riskManager.settings.breakevenTriggerRMultiple
+                                        if (pos.isLong) {
+                                            val currentGain = markPrice - entryPrice
+                                            if (currentGain >= targetR * riskPerUnit) {
+                                                val feeBuffer = entryPrice * 0.001 // 0.1% round-trip fee buffer
+                                                val beStop = entryPrice + feeBuffer
+                                                val existingBe = breakevenStopLevels[pos.pair]
+                                                if (existingBe == null || beStop > existingBe) {
+                                                    breakevenStopLevels[pos.pair] = beStop
+                                                    AppLogManager.tradeLifecycle(
+                                                        event = "BREAKEVEN_RATCHET",
+                                                        tradeId = pos.id,
+                                                        symbol = pos.pair,
+                                                        mode = "LIVE",
+                                                        attributes = mapOf(
+                                                            "entry_price" to "%.4f".format(entryPrice),
+                                                            "mark_price" to "%.4f".format(markPrice),
+                                                            "gain_r" to "%.2fR".format(currentGain / riskPerUnit),
+                                                            "breakeven_stop" to "%.4f".format(beStop)
+                                                        ),
+                                                        narrative = "BREAKEVEN_RATCHET: %s reached +%.2fR gain @ %.4f. Stop loss ratcheted to breakeven: %.4f"
+                                                            .format(pos.pair, currentGain / riskPerUnit, markPrice, beStop)
+                                                    )
+                                                }
+                                            }
+                                        } else if (pos.isShort) {
+                                            val currentGain = entryPrice - markPrice
+                                            if (currentGain >= targetR * riskPerUnit) {
+                                                val feeBuffer = entryPrice * 0.001
+                                                val beStop = entryPrice - feeBuffer
+                                                val existingBe = breakevenStopLevels[pos.pair]
+                                                if (existingBe == null || beStop < existingBe) {
+                                                    breakevenStopLevels[pos.pair] = beStop
+                                                    AppLogManager.tradeLifecycle(
+                                                        event = "BREAKEVEN_RATCHET",
+                                                        tradeId = pos.id,
+                                                        symbol = pos.pair,
+                                                        mode = "LIVE",
+                                                        attributes = mapOf(
+                                                            "entry_price" to "%.4f".format(entryPrice),
+                                                            "mark_price" to "%.4f".format(markPrice),
+                                                            "gain_r" to "%.2fR".format(currentGain / riskPerUnit),
+                                                            "breakeven_stop" to "%.4f".format(beStop)
+                                                        ),
+                                                        narrative = "BREAKEVEN_RATCHET: %s reached +%.2fR gain @ %.4f. Stop loss ratcheted to breakeven: %.4f"
+                                                            .format(pos.pair, currentGain / riskPerUnit, markPrice, beStop)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val effectiveSl = if (pos.isLong) {
+                                    maxOf(originalSl ?: 0.0, breakevenStopLevels[pos.pair] ?: 0.0)
+                                } else {
+                                    val be = breakevenStopLevels[pos.pair]
+                                    if (originalSl != null && originalSl > 0.0 && be != null) minOf(originalSl, be)
+                                    else be ?: originalSl ?: 0.0
+                                }
+
+                                var shouldTriggerExit = false
+                                var exitReason = ""
+
+                                val isBreakevenActive = breakevenStopLevels.containsKey(pos.pair)
+                                val slTag = if (isBreakevenActive) "Breakeven (+1.0R secured)" else "SL"
+
+                                if (pos.isLong) {
+                                    if (effectiveSl > 0.0 && markPrice <= effectiveSl) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Client-side $slTag watchdog breach (Mark: $markPrice <= Trigger: $effectiveSl)"
+                                    } else if (tp != null && tp > 0.0 && markPrice >= tp) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Client-side TP watchdog breach (Mark: $markPrice >= TP: $tp)"
+                                    }
+                                } else if (pos.isShort) {
+                                    if (effectiveSl > 0.0 && markPrice >= effectiveSl) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Client-side $slTag watchdog breach (Mark: $markPrice >= Trigger: $effectiveSl)"
+                                    } else if (tp != null && tp > 0.0 && markPrice <= tp) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Client-side TP watchdog breach (Mark: $markPrice <= TP: $tp)"
+                                    }
+                                }
+
+                                if (shouldTriggerExit) {
+                                    AppLogManager.w("WATCHDOG", "[${pos.pair}] Triggering emergency client-side exit: $exitReason")
+                                    executionEngine.exitPosition(pos.pair, markPrice, exitReason)
+                                    breakevenStopLevels.remove(pos.pair)
+                                }
+                            }
+                            // Clean up breakeven state for closed positions
+                            breakevenStopLevels.keys.retainAll(currentOpenPairs)
                         }
                     }
                 } catch (_: Exception) {}

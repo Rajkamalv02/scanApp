@@ -55,5 +55,8 @@ data class OrderPayload(
     val stopLossPrice: Double? = null,
 
     @SerializedName("take_profit_price")
-    val takeProfitPrice: Double? = null
+    val takeProfitPrice: Double? = null,
+
+    @SerializedName("reduce_only")
+    val reduceOnly: Boolean? = null
 )

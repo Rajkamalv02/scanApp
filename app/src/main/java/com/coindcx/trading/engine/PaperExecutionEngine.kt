@@ -28,11 +28,11 @@ class PaperExecutionEngine(
     val positionManager = PaperPositionManager(apiService, db, accountManager)
     val analyticsEngine = PaperAnalyticsEngine(db, accountManager)
 
-    var onTradeClosed: ((Double) -> Unit)? = null
+    override var onTradeClosed: ((pair: String, pnl: Double) -> Unit)? = null
 
     init {
-        positionManager.onTradeClosed = { _, netPnl ->
-            onTradeClosed?.invoke(netPnl)
+        positionManager.onTradeClosed = { trade, netPnl ->
+            onTradeClosed?.invoke(trade.pair, netPnl)
         }
     }
 

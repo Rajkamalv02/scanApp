@@ -94,6 +94,7 @@ class MarketScannerEngine(
     private val apiService: CoinDCXApiService,
     val universeManager: FuturesUniverseManager = FuturesUniverseManager(apiService)
 ) {
+    private val lastProcessedEntryCandleTime = ConcurrentHashMap<String, Long>()
     /**
      * Single-strategy entry point (Backward-compatible overload).
      */
@@ -261,6 +262,17 @@ class MarketScannerEngine(
             )
 
             val elapsedMs = System.currentTimeMillis() - pairStartTime
+            val isEntry = signal.action == SignalAction.ENTER_LONG || signal.action == SignalAction.ENTER_SHORT
+            if (isEntry && activePosition == null) {
+                val signalKey = "$pair:${strategy.id}:$timeframe"
+                val lastCandleTime = lastProcessedEntryCandleTime[signalKey]
+                if (lastCandleTime != null && lastCandleTime == latestCandle.time) {
+                    AppLogManager.d("STRATEGY", "[$pair] [${strategy.id.uppercase()}] Duplicate entry signal suppressed for bar timestamp ${latestCandle.time}")
+                    return null
+                }
+                lastProcessedEntryCandleTime[signalKey] = latestCandle.time
+            }
+
             if (signal.action != SignalAction.HOLD) {
                 AppLogManager.trade("STRATEGY", "[$pair] [${strategy.id.uppercase()}] (${elapsedMs}ms) >>> SIGNAL GENERATED: ${signal.action} @ $currentPrice | SL: ${signal.stopLossPrice} | TP: ${signal.takeProfitPrice} | Conf: ${signal.confidenceScore}% | Reason: ${signal.reason}")
             } else {

@@ -19,6 +19,7 @@ sealed class ExecutionResult {
  */
 interface ExecutionEngine {
     val isPaperTrading: Boolean
+    var onTradeClosed: ((pair: String, pnl: Double) -> Unit)?
 
     suspend fun getAvailableBalanceInr(): Double
 

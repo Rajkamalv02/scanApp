@@ -21,7 +21,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.coindcx.trading.R
 import com.coindcx.trading.data.api.ApiClient
+import com.coindcx.trading.data.api.models.CreateOrderRequest
 import com.coindcx.trading.data.api.models.FuturesPosition
+import com.coindcx.trading.data.api.models.OrderPayload
 import com.coindcx.trading.data.config.TradingConfigRepository
 import com.coindcx.trading.data.db.AppDatabase
 import com.coindcx.trading.data.db.entities.OrderEntity
@@ -395,23 +397,73 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnEmergencyStop.setOnClickListener {
+            configRepo.setBotRunning(false)
             sendServiceIntent(TradingForegroundService.ACTION_STOP)
             binding.tvBotStatus.text = "KILL SWITCH ACTIVE"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_red))
-            Toast.makeText(this, "EMERGENCY STOP: Cancelling open orders...", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "EMERGENCY STOP: Flattening positions & cancelling orders...", Toast.LENGTH_LONG).show()
 
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
                     db.systemLogDao().insert(
-                        SystemLogEntity(level = "RISK", tag = "KILL_SWITCH", message = "Emergency Kill Switch Activated!")
+                        SystemLogEntity(level = "RISK", tag = "KILL_SWITCH", message = "Emergency Kill Switch Activated! Flattening positions and cancelling orders...")
                     )
-                    val ordersPayload = mapOf("page" to "1", "size" to "50", "timestamp" to System.currentTimeMillis())
-                    val ordersResp = ApiClient.apiService.getOpenOrders(ordersPayload)
-                    if (ordersResp.isSuccessful && ordersResp.body() != null) {
-                        for (order in ordersResp.body()!!) {
-                            ApiClient.apiService.cancelOrder(mapOf("id" to order.id, "timestamp" to System.currentTimeMillis()))
+
+                    val isLiveMode = binding.switchLiveMode.isChecked
+                    if (isLiveMode) {
+                        // 1. Flatten all active live positions with market close orders first
+                        val positionsPayload = mapOf(
+                            "page" to "1",
+                            "size" to "50",
+                            "margin_currency_short_name" to listOf("INR", "USDT"),
+                            "timestamp" to System.currentTimeMillis()
+                        )
+                        val posResp = ApiClient.apiService.getPositions(positionsPayload)
+                        if (posResp.isSuccessful && posResp.body() != null) {
+                            for (pos in posResp.body()!!.filter { it.isOpen && kotlin.math.abs(it.activePos) > 0.0 }) {
+                                val qtyToClose = kotlin.math.abs(pos.activePos)
+                                val closeSide = if (pos.isLong) "sell" else "buy"
+                                val lev = pos.leverage.toInt().coerceAtLeast(1)
+                                val closePayload = CreateOrderRequest(
+                                    timestamp = System.currentTimeMillis(),
+                                    order = OrderPayload(
+                                        side = closeSide,
+                                        pair = pos.pair,
+                                        orderType = "market_order",
+                                        price = null,
+                                        totalQuantity = qtyToClose,
+                                        leverage = lev,
+                                        clientOrderId = "emergency_${System.currentTimeMillis()}_${pos.pair}",
+                                        reduceOnly = true
+                                    )
+                                )
+                                ApiClient.apiService.createOrder(closePayload)
+                            }
+                        }
+
+                        // 2. Cancel all remaining open orders on the exchange
+                        val ordersPayload = mapOf("page" to "1", "size" to "50", "timestamp" to System.currentTimeMillis())
+                        val ordersResp = ApiClient.apiService.getOpenOrders(ordersPayload)
+                        if (ordersResp.isSuccessful && ordersResp.body() != null) {
+                            for (order in ordersResp.body()!!) {
+                                ApiClient.apiService.cancelOrder(mapOf("id" to order.id, "timestamp" to System.currentTimeMillis()))
+                            }
+                        }
+                    } else {
+                        // In Paper Mode: close all open trades in database
+                        val openTrades = db.tradeDao().getOpenTrades()
+                        for (trade in openTrades) {
+                            db.tradeDao().update(
+                                trade.copy(
+                                    status = "CLOSED",
+                                    exitPrice = trade.entryPrice,
+                                    exitTime = System.currentTimeMillis(),
+                                    exitReason = "EMERGENCY_STOP"
+                                )
+                            )
                         }
                     }
+
                     refreshAccountData()
                 } catch (e: Exception) {
                     db.systemLogDao().insert(
@@ -1063,14 +1115,18 @@ class MainActivity : AppCompatActivity() {
                 itemBinding.tvPosSideLeverage.setTextColor(getColor(R.color.accent_red))
             }
 
+            val currentRate = pos.settlementCurrencyAvgPrice ?: currencyConverter.getCachedUsdtInrRate()
             val pnlUsdt = PnlEngine.calculateUnrealizedPnl(pos)
-            val pnlInr = pnlUsdt * 90.0
+            val pnlInr = pnlUsdt * currentRate
             itemBinding.tvPosPnlInr.text = if (pnlInr >= 0) "+₹%.2f".format(pnlInr) else "-₹%.2f".format(-pnlInr)
             itemBinding.tvPosPnlInr.setTextColor(getColor(if (pnlInr >= 0) R.color.accent_green else R.color.accent_red))
 
             val entryText = if (pos.avgPrice < 1.0) "$%.4f".format(pos.avgPrice) else "$%.2f".format(pos.avgPrice)
             itemBinding.tvPosEntryPrice.text = "Entry: $entryText"
-            itemBinding.tvPosMargin.text = "Margin: ₹%.0f".format(pos.lockedMargin * 90.0)
+
+            val isMarginInr = pos.marginCurrencyShortName?.equals("INR", ignoreCase = true) != false
+            val marginInr = if (isMarginInr) pos.lockedMargin else (pos.lockedMargin * currentRate)
+            itemBinding.tvPosMargin.text = "Margin: ₹%.0f".format(marginInr)
 
             val slText = formatPriceUsdt(pos.stopLossTrigger)
             val tpText = formatPriceUsdt(pos.takeProfitTrigger)

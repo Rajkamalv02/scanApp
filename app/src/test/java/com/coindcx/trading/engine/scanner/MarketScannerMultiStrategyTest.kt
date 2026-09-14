@@ -296,4 +296,76 @@ class MarketScannerMultiStrategyTest {
         assertEquals(1, cache.fetchCount.get())
         assertEquals(1, cache.cacheHitCount.get())
     }
+
+    @Test
+    fun testEntrySignalThrottlingSuppressesDuplicateOnSameCandleTimestamp() = kotlinx.coroutines.test.runTest {
+        val candleList = (1..60).map { i ->
+            com.coindcx.trading.data.api.models.MarketCandle(
+                time = 1000L + (i * 60_000L),
+                open = 100.0 + i,
+                high = 102.0 + i,
+                low = 99.0 + i,
+                close = 101.0 + i,
+                volume = 1000.0
+            )
+        }
+        val dummyApi = createDummyApiService { _, _ ->
+            retrofit2.Response.success(candleList)
+        }
+        val scanner = MarketScannerEngine(dummyApi)
+
+        val testStrategy = object : com.coindcx.trading.engine.Strategy {
+            override val id = "test_strat"
+            override val name = "Test Strat"
+            override val description = "Test"
+            override val defaultTimeframe = "15m"
+            override val requiredCandleCount = 10
+            override val parametersSummary = ""
+
+            override fun evaluate(
+                candles: List<com.coindcx.trading.data.api.models.MarketCandle>,
+                activePosition: com.coindcx.trading.data.api.models.FuturesPosition?,
+                pair: String
+            ): Signal {
+                return Signal(
+                    action = SignalAction.ENTER_LONG,
+                    confidenceScore = 85.0,
+                    stopLossPrice = 90.0,
+                    takeProfitPrice = 120.0,
+                    reason = "Test Long Signal",
+                    strategyId = id,
+                    strategyName = name
+                )
+            }
+        }
+
+        val dummyExecutionEngine = object : com.coindcx.trading.engine.ExecutionEngine {
+            override val isPaperTrading = true
+            override var onTradeClosed: ((Double) -> Unit)? = null
+            override suspend fun getAvailableBalanceInr(): Double = 10000.0
+            override suspend fun getActivePosition(pair: String): com.coindcx.trading.data.api.models.FuturesPosition? = null
+            override suspend fun getAllOpenPositions(): List<com.coindcx.trading.data.api.models.FuturesPosition> = emptyList()
+            override suspend fun refreshExchangeState(): Result<com.coindcx.trading.engine.ExchangeStateSnapshot> =
+                Result.success(com.coindcx.trading.engine.ExchangeStateSnapshot(10000.0, emptyList()))
+            override suspend fun executeSignal(signal: Signal, pair: String, currentPrice: Double, marginInr: Double, leverage: Int, tradeId: String): com.coindcx.trading.engine.ExecutionResult =
+                com.coindcx.trading.engine.ExecutionResult.Success("id", "ok")
+            override suspend fun exitPosition(pair: String, currentPrice: Double, reason: String, tradeId: String?): com.coindcx.trading.engine.ExecutionResult =
+                com.coindcx.trading.engine.ExecutionResult.Success("id", "ok")
+        }
+
+        val config = com.coindcx.trading.data.config.TradingConfig(
+            timeframe = "15m",
+            isMarketWideScan = false,
+            selectedPairs = listOf("B-BTC_USDT")
+        )
+
+        // Cycle 1: First evaluation produces the actionable entry
+        val resultsCycle1 = scanner.scanMarket(config, testStrategy, dummyExecutionEngine)
+        assertEquals(1, resultsCycle1.size)
+        assertEquals(SignalAction.ENTER_LONG, resultsCycle1.first().signal.action)
+
+        // Cycle 2: Candle timestamp has NOT advanced -> duplicate is suppressed
+        val resultsCycle2 = scanner.scanMarket(config, testStrategy, dummyExecutionEngine)
+        assertEquals(0, resultsCycle2.size)
+    }
 }
