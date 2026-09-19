@@ -13,6 +13,20 @@ enum class OpportunityLifecycle {
     UNFUNDED
 }
 
+enum class QualityCategory {
+    PRIME,
+    ACCEPTABLE,
+    WATCH,
+    REJECT
+}
+
+enum class HtfAlignment {
+    ALIGNED_BULLISH,
+    ALIGNED_BEARISH,
+    NEUTRAL,
+    CONFLICTING
+}
+
 data class StrategyContribution(
     val strategyId: String,
     val strategyName: String,

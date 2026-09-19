@@ -263,7 +263,7 @@
                             android:id="@+id/tvSelectedOpportunitiesCount"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Top 0 of 5"
+                            android:text="0 Selected"
                             android:textColor="@color/accent_green"
                             android:textSize="15sp"
                             android:textStyle="bold" />
@@ -673,7 +673,7 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Top 5 Ranked Opportunities Section -->
+        <!-- Selected Trade Opportunities Section -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -690,7 +690,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="TOP 5 RANKED FUTURES"
+                    android:text="SELECTED TRADE OPPORTUNITIES"
                     android:textColor="@color/text_secondary"
                     android:textSize="12sp"
                     android:letterSpacing="0.05"
@@ -742,7 +742,7 @@
                 app:strokeWidth="1dp" />
         </LinearLayout>
 
-        <!-- Dynamic Container for the Top 5 Ranked Opportunities -->
+        <!-- Dynamic Container for Selected Opportunities -->
         <LinearLayout
             android:id="@+id/containerRankedOpportunities"
             android:layout_width="match_parent"

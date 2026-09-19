@@ -6,11 +6,8 @@ import com.coindcx.trading.engine.backtest.BacktestDataLoader
 import com.coindcx.trading.engine.backtest.ReplayEngine
 import com.coindcx.trading.engine.data.CandleSeries
 import com.coindcx.trading.engine.data.Interval
-import com.coindcx.trading.engine.scanner.MarketOpportunity
-import com.coindcx.trading.engine.scanner.OpportunityRanker
 import com.coindcx.trading.engine.scanner.SignalDedupRegistry
 import com.coindcx.trading.engine.scanner.StrategyFamily
-import com.coindcx.trading.engine.scanner.TradeQualityScorer
 import com.coindcx.trading.engine.telemetry.RejectionCode
 import com.coindcx.trading.engine.time.FixedClock
 import org.junit.Assert.*
@@ -298,126 +295,6 @@ class EdtmAndPbcStrategyTest {
         for ((k, v) in sig.strengths) {
             assertTrue("Strength '$k' ($v) must be in 0.0..1.0", v in 0.0..1.0)
         }
-    }
-
-    // =========================================================================
-    // TradeQualityScorer & OpportunityRanker Tests
-    // =========================================================================
-
-    @Test
-    fun `test TradeQualityScorer handles Target OpenEnded gracefully`() {
-        val series = buildEdtmSetup(isLong = true).subSeries(0, 50)
-        val signal = Signal(
-            symbol = "B-BTC_USDT",
-            strategyId = "edtm",
-            direction = SignalDirection.LONG,
-            barOpenTimeUtc = 1_700_000_000_000L,
-            entryRef = 50_000.0,
-            stopLoss = 49_000.0,
-            target = Target.OpenEnded(TrailSpec(atrMultiplier = 2.5, atrPeriod = 14)),
-            riskDistance = 1_000.0,
-            riskPct = 2.0,
-            regimeTag = RegimeTag.TREND_UP,
-            strengths = mapOf("trendStrength" to 0.8, "breakoutStrength" to 0.7),
-            expiryBars = 24,
-            primaryInterval = Interval.H1,
-            strategyName = "EDTM",
-            reason = "Test open-ended",
-            confidenceScore = 80.0
-        )
-
-        val scored = TradeQualityScorer.evaluateQuality(
-            candles = series.toAscendingMarketCandles(),
-            htfCandles = null,
-            signal = signal,
-            currentPrice = 50_000.0,
-            pair = "B-BTC_USDT"
-        )
-
-        assertEquals(2.0, scored.netRiskRewardRatio, 0.001)
-        assertEquals(10, scored.rrScore)
-        assertTrue("Quality score should be >= 50", scored.totalScore >= 50)
-    }
-
-    @Test
-    fun `test OpportunityRanker enforces StrategyFamily diversity cap`() {
-        val opportunities = mutableListOf<MarketOpportunity>()
-
-        // 4 trend-following opportunities (pbc)
-        for (i in 1..4) {
-            val sig = Signal(
-                symbol = "B-COIN${i}_USDT",
-                strategyId = "pbc",
-                direction = SignalDirection.LONG,
-                barOpenTimeUtc = 1_700_000_000_000L,
-                entryRef = 100.0,
-                stopLoss = 95.0,
-                target = Target.Fixed(tp1 = 110.0, plannedRR = 2.0),
-                riskDistance = 5.0,
-                riskPct = 5.0,
-                regimeTag = RegimeTag.TREND_UP,
-                strengths = mapOf("trendStrength" to (0.9 - i * 0.05)),
-                expiryBars = 16,
-                primaryInterval = Interval.M15,
-                strategyName = "PBC",
-                reason = "Trend following $i",
-                confidenceScore = 85.0 - i
-            )
-            opportunities.add(
-                MarketOpportunity(
-                    pair = "B-COIN${i}_USDT",
-                    signal = sig,
-                    currentPrice = 100.0,
-                    confidenceScore = 85.0 - i,
-                    qualityScore = 80 - i,
-                    isApproved = true,
-                    strategyId = "pbc",
-                    strategyName = "PBC"
-                )
-            )
-        }
-
-        // 1 breakout opportunity (vceb)
-        val breakSig = Signal(
-            symbol = "B-BREAK_USDT",
-            strategyId = "vceb",
-            direction = SignalDirection.LONG,
-            barOpenTimeUtc = 1_700_000_000_000L,
-            entryRef = 200.0,
-            stopLoss = 190.0,
-            target = Target.Fixed(tp1 = 220.0, plannedRR = 2.0),
-            riskDistance = 10.0,
-            riskPct = 5.0,
-            regimeTag = RegimeTag.EXPANSION,
-            strengths = mapOf("expansionStrength" to 0.75),
-            expiryBars = 16,
-            primaryInterval = Interval.M15,
-            strategyName = "VCEB",
-            reason = "Breakout test",
-            confidenceScore = 80.0
-        )
-        opportunities.add(
-            MarketOpportunity(
-                pair = "B-BREAK_USDT",
-                signal = breakSig,
-                currentPrice = 200.0,
-                confidenceScore = 80.0,
-                qualityScore = 75,
-                isApproved = true,
-                strategyId = "vceb",
-                strategyName = "VCEB"
-            )
-        )
-
-        val ranker = OpportunityRanker()
-        val ranked = ranker.rankOpportunities(opportunities)
-
-        // Verify that in the first pass selection, TREND family is capped at max 2
-        val topTrendCount = ranked.take(3).count {
-            SignalDedupRegistry.getFamilyForStrategy(it.strategyId) == StrategyFamily.TREND
-        }
-        assertTrue("Top slots should respect family cap (max 2 TREND)", topTrendCount <= 2)
-        assertTrue("Breakout opportunity must be included in top ranks", ranked.any { it.strategyId == "vceb" })
     }
 
     // =========================================================================

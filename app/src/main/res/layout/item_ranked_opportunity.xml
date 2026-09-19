@@ -73,7 +73,7 @@
                 android:paddingTop="3dp"
                 android:paddingEnd="8dp"
                 android:paddingBottom="3dp"
-                android:text="PRIME 85"
+                android:text="85.0% CONF"
                 android:textColor="@color/accent_green"
                 android:textSize="11sp"
                 android:textStyle="bold" />
@@ -120,7 +120,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="3dp"
-            android:text="Net R:R: 2.1x (fee-adj) | ADX: 28.5"
+            android:text="Net R:R: 2.1x (fee-adj) | Conf: 85.0%"
             android:textColor="@color/accent_blue"
             android:textSize="11sp"
             android:fontFamily="monospace" />

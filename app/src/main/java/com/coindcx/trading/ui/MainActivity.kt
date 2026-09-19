@@ -604,7 +604,7 @@ class MainActivity : AppCompatActivity() {
                     binding.tvAvailableBalance.text = "₹ %.2f".format(allocation.availableBalanceInr)
                     binding.tvMaxTradesFormula.text = "Max Trades: ${allocation.maxTradesAllowed}"
                     binding.tvMinMarginDisplay.text = "₹ %.0f".format(allocation.minMarginPerTradeInr)
-                    binding.tvSelectedOpportunitiesCount.text = "Top ${allocation.allocatedTradesCount} of 5"
+                    binding.tvSelectedOpportunitiesCount.text = "${allocation.allocatedTradesCount} of ${allocation.maxTradesAllowed} Funded"
                     binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
                     binding.tvRemainingBalanceDisplay.text = "Remaining Unused Balance: ₹ %.2f".format(allocation.remainingBalanceInr)
 
@@ -630,7 +630,7 @@ class MainActivity : AppCompatActivity() {
                     binding.tvMaxTradesFormula.text = "Max Trades: ${allocation.maxTradesAllowed}"
                     val riskPct = if (allocation.accountEquityInr > 0) (allocation.targetRiskPerTradeInr / allocation.accountEquityInr) * 100.0 else 1.0
                     binding.tvMinMarginDisplay.text = "%.1f%% (₹%.0f)".format(riskPct, allocation.exchangeFloorMarginInr)
-                    binding.tvSelectedOpportunitiesCount.text = "Top ${allocation.allocatedTradesCount} of 5"
+                    binding.tvSelectedOpportunitiesCount.text = "${allocation.allocatedTradesCount} of ${allocation.maxTradesAllowed} Funded"
                     binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
                     binding.tvSafetyReserveDisplay.text = "Safety Reserve: ₹ %.2f (5%%)".format(allocation.safetyReserveInr)
                     binding.tvRemainingBalanceDisplay.text = "Unused: ₹ %.2f".format(allocation.remainingBalanceInr)
@@ -668,19 +668,19 @@ class MainActivity : AppCompatActivity() {
         val usdtInrRate = 90.0
         val audits = MarketScanState.executionAuditMap.value
 
-        for (opp in opportunities.take(5)) {
+        for (opp in opportunities) {
             val itemBinding = ItemRankedOpportunityBinding.inflate(inflater, container, false)
 
             itemBinding.tvRankBadge.text = "#${opp.rank}"
             itemBinding.tvAssetSymbol.text = opp.assetSymbol + " Futures"
 
-            // Quality Badge: Score & Category
-            itemBinding.tvQualityBadge.text = "${opp.qualityCategory.name} ${opp.qualityScore}"
-            val qualityColor = when (opp.qualityCategory) {
-                com.coindcx.trading.engine.scanner.QualityCategory.PRIME -> getColor(R.color.accent_green)
-                com.coindcx.trading.engine.scanner.QualityCategory.ACCEPTABLE -> getColor(R.color.accent_blue)
-                com.coindcx.trading.engine.scanner.QualityCategory.WATCH -> getColor(R.color.accent_amber)
-                com.coindcx.trading.engine.scanner.QualityCategory.REJECT -> getColor(R.color.accent_red)
+            // Confidence Badge
+            itemBinding.tvQualityBadge.text = "%.1f%% CONF".format(opp.confidenceScore)
+            val qualityColor = when {
+                opp.confidenceScore >= 80.0 -> getColor(R.color.accent_green)
+                opp.confidenceScore >= 65.0 -> getColor(R.color.accent_blue)
+                opp.confidenceScore >= 50.0 -> getColor(R.color.accent_amber)
+                else -> getColor(R.color.accent_red)
             }
             itemBinding.tvQualityBadge.setTextColor(qualityColor)
 
@@ -747,7 +747,7 @@ class MainActivity : AppCompatActivity() {
                     OpportunityLifecycle.UNFUNDED -> {
                         itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_unfunded)
                         itemBinding.tvAllocationStatus.setTextColor(getColor(R.color.accent_red))
-                        itemBinding.tvAllocationStatus.text = "RANKED #${opp.rank} - UNFUNDED (Insufficient Balance)"
+                        itemBinding.tvAllocationStatus.text = "#${opp.rank} - UNFUNDED (${opp.statusMessage.ifBlank { "Deferred" }})"
                     }
                     OpportunityLifecycle.ACTIVE_POSITION -> {
                         itemBinding.tvAllocationStatus.setBackgroundResource(R.drawable.badge_funded)
@@ -765,7 +765,7 @@ class MainActivity : AppCompatActivity() {
             itemBinding.tvOpportunityReason.text = "Setup: ${opp.signal.reason}"
             val priceInr = opp.currentPrice * usdtInrRate
             itemBinding.tvPriceInfo.text = "Price: $%.2f (~₹%.2f)".format(opp.currentPrice, priceInr)
-            itemBinding.tvMetricsInfo.text = "Net R:R: %.1fx (fee-adj) | ADX: %.1f".format(opp.netRiskRewardRatio, opp.adxValue)
+            itemBinding.tvMetricsInfo.text = "Net R:R: %.1fx (fee-adj) | Conf: %.1f%%".format(opp.netRiskRewardRatio, opp.confidenceScore)
 
             container.addView(itemBinding.root)
         }
@@ -1086,7 +1086,7 @@ class MainActivity : AppCompatActivity() {
                     binding.tvAvailableBalance.text = "₹ %.2f".format(availableInr)
                     binding.tvMaxTradesFormula.text = "Max Trades: ${allocation.maxTradesAllowed}"
                     binding.tvMinMarginDisplay.text = "%.1f%% (₹%.0f)".format(config.riskPerTradePercent, allocation.exchangeFloorMarginInr)
-                    binding.tvSelectedOpportunitiesCount.text = "Top ${allocation.allocatedTradesCount} of 5"
+                    binding.tvSelectedOpportunitiesCount.text = "${allocation.allocatedTradesCount} of ${allocation.maxTradesAllowed} Funded"
                     binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
                     binding.tvSafetyReserveDisplay.text = "Safety Reserve: ₹ %.2f (5%%)".format(allocation.safetyReserveInr)
                     binding.tvRemainingBalanceDisplay.text = "Unused: ₹ %.2f".format(allocation.remainingBalanceInr)

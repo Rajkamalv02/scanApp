@@ -18,7 +18,6 @@ import com.coindcx.trading.engine.scanner.MarketOpportunity
 import com.coindcx.trading.engine.scanner.MarketScanState
 import com.coindcx.trading.engine.scanner.MarketScannerEngine
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
-import com.coindcx.trading.engine.scanner.OpportunityRanker
 import com.coindcx.trading.engine.scanner.TradeCandidateSelector
 import com.coindcx.trading.ui.MainActivity
 import com.coindcx.trading.util.AppLogManager
@@ -38,7 +37,6 @@ class TradingForegroundService : Service() {
     private lateinit var paperEngine: PaperExecutionEngine
     private lateinit var liveEngine: LiveExecutionEngine
     private lateinit var scannerEngine: MarketScannerEngine
-    private lateinit var ranker: OpportunityRanker
     private lateinit var tradeCandidateSelector: TradeCandidateSelector
     private lateinit var allocator: AllocationEngine
     private lateinit var executionEngine: ExecutionEngine
@@ -79,7 +77,6 @@ class TradingForegroundService : Service() {
         paperEngine = PaperExecutionEngine(applicationContext, db, currencyConverter, ApiClient.apiService)
         scannerEngine = MarketScannerEngine(ApiClient.apiService)
         liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter, scannerEngine.universeManager)
-        ranker = OpportunityRanker()
         tradeCandidateSelector = TradeCandidateSelector()
         allocator = AllocationEngine()
         riskManager = RiskManager(context = applicationContext)
@@ -396,8 +393,8 @@ class TradingForegroundService : Service() {
                 safetyReservePercent = config.safetyReservePercent,
                 maxSingleExposurePercent = config.maxSingleExposurePercent
             )
-            val allDisplayOpportunities = allocation.allRankedOpportunities + selection.deferredTrades
-            MarketScanState.update(allDisplayOpportunities, allocation, cycle)
+            val selectedOpportunities = allocation.allRankedOpportunities
+            MarketScanState.update(selectedOpportunities, allocation, cycle)
 
             // 5. Sequential Just-In-Time Pre-Trade Validation with In-Memory Counters
             val inMemoryOpenPositions = executionEngine.getAllOpenPositions().toMutableList()
@@ -422,14 +419,14 @@ class TradingForegroundService : Service() {
 
                 // Signal Action Check: Must be actionable entry
                 if (!opp.isBuy && !opp.isSell) {
-                    AppLogManager.d("EVAL", "[${opp.pair}] Watching: ${opp.signal.reason} [QualityScore: ${opp.qualityScore}]")
+                    AppLogManager.d("EVAL", "[${opp.pair}] Watching: ${opp.signal.reason} [Conf: ${"%.1f".format(opp.confidenceScore)}%]")
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
                             pair = opp.pair,
                             action = opp.actionLabel,
                             status = com.coindcx.trading.engine.scanner.AuditStatus.WATCHING,
-                            reason = "Watching — ${opp.signal.reason} [Score: ${opp.qualityScore}]"
+                            reason = "Watching — ${opp.signal.reason} [Conf: ${"%.1f".format(opp.confidenceScore)}%]"
                         )
                     )
                     continue
@@ -442,8 +439,7 @@ class TradingForegroundService : Service() {
                     "strategy" to activeStratName,
                     "action" to opp.actionLabel,
                     "price" to "%.4f".format(opp.currentPrice),
-                    "quality_score" to opp.qualityScore,
-                    "quality_category" to opp.qualityCategory,
+                    "confidence_score" to opp.confidenceScore,
                     "net_rr" to "%.2f".format(opp.netRiskRewardRatio),
                     "htf_align" to opp.htfAlignment,
                     "selection_reason" to opp.selectionReason
@@ -451,7 +447,7 @@ class TradingForegroundService : Service() {
                 if (opp.signal.fastEma > 0.0) evalAttributes["fast_ema"] = "%.4f".format(opp.signal.fastEma)
                 if (opp.signal.slowEma > 0.0) evalAttributes["slow_ema"] = "%.4f".format(opp.signal.slowEma)
                 if (opp.contributingStrategies.isNotEmpty()) {
-                    evalAttributes["contributing_strategies"] = opp.contributingStrategies.joinToString(", ") { "${it.strategyName} (${it.score})" }
+                    evalAttributes["contributing_strategies"] = opp.contributingStrategies.joinToString(", ") { "${it.strategyName} (${"%.1f".format(it.confidence)}%)" }
                 }
 
                 AppLogManager.tradeLifecycle(
@@ -460,8 +456,8 @@ class TradingForegroundService : Service() {
                     symbol = opp.pair,
                     mode = modeLabel,
                     attributes = evalAttributes,
-                    narrative = "Evaluating %s candidate: Rank #%d [%s] %s %s @ %.4f (Quality: %d/100 %s, Net R:R: %.2f, HTF: %s)"
-                        .format(modeLabel, opp.rank, activeStratName, opp.pair, opp.actionLabel, opp.currentPrice, opp.qualityScore, opp.qualityCategory, opp.netRiskRewardRatio, opp.htfAlignment)
+                    narrative = "Evaluating %s candidate: Rank #%d [%s] %s %s @ %.4f (Confidence: %.1f%%, Net R:R: %.2f, HTF: %s)"
+                        .format(modeLabel, opp.rank, activeStratName, opp.pair, opp.actionLabel, opp.currentPrice, opp.confidenceScore, opp.netRiskRewardRatio, opp.htfAlignment)
                 )
 
                 // Circuit Breaker / Cooldown Gate
@@ -491,7 +487,7 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
-                // Gate 1: Quality Score Rubric Gate (Must be approved by TradeQualityScorer)
+                // Gate 1: Strategy Consensus Validation Gate
                 if (!opp.isApproved) {
                     AppLogManager.tradeLifecycle(
                         event = "RISK_FILTER_REJECTED",
@@ -499,13 +495,12 @@ class TradingForegroundService : Service() {
                         symbol = opp.pair,
                         mode = modeLabel,
                         attributes = mapOf(
-                            "gate" to "GATE_1_QUALITY",
-                            "quality_score" to opp.qualityScore,
-                            "quality_category" to opp.qualityCategory,
-                            "reason" to (opp.rejectionReason ?: "Insufficient confluence")
+                            "gate" to "GATE_1_CONSENSUS",
+                            "confidence_score" to opp.confidenceScore,
+                            "reason" to (opp.rejectionReason ?: "Strategy consensus not met")
                         ),
-                        narrative = "Gate 1 (Quality Rubric) REJECTED: Score %d/100 (%s). Rejection: %s"
-                            .format(opp.qualityScore, opp.qualityCategory, opp.rejectionReason ?: "Insufficient confluence")
+                        narrative = "Gate 1 (Strategy Consensus) REJECTED: Confidence %.1f%%. Rejection: %s"
+                            .format(opp.confidenceScore, opp.rejectionReason ?: "Strategy consensus not met")
                     )
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
@@ -513,7 +508,7 @@ class TradingForegroundService : Service() {
                             pair = opp.pair,
                             action = opp.actionLabel,
                             status = com.coindcx.trading.engine.scanner.AuditStatus.REJECTED_LOW_QUALITY,
-                            reason = "Rejected — Quality Score ${opp.qualityScore}/100 (${opp.qualityCategory}). ${opp.rejectionReason ?: "Insufficient confluence"}"
+                            reason = "Rejected — Strategy consensus not met: ${opp.rejectionReason ?: "Insufficient confidence"}"
                         )
                     )
                     continue
@@ -601,6 +596,7 @@ class TradingForegroundService : Service() {
                         ),
                         narrative = "Gate 3 (Risk Sizing & Allocation) REJECTED: %s".format(rejectionReason)
                     )
+                    AppLogManager.w("GATE_3_SIZING", "[${opp.pair}] Strategy consensus ${opp.actionLabel} -> rejected: $rejectionReason")
                     audits.add(
                         com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                             rank = opp.rank,
@@ -730,11 +726,11 @@ class TradingForegroundService : Service() {
                     "entry_price" to "%.4f".format(opp.currentPrice),
                     "margin_inr" to "₹%.2f".format(marginToAllocate),
                     "leverage" to "${actualLeverage}x",
-                    "quality_score" to opp.qualityScore,
+                    "confidence_score" to opp.confidenceScore,
                     "selection_reason" to opp.selectionReason
                 )
                 if (opp.contributingStrategies.isNotEmpty()) {
-                    approvedAttributes["contributing_strategies"] = opp.contributingStrategies.joinToString(", ") { "${it.strategyName} (${it.direction}, score: ${it.score})" }
+                    approvedAttributes["contributing_strategies"] = opp.contributingStrategies.joinToString(", ") { "${it.strategyName} (${it.direction}, conf: ${"%.1f".format(it.confidence)}%)" }
                 }
 
                 AppLogManager.tradeLifecycle(
@@ -746,6 +742,7 @@ class TradingForegroundService : Service() {
                     narrative = "[%s] %s signal on %s -> risk checks passed -> position size calculated -> leverage %dx -> entry approved"
                         .format(approvedStratName, opp.actionLabel, opp.pair, actualLeverage)
                 )
+                AppLogManager.trade("TRADE_SELECTED", "[${opp.pair}] ${opp.actionLabel} -> selected for execution | Conf: ${"%.1f".format(opp.confidenceScore)}% | Net R:R: ${"%.2f".format(opp.netRiskRewardRatio)} | Margin: ₹${"%.2f".format(marginToAllocate)}")
 
                 try {
                     val auditJson = org.json.JSONObject().apply {
@@ -845,16 +842,17 @@ class TradingForegroundService : Service() {
                             )
                         )
 
+                        AppLogManager.trade("ORDER_SUBMITTED", "[${opp.pair}] ${opp.actionLabel} -> order placed on exchange | Margin: ₹${"%.2f".format(marginToAllocate)} | Leverage: ${actualLeverage}x")
                         audits.add(
                             com.coindcx.trading.engine.scanner.TradeExecutionAudit(
                                 rank = opp.rank,
                                 pair = opp.pair,
                                 action = opp.actionLabel,
                                 status = com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED,
-                                reason = "Executed — Placed ${opp.actionLabel} [Score: ${opp.qualityScore}] with ₹%.0f risk margin @ %dx".format(marginToAllocate, actualLeverage)
+                                reason = "Executed — Placed ${opp.actionLabel} [Conf: ${"%.1f".format(opp.confidenceScore)}%] with ₹%.0f risk margin @ %dx".format(marginToAllocate, actualLeverage)
                             )
                         )
-                        AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Score: ${opp.qualityScore}) executed in ${orderDurationMs}ms: ${execResult.message}")
+                        AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Conf: ${"%.1f".format(opp.confidenceScore)}%) executed in ${orderDurationMs}ms: ${execResult.message}")
 
                         // Immediate Post-Order State Sync to reflect deducted balance and added position!
                         val syncResult = executionEngine.refreshExchangeState()
