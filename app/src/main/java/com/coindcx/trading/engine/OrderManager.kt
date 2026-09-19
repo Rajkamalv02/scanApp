@@ -224,7 +224,7 @@ class OrderManager(
                 totalQuantity = quantity,
                 leverage = leverage,
                 clientOrderId = clientOrderId,
-                reduceOnly = if (reduceOnly) true else null
+                reduceOnly = null // CoinDCX API explicitly rejects reduceOnly on market orders ("Reduce Only Order is only applicable for Limit Order")
             )
         )
 

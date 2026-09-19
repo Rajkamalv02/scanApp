@@ -299,7 +299,7 @@ class FuturesUniverseManager(
                 val minQty = futuresSpec?.minQuantity ?: item["min_quantity"]?.toString()?.toDoubleOrNull() ?: 0.001
                 val precision = futuresSpec?.targetCurrencyPrecision ?: item["target_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 3
                 val minNotional = kotlin.math.max(6.0, futuresSpec?.minNotionalUsdt ?: item["min_notional"]?.toString()?.toDoubleOrNull() ?: 5.0)
-                val basePrecision = futuresSpec?.baseCurrencyPrecision ?: item["base_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 4
+                val basePrecision = item["base_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: futuresSpec?.baseCurrencyPrecision ?: 4
                 specsMap[pair] = InstrumentSpec(pair, step, minQty, precision, minNotional, basePrecision)
             }
             if (specsMap.isNotEmpty()) {

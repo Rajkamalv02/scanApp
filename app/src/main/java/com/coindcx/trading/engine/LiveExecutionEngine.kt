@@ -212,14 +212,14 @@ class LiveExecutionEngine(
                 val lev = activePos.leverage.toInt().coerceAtLeast(1)
                 val exitClientOrderId = tradeId ?: "exit_${System.currentTimeMillis()}_$pair"
 
-                // 2. Submit market closing order with reduce_only = true
+                // 2. Submit market closing order (reduceOnly is omitted/false for market orders on CoinDCX)
                 val closingOrderResult = orderManager.placeMarketOrder(
                     pair = pair,
                     side = closeSide,
                     quantity = qtyToClose,
                     leverage = lev,
                     tradeId = exitClientOrderId,
-                    reduceOnly = true
+                    reduceOnly = false
                 )
 
                 if (closingOrderResult is OrderResult.Failed) {

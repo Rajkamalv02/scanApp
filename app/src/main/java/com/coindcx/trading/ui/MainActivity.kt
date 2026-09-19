@@ -434,7 +434,7 @@ class MainActivity : AppCompatActivity() {
                                         totalQuantity = qtyToClose,
                                         leverage = lev,
                                         clientOrderId = "emergency_${System.currentTimeMillis()}_${pos.pair}",
-                                        reduceOnly = true
+                                        reduceOnly = null
                                     )
                                 )
                                 ApiClient.apiService.createOrder(closePayload)

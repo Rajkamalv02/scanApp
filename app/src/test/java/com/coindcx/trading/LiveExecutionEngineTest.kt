@@ -149,7 +149,7 @@ class LiveExecutionEngineTest {
         assertEquals("sell", submitted.side) // Long position closes with sell
         assertEquals("market_order", submitted.orderType)
         assertEquals(2.0, submitted.totalQuantity, 0.001)
-        assertEquals(true, submitted.reduceOnly)
+        assertNull(submitted.reduceOnly)
 
         // 2. Assert realized PnL computed and notified
         // (110.0 - 100.0) * 2.0 = $20.0 USDT * 90.0 rate = ₹1800.0 INR
@@ -187,7 +187,7 @@ class LiveExecutionEngineTest {
         assertEquals("buy", submitted.side) // Short position closes with buy
         assertEquals("market_order", submitted.orderType)
         assertEquals(1.5, submitted.totalQuantity, 0.001)
-        assertEquals(true, submitted.reduceOnly)
+        assertNull(submitted.reduceOnly)
 
         // 2. Assert realized PnL computed and notified
         // (200.0 - 190.0) * 1.5 = $15.0 USDT * 90.0 rate = ₹1350.0 INR
