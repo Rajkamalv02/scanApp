@@ -40,6 +40,8 @@ class SignalDedupRegistry(
     private val recentSignalsBySymbol = ConcurrentHashMap<String, MutableList<EmittedSignalRecord>>()
 
     companion object {
+        val default = SignalDedupRegistry()
+
         fun getFamilyForStrategy(strategyId: String): StrategyFamily = when (strategyId.lowercase()) {
             "pbc", "s1", "edtm", "s10", "ema_crossover" -> StrategyFamily.TREND
             "vceb", "s2", "sorm", "s4", "irc", "s8" -> StrategyFamily.BREAKOUT

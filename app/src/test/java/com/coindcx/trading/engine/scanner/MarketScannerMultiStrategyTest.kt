@@ -11,6 +11,11 @@ class MarketScannerMultiStrategyTest {
 
     private val ranker = OpportunityRanker()
 
+    @org.junit.Before
+    fun setUp() {
+        SignalDedupRegistry.default.clear()
+    }
+
     private fun createOpportunity(
         pair: String,
         action: SignalAction,
@@ -253,6 +258,91 @@ class MarketScannerMultiStrategyTest {
         // Higher quality score candidate wins
         assertEquals(SignalAction.ENTER_SHORT, resolved.first().signal.action)
         assertEquals("confluence", resolved.first().strategyId)
+    }
+
+    @Test
+    fun testCombineAndDeduplicateEnforcesMutualExclusionS2vsS3() {
+        val dummyApi = createDummyApiService()
+        val scanner = MarketScannerEngine(dummyApi)
+
+        val oppVceb = MarketOpportunity(
+            pair = "B-SOL_USDT",
+            signal = Signal(action = SignalAction.ENTER_LONG, confidenceScore = 85.0, strategyId = "vceb"),
+            currentPrice = 140.0,
+            confidenceScore = 85.0,
+            qualityScore = 82,
+            strategyId = "vceb"
+        )
+
+        val oppLsr = MarketOpportunity(
+            pair = "B-SOL_USDT",
+            signal = Signal(action = SignalAction.ENTER_SHORT, confidenceScore = 82.0, strategyId = "lsr"),
+            currentPrice = 140.0,
+            confidenceScore = 82.0,
+            qualityScore = 80,
+            strategyId = "lsr"
+        )
+
+        // Per §11.2: If both S2 and S3 fire on the same bar, take NEITHER (market is ambiguous)
+        val resolved = scanner.combineAndDeduplicate(listOf(oppVceb, oppLsr))
+        assertTrue("Both S2 and S3 must be discarded when co-occurring on the same bar", resolved.isEmpty())
+    }
+
+    @Test
+    fun testCombineAndDeduplicatePrefersS4OverS2() {
+        val dummyApi = createDummyApiService()
+        val scanner = MarketScannerEngine(dummyApi)
+
+        val oppVceb = MarketOpportunity(
+            pair = "B-AVAX_USDT",
+            signal = Signal(action = SignalAction.ENTER_LONG, confidenceScore = 80.0, strategyId = "vceb"),
+            currentPrice = 25.0,
+            confidenceScore = 80.0,
+            qualityScore = 80,
+            strategyId = "vceb"
+        )
+
+        val oppSorm = MarketOpportunity(
+            pair = "B-AVAX_USDT",
+            signal = Signal(action = SignalAction.ENTER_LONG, confidenceScore = 85.0, strategyId = "sorm"),
+            currentPrice = 25.0,
+            confidenceScore = 85.0,
+            qualityScore = 78, // Slightly lower quality, but SORM is preferred per §11.2 session context
+            strategyId = "sorm"
+        )
+
+        val resolved = scanner.combineAndDeduplicate(listOf(oppVceb, oppSorm))
+        assertEquals(1, resolved.size)
+        assertEquals("sorm", resolved.first().strategyId)
+    }
+
+    @Test
+    fun testCombineAndDeduplicateEnforcesMutualExclusionS5vsS6() {
+        val dummyApi = createDummyApiService()
+        val scanner = MarketScannerEngine(dummyApi)
+
+        val oppXrs = MarketOpportunity(
+            pair = "B-NEAR_USDT",
+            signal = Signal(action = SignalAction.ENTER_LONG, confidenceScore = 88.0, strategyId = "xrs"),
+            currentPrice = 5.0,
+            confidenceScore = 88.0,
+            qualityScore = 85,
+            strategyId = "xrs"
+        )
+
+        val oppFpx = MarketOpportunity(
+            pair = "B-NEAR_USDT",
+            signal = Signal(action = SignalAction.ENTER_SHORT, confidenceScore = 82.0, strategyId = "fpx"),
+            currentPrice = 5.0,
+            confidenceScore = 82.0,
+            qualityScore = 88,
+            strategyId = "fpx"
+        )
+
+        // Per §11.2: Directional conflict between S5 (momentum long) and S6 (counter-trend fade). S6 must be dropped.
+        val resolved = scanner.combineAndDeduplicate(listOf(oppXrs, oppFpx))
+        assertEquals(1, resolved.size)
+        assertEquals("xrs", resolved.first().strategyId)
     }
 
     @Test

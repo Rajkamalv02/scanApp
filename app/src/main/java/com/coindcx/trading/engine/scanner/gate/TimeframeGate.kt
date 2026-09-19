@@ -26,13 +26,14 @@ object TimeframeGate {
         series: CandleSeries,
         atr14: Double,
         customMinAtrPct: Double? = null,
-        customMaxAtrPct: Double? = null
+        customMaxAtrPct: Double? = null,
+        minHistoryBars: Int = MIN_HISTORY_BARS
     ): GateResult {
-        // G6: Candle history >= 300 bars
-        if (series.size < MIN_HISTORY_BARS) {
+        // G6: Candle history >= minHistoryBars
+        if (series.size < minHistoryBars) {
             return GateResult.reject(
                 RejectionCode.GATE_G6_INSUFFICIENT_HISTORY,
-                "G6: History ${series.size} bars < $MIN_HISTORY_BARS required"
+                "G6: History ${series.size} bars < $minHistoryBars required"
             )
         }
 

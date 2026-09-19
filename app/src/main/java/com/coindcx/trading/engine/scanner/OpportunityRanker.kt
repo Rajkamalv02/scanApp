@@ -51,23 +51,41 @@ class OpportunityRanker {
         val ranked = selected.mapIndexed { index, opp ->
             val rankNumber = index + 1
             val stratLabel = opp.strategyId.ifBlank { opp.signal.strategyId }.uppercase()
+            val derivedReason = if (opp.selectionReason.isNotBlank()) {
+                opp.selectionReason
+            } else if (opp.isEntry) {
+                "Rank #$rankNumber: Actionable ${opp.actionLabel} entry qualified by ${opp.strategyName.ifBlank { stratLabel }} (TQS: ${opp.qualityScore}/100, Net R:R: ${"%.2f".format(opp.netRiskRewardRatio)}, MAS: ${"%.1f".format(opp.marketActivityScore)})"
+            } else {
+                "Rank #$rankNumber: Market watch snapshot (MAS: ${"%.1f".format(opp.marketActivityScore)}, Quality: ${opp.qualityScore}/100)"
+            }
+
             opp.copy(
                 rank = rankNumber,
                 lifecycleState = OpportunityLifecycle.RANKED,
+                selectionReason = derivedReason,
                 statusMessage = "Rank #$rankNumber [$stratLabel]: ${opp.actionLabel} [${opp.qualityCategory}] (TQS: ${opp.qualityScore}/100, MAS: ${"%.0f".format(opp.marketActivityScore)})"
             )
         }
 
-        // Structured log of the final ranked Top 5
+        // Structured log of the final ranked Top 5 with comprehensive strategy attribution (§6)
         if (ranked.isNotEmpty()) {
             val summary = ranked.joinToString("\n") { opp ->
                 val strat = (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase()
-                "  #%d [%-12s] %-14s | %-5s | TQS: %2d/100 (%s) | MAS: %4.1f | Conf: %4.1f%% | Net R:R: %.2f".format(
+                val header = "  #%d [%-12s] %-14s | %-5s | Score: %2d/100 (%s) | MAS: %4.1f | Conf: %4.1f%% | Net R:R: %.2f".format(
                     opp.rank, strat, opp.pair, opp.actionLabel, opp.qualityScore, opp.qualityCategory, opp.marketActivityScore, opp.confidenceScore, opp.netRiskRewardRatio
                 )
+                val contributions = if (opp.contributingStrategies.isNotEmpty()) {
+                    opp.contributingStrategies.joinToString("\n") { c ->
+                        "     -> Strategy: ${c.strategyName} (${c.strategyId.uppercase()}) | Direction: ${c.action} | Score: ${c.qualityScore}/100 | Conf: ${"%.1f".format(c.confidenceScore)}% | Reason: ${c.reason}"
+                    }
+                } else {
+                    "     -> Strategy: ${opp.strategyName.ifBlank { strat }} | Direction: ${opp.actionLabel} | Reason: ${opp.signal.reason}"
+                }
+                val reasonLine = "     Selection: ${opp.selectionReason}"
+                "$header\n$contributions\n$reasonLine"
             }
             AppLogManager.scanner(
-                "================ RANKED TOP 5 (ALL STRATEGIES) ================\n$summary\n================================================================"
+                "================ RANKED TOP 5 (STRATEGY ATTRIBUTION) ================\n$summary\n======================================================================"
             )
         }
 

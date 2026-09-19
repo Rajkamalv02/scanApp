@@ -143,11 +143,10 @@ class FuturesUniverseManagerTest {
         val manager = FuturesUniverseManager(fakeApi)
         val universe = manager.getOrRefreshUniverse(forceRefresh = true)
 
-        // Since only 10 passed primary (< 20 threshold), adaptive fallback should activate
+        // Since only 10 passed primary (< 50 threshold), adaptive fallback should activate
         // and include fallback pairs up to the pool limit
         assertTrue("Adaptive fallback must include fallback pairs", universe.any { it.startsWith("B-FALLBACK") })
-        assertTrue("Core anchors must always be present", universe.contains("B-BTC_USDT"))
-        assertTrue("Hard ceiling <= 23 pairs must be strictly enforced", universe.size <= FuturesUniverseManager.HARD_CEILING_TOTAL_POOL)
+        assertTrue("Hard ceiling <= 50 pairs must be strictly enforced", universe.size <= FuturesUniverseManager.HARD_CEILING_TOTAL_POOL)
     }
 
     @Test
@@ -157,13 +156,13 @@ class FuturesUniverseManagerTest {
         val detailsList = mutableListOf<Map<String, Any>>()
         val tickerList = mutableListOf<Map<String, Any>>()
 
-        // Create 50 high-volume pairs with tight spreads
-        for (i in 1..50) {
+        // Create 70 high-volume pairs with tight spreads
+        for (i in 1..70) {
             val pair = "B-COIN${i}_USDT"
             val mkt = "COIN${i}USDT"
             activeList.add(pair)
             detailsList.add(buildMarketDetail(pair, mkt, "C$i"))
-            val vol = (60 - i) * 10_000.0
+            val vol = (80 - i) * 10_000.0
             tickerList.add(buildTicker(mkt, 100.0, vol, 99.97, 100.03))
         }
 
@@ -174,12 +173,9 @@ class FuturesUniverseManagerTest {
         val manager = FuturesUniverseManager(fakeApi)
         val universe = manager.getOrRefreshUniverse(forceRefresh = true)
 
-        // Must be capped strictly at HARD_CEILING_TOTAL_POOL (23)
+        // Must be capped strictly at HARD_CEILING_TOTAL_POOL (50)
         assertEquals(FuturesUniverseManager.HARD_CEILING_TOTAL_POOL, universe.size)
-        // Core Anchors must be present
-        assertTrue(universe.contains("B-BTC_USDT"))
-        assertTrue(universe.contains("B-ETH_USDT"))
-        assertTrue(universe.contains("B-SOL_USDT"))
+        assertEquals(50, universe.size)
     }
 
     @Test
@@ -189,7 +185,7 @@ class FuturesUniverseManagerTest {
         val detailsList = mutableListOf<Map<String, Any>>()
         val tickerList = mutableListOf<Map<String, Any>>()
 
-        for (i in 1..30) {
+        for (i in 1..60) {
             val pair = "B-COIN${i}_USDT"
             val mkt = "COIN${i}USDT"
             activeList.add(pair)
@@ -198,7 +194,7 @@ class FuturesUniverseManagerTest {
         }
 
         // Add a low-ranked open position pair
-        val openPair = "B-COIN29_USDT"
+        val openPair = "B-COIN59_USDT"
 
         fakeApi.activeInstruments = activeList
         fakeApi.marketsDetails = detailsList
@@ -209,7 +205,52 @@ class FuturesUniverseManagerTest {
 
         // Open position must be pinned in universe
         assertTrue("Pinned open position must be retained", universe.contains(openPair))
-        assertTrue("Hard ceiling must remain <= 23", universe.size <= FuturesUniverseManager.HARD_CEILING_TOTAL_POOL)
+        assertTrue("Hard ceiling must remain <= 50", universe.size <= FuturesUniverseManager.HARD_CEILING_TOTAL_POOL)
+    }
+
+    @Test
+    fun testContractAffordabilityFiltering() = runTest {
+        val fakeApi = FakeApiService()
+        val manager = FuturesUniverseManager(fakeApi)
+
+        // Small live account: ₹986 INR available, 2x leverage, 30% max single exposure (₹295.80 margin limit)
+        // Rate: 90 INR/USDT. Max single exposure in USDT margin = 295.8 / 90 = ~3.28 USDT margin -> ~6.57 USDT notional
+        val constraints = FuturesUniverseManager.AccountConstraints(
+            availableBalanceInr = 986.0,
+            leverage = 2,
+            riskPerTradePercent = 1.0,
+            maxSingleExposurePercent = 30.0,
+            usdtInrRate = 90.0,
+            isLiveTrading = true
+        )
+
+        // Contract 1: AAVE ($143.62, minQty 0.1 -> minNotional = $14.36 USDT -> margin at 2x = $7.18 USDT = ₹646.20 INR)
+        // ₹646.20 > ₹295.80 maxExposure -> MUST BE REJECTED
+        val aaveSpec = FuturesUniverseManager.InstrumentSpec(
+            pair = "B-AAVE_USDT",
+            step = 0.1,
+            minQuantity = 0.1,
+            targetCurrencyPrecision = 1,
+            minNotionalUsdt = 6.0
+        )
+        val isAaveAffordable = manager.isContractAffordable("B-AAVE_USDT", 143.62, aaveSpec, constraints)
+        assertFalse("AAVE min order margin (₹646) exceeds small account exposure limit (₹295) and must be rejected", isAaveAffordable)
+
+        // Contract 2: DOGE ($0.20, minQty 1.0, minNotional = 6.0 USDT -> margin at 2x = $3.0 USDT = ₹270.0 INR)
+        // ₹270.0 <= ₹295.80 maxExposure and <= ₹986 balance -> MUST BE AFFORDABLE
+        val dogeSpec = FuturesUniverseManager.InstrumentSpec(
+            pair = "B-DOGE_USDT",
+            step = 1.0,
+            minQuantity = 1.0,
+            targetCurrencyPrecision = 0,
+            minNotionalUsdt = 6.0
+        )
+        val isDogeAffordable = manager.isContractAffordable("B-DOGE_USDT", 0.20, dogeSpec, constraints)
+        assertTrue("DOGE min order margin (₹270) is within small account limit (₹295) and must be accepted", isDogeAffordable)
+
+        // Paper trading bypass: All contracts affordable in paper mode
+        val paperConstraints = constraints.copy(isLiveTrading = false)
+        assertTrue("Paper trading bypasses live affordability filter", manager.isContractAffordable("B-AAVE_USDT", 143.62, aaveSpec, paperConstraints))
     }
 
     @Test

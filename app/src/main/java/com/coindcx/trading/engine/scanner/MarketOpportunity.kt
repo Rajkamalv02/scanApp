@@ -13,6 +13,25 @@ enum class OpportunityLifecycle {
     UNFUNDED
 }
 
+data class StrategyContribution(
+    val strategyId: String,
+    val strategyName: String,
+    val action: SignalAction,
+    val qualityScore: Int,
+    val confidenceScore: Double,
+    val netRiskRewardRatio: Double = 0.0,
+    val reason: String = ""
+) {
+    val direction: String get() = when (action) {
+        SignalAction.ENTER_LONG -> "LONG"
+        SignalAction.ENTER_SHORT -> "SHORT"
+        SignalAction.EXIT -> "EXIT"
+        SignalAction.HOLD -> "HOLD"
+    }
+    val score: Int get() = qualityScore
+    val confidence: Double get() = confidenceScore
+}
+
 data class MarketOpportunity(
     val pair: String,
     val signal: Signal,
@@ -32,7 +51,9 @@ data class MarketOpportunity(
     val htfAlignment: HtfAlignment = HtfAlignment.NEUTRAL,
     val strategyId: String = "",
     val strategyName: String = "",
-    val marketActivityScore: Double = 0.0
+    val marketActivityScore: Double = 0.0,
+    val contributingStrategies: List<StrategyContribution> = emptyList(),
+    val selectionReason: String = ""
 ) {
     val isBuy: Boolean get() = signal.action == SignalAction.ENTER_LONG
     val isSell: Boolean get() = signal.action == SignalAction.ENTER_SHORT

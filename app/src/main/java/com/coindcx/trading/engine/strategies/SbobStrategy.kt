@@ -46,9 +46,35 @@ class SbobStrategy(
             return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
         }
 
+        val currClose = series.close(0)
+
+        // 0. Active Position Exit Management (Close beyond Order Block far edge)
+        val activePos = ctx.activePosition
+        val activeOb = (state as? StructureState)?.activeOrderBlocks?.firstOrNull()
+        if (activePos != null && activePos.isOpen && activeOb != null) {
+            if (activePos.isLong && currClose < activeOb.bottom) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "SBOB Long EXIT: Order block invalidated (Close %.2f < OB Bottom %.2f)".format(currClose, activeOb.bottom),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            } else if (activePos.isShort && currClose > activeOb.top) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "SBOB Short EXIT: Order block invalidated (Close %.2f > OB Top %.2f)".format(currClose, activeOb.top),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            }
+        }
+
         // 1. G3/G4 ATR Bounds
         val atr = TechnicalIndicators.calculateAtr(series, 14, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
 
         if (atrPct < minAtrPct || atrPct > maxAtrPct) {

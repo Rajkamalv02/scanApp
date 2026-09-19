@@ -31,6 +31,7 @@ object StrategyRegistry {
     val lsrStrategy = LsrStrategy()         // S3: Liquidity Sweep Reversal
     val sormStrategy = SormStrategy()       // S4: Session Opening Range Momentum
     val xrsStrategy = XrsStrategy()         // S5: Cross-Sectional Relative Strength (Universe)
+    val fpxStrategy = FpxStrategy()         // S6: Funding & Positioning Extreme Fade
     val rzmrStrategy = RzmrStrategy()       // S7: Range-Bound Z-Score Mean Reversion
     val ircStrategy = IrcStrategy()         // S8: Impulse-Retest Continuation
     val sbobStrategy = SbobStrategy()       // S9: Smart Money Structure Breakout
@@ -48,6 +49,7 @@ object StrategyRegistry {
         vcebStrategy,
         lsrStrategy,
         sormStrategy,
+        fpxStrategy,
         rzmrStrategy,
         ircStrategy,
         sbobStrategy,
@@ -69,12 +71,13 @@ object StrategyRegistry {
         put("pbc", StrategyMode.LIVE)
         put("edtm", StrategyMode.LIVE)
         put("vceb", StrategyMode.LIVE)
-        put("irc", StrategyMode.LIVE)
-        put("sbob", StrategyMode.LIVE)
-        put("rzmr", StrategyMode.LIVE)
         put("lsr", StrategyMode.LIVE)
         put("sorm", StrategyMode.LIVE)
         put("xrs", StrategyMode.LIVE)
+        put("fpx", StrategyMode.LIVE)
+        put("rzmr", StrategyMode.LIVE)
+        put("irc", StrategyMode.LIVE)
+        put("sbob", StrategyMode.LIVE)
 
         // Legacy strategies default to SHADOW
         put("ema_crossover", StrategyMode.SHADOW)
@@ -109,6 +112,17 @@ object StrategyRegistry {
             availableStrategies.filter { getStrategyMode(it.id) != StrategyMode.DISABLED }
         } else {
             listOf(activeStrategy)
+        }
+    }
+
+    /**
+     * Returns the universe strategies that will be executed in the market scan (LIVE + SHADOW).
+     */
+    fun getScanningUniverseStrategies(): List<UniverseStrategy> {
+        return if (isMultiStrategyEnabled) {
+            availableUniverseStrategies.filter { getStrategyMode(it.id) != StrategyMode.DISABLED }
+        } else {
+            emptyList()
         }
     }
 

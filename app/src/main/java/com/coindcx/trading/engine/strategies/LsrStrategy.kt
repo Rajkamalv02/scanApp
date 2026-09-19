@@ -51,9 +51,64 @@ class LsrStrategy(
             return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
         }
 
+        val currClose = series.close(0)
+
+        // 0. Active Position Exit Management
+        val activePos = ctx.activePosition
+        if (activePos != null && activePos.isOpen) {
+            val entryPrice = activePos.avgPrice
+            val tpTrigger = activePos.takeProfitTrigger
+            val slTrigger = activePos.stopLossTrigger
+            if (activePos.isLong) {
+                if (tpTrigger != null && currClose >= tpTrigger) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "LSR Long EXIT: Target reached @ %.4f".format(currClose), explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+                if (slTrigger != null && currClose <= slTrigger) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "LSR Long EXIT: Stop loss hit @ %.4f".format(currClose), explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            } else if (activePos.isShort) {
+                if (tpTrigger != null && currClose <= tpTrigger) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "LSR Short EXIT: Target reached @ %.4f".format(currClose), explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+                if (slTrigger != null && currClose >= slTrigger) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "LSR Short EXIT: Stop loss hit @ %.4f".format(currClose), explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            }
+        }
+
+        // R5: Mutual exclusion - NOT within 3 bars of a VCEB (S2) signal
+        val isVcebCooldown = com.coindcx.trading.engine.scanner.SignalDedupRegistry.default
+            .hasSignalWithinBars(ctx.symbol, "vceb", primaryInterval, 3, series.openTime(0))
+        if (isVcebCooldown) {
+            return StrategyResult(null, state, listOf(RejectionCode.S3_CONFLICT_S2_COOLDOWN))
+        }
+
         // 1. ATR Bounds
         val atr = TechnicalIndicators.calculateAtr(series, 14, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
 
         if (atrPct < minAtrPct || atrPct > maxAtrPct) {

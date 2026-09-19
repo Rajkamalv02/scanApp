@@ -287,7 +287,8 @@ class TradingForegroundService : Service() {
             val cycle = scanCycleCounter
             val config = configRepo.configFlow.value
             val scanningStrategies = StrategyRegistry.getScanningStrategies()
-            val stratNames = scanningStrategies.joinToString(", ") { it.name }
+            val scanningUniverseStrategies = StrategyRegistry.getScanningUniverseStrategies()
+            val stratNames = (scanningStrategies.map { it.name } + scanningUniverseStrategies.map { it.name }).joinToString(", ")
             val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
             AppLogManager.scanner("Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with $stratNames...")
 
@@ -309,20 +310,34 @@ class TradingForegroundService : Service() {
                 MarketScanState.updateExchangeSnapshot(preSync.getOrThrow())
             }
             val initialBalanceInr = executionEngine.getAvailableBalanceInr()
+            val settlementRate = currencyConverter.getSettlementConversionRate()
 
-            // 2. Scan Futures Market Opportunities (Parallel Multi-Strategy)
-            val rawOpportunities = scannerEngine.scanMarket(config, scanningStrategies, executionEngine)
+            // 1.1 Pre-filtering Account Constraints (Balance -> Leverage -> Margin Budget -> Affordability)
+            val accountConstraints = com.coindcx.trading.engine.scanner.FuturesUniverseManager.AccountConstraints(
+                availableBalanceInr = initialBalanceInr,
+                leverage = config.leverage,
+                riskPerTradePercent = config.riskPerTradePercent,
+                maxSingleExposurePercent = config.maxSingleExposurePercent,
+                usdtInrRate = settlementRate,
+                isLiveTrading = !executionEngine.isPaperTrading
+            )
 
-            // 2.5. Process Strategy-Triggered Exits on Open Positions (e.g. EMA Reversal Crossover or Confluence Reversal)
+            // 2. Scan Futures Market Opportunities (Parallel Multi-Strategy with Account Constraints)
+            val rawOpportunities = scannerEngine.scanMarket(
+                config = config,
+                strategies = scanningStrategies,
+                universeStrategies = scanningUniverseStrategies,
+                executionEngine = executionEngine,
+                accountConstraints = accountConstraints
+            )
+
+            // 2.5. Process Strategy-Triggered Exits on Open Positions
             for (opp in rawOpportunities) {
                 if (opp.signal.action == com.coindcx.trading.engine.SignalAction.EXIT) {
                     val activePos = executionEngine.getActivePosition(opp.pair)
                     if (activePos != null && activePos.isOpen) {
                         val posTradeId = activePos.id
-                        val exitCondition = when {
-                            opp.strategyId.contains("confluence") -> "CONFLUENCE_REVERSAL"
-                            else -> "EMA_REVERSAL_CROSS"
-                        }
+                        val exitCondition = "${opp.strategyId.uppercase()}_EXIT_SIGNAL"
                         AppLogManager.tradeLifecycle(
                             event = "EXIT_SIGNAL",
                             tradeId = posTradeId,
@@ -404,25 +419,32 @@ class TradingForegroundService : Service() {
                 }
 
                 // Initial Entry Evaluation Structured Log
+                val activeStratName = opp.strategyName.ifBlank { (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase() }
+                val evalAttributes = mutableMapOf<String, Any>(
+                    "rank" to opp.rank,
+                    "strategy" to activeStratName,
+                    "action" to opp.actionLabel,
+                    "price" to "%.4f".format(opp.currentPrice),
+                    "quality_score" to opp.qualityScore,
+                    "quality_category" to opp.qualityCategory,
+                    "net_rr" to "%.2f".format(opp.netRiskRewardRatio),
+                    "htf_align" to opp.htfAlignment,
+                    "selection_reason" to opp.selectionReason
+                )
+                if (opp.signal.fastEma > 0.0) evalAttributes["fast_ema"] = "%.4f".format(opp.signal.fastEma)
+                if (opp.signal.slowEma > 0.0) evalAttributes["slow_ema"] = "%.4f".format(opp.signal.slowEma)
+                if (opp.contributingStrategies.isNotEmpty()) {
+                    evalAttributes["contributing_strategies"] = opp.contributingStrategies.joinToString(", ") { "${it.strategyName} (${it.score})" }
+                }
+
                 AppLogManager.tradeLifecycle(
                     event = "ENTRY_EVALUATION",
                     tradeId = tradeId,
                     symbol = opp.pair,
                     mode = modeLabel,
-                    attributes = mapOf(
-                        "rank" to opp.rank,
-                        "strategy" to opp.strategyId.ifBlank { opp.signal.strategyId },
-                        "action" to opp.actionLabel,
-                        "price" to "%.4f".format(opp.currentPrice),
-                        "fast_ema" to "%.4f".format(opp.signal.fastEma),
-                        "slow_ema" to "%.4f".format(opp.signal.slowEma),
-                        "quality_score" to opp.qualityScore,
-                        "quality_category" to opp.qualityCategory,
-                        "net_rr" to "%.2f".format(opp.netRiskRewardRatio),
-                        "htf_align" to opp.htfAlignment
-                    ),
+                    attributes = evalAttributes,
                     narrative = "Evaluating %s candidate: Rank #%d [%s] %s %s @ %.4f (Quality: %d/100 %s, Net R:R: %.2f, HTF: %s)"
-                        .format(modeLabel, opp.rank, (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase(), opp.pair, opp.actionLabel, opp.currentPrice, opp.qualityScore, opp.qualityCategory, opp.netRiskRewardRatio, opp.htfAlignment)
+                        .format(modeLabel, opp.rank, activeStratName, opp.pair, opp.actionLabel, opp.currentPrice, opp.qualityScore, opp.qualityCategory, opp.netRiskRewardRatio, opp.htfAlignment)
                 )
 
                 // Circuit Breaker / Cooldown Gate
@@ -678,19 +700,28 @@ class TradingForegroundService : Service() {
                 }
 
                 // All gates passed -> Approve & Construct Order!
+                val approvedStratName = opp.strategyName.ifBlank { (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase() }
+                val approvedAttributes = mutableMapOf<String, Any>(
+                    "strategy" to approvedStratName,
+                    "direction" to opp.actionLabel,
+                    "entry_price" to "%.4f".format(opp.currentPrice),
+                    "margin_inr" to "₹%.2f".format(marginToAllocate),
+                    "leverage" to "${actualLeverage}x",
+                    "quality_score" to opp.qualityScore,
+                    "selection_reason" to opp.selectionReason
+                )
+                if (opp.contributingStrategies.isNotEmpty()) {
+                    approvedAttributes["contributing_strategies"] = opp.contributingStrategies.joinToString(", ") { "${it.strategyName} (${it.direction}, score: ${it.score})" }
+                }
+
                 AppLogManager.tradeLifecycle(
                     event = "ENTRY_APPROVED",
                     tradeId = tradeId,
                     symbol = opp.pair,
                     mode = modeLabel,
-                    attributes = mapOf(
-                        "direction" to opp.actionLabel,
-                        "entry_price" to "%.4f".format(opp.currentPrice),
-                        "margin_inr" to "₹%.2f".format(marginToAllocate),
-                        "leverage" to "${actualLeverage}x"
-                    ),
-                    narrative = "EMA crossover detected -> %s signal -> risk checks passed -> position size calculated -> leverage %dx -> entry approved"
-                        .format(opp.actionLabel, actualLeverage)
+                    attributes = approvedAttributes,
+                    narrative = "[%s] %s signal on %s -> risk checks passed -> position size calculated -> leverage %dx -> entry approved"
+                        .format(approvedStratName, opp.actionLabel, opp.pair, actualLeverage)
                 )
 
                 AppLogManager.tradeLifecycle(
@@ -699,7 +730,7 @@ class TradingForegroundService : Service() {
                     symbol = opp.pair,
                     mode = modeLabel,
                     attributes = mapOf(
-                        "strategy" to opp.strategyId.ifBlank { opp.signal.strategyId },
+                        "strategy" to approvedStratName,
                         "side" to (if (opp.isBuy) "BUY" else "SELL"),
                         "direction" to (if (opp.isBuy) "LONG" else "SHORT"),
                         "order_type" to (if (executionEngine.isPaperTrading) "MARKET" else "LIMIT"),
@@ -712,7 +743,7 @@ class TradingForegroundService : Service() {
                         "time_in_force" to "GTC"
                     ),
                     narrative = "Constructed %s %s [%s] order for %s @ %.4f (Margin: ₹%.2f @ %dx leverage | SL: %.4f | TP: %.4f)"
-                        .format(modeLabel, if (opp.isBuy) "BUY" else "SELL", (opp.strategyId.ifBlank { opp.signal.strategyId }).uppercase(), opp.pair, opp.currentPrice, marginToAllocate, actualLeverage, slPrice, tpPrice)
+                        .format(modeLabel, if (opp.isBuy) "BUY" else "SELL", approvedStratName.uppercase(), opp.pair, opp.currentPrice, marginToAllocate, actualLeverage, slPrice, tpPrice)
                 )
 
                 val orderStartTime = System.currentTimeMillis()

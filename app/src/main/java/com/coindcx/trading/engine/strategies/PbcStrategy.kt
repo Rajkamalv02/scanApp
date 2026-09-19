@@ -46,6 +46,36 @@ class PbcStrategy(
             return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
         }
 
+        val currClose = series.close(0)
+        val atr = TechnicalIndicators.calculateAtr(series, atrPeriod, barIndex = 0)
+        val emaFast = TechnicalIndicators.calculateEmaAt(series, fastPeriod, barIndex = 0)
+        val emaMid = TechnicalIndicators.calculateEmaAt(series, midPeriod, barIndex = 0)
+        val emaSlow = TechnicalIndicators.calculateEmaAt(series, slowPeriod, barIndex = 0)
+
+        // 0. Active Position Exit Management
+        val activePos = ctx.activePosition
+        if (activePos != null && activePos.isOpen) {
+            if (activePos.isLong && currClose < (emaMid - 0.3 * atr)) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "PBC Long EXIT: Trend body broken (Close %.2f < EMA%d - 0.3*ATR %.2f)".format(currClose, midPeriod, emaMid - 0.3 * atr),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            } else if (activePos.isShort && currClose > (emaMid + 0.3 * atr)) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "PBC Short EXIT: Trend body broken (Close %.2f > EMA%d + 0.3*ATR %.2f)".format(currClose, midPeriod, emaMid + 0.3 * atr),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            }
+        }
+
         // 1. Higher-Timeframe (4H) Trend Bias
         val htf4H = ctx.htfSeries[Interval.H4]
         var htfBullish = true
@@ -58,9 +88,6 @@ class PbcStrategy(
         }
 
         // 2. Primary 15m Stacked EMAs
-        val emaFast = TechnicalIndicators.calculateEmaAt(series, fastPeriod, barIndex = 0)
-        val emaMid = TechnicalIndicators.calculateEmaAt(series, midPeriod, barIndex = 0)
-        val emaSlow = TechnicalIndicators.calculateEmaAt(series, slowPeriod, barIndex = 0)
 
         val isBullishStack = emaFast > emaMid && emaMid > emaSlow
         val isBearishStack = emaFast < emaMid && emaMid < emaSlow
@@ -81,8 +108,6 @@ class PbcStrategy(
         }
 
         // 4. Bar & Volatility Calculations
-        val atr = TechnicalIndicators.calculateAtr(series, atrPeriod, barIndex = 0)
-        val currClose = series.close(0)
         val currOpen = series.open(0)
         val barRange = series.high(0) - series.low(0)
         val safeRange = if (barRange > 0.0) barRange else 0.0001

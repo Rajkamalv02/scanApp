@@ -83,7 +83,47 @@ class SormStrategy(
         }
 
         val currBarTime = series.openTime(0)
+        val currClose = series.close(0)
         val session = resolveSession(currBarTime)
+
+        // 0. Active Position Exit Management (Hard Session Exit outside window or failure exit)
+        val activePos = ctx.activePosition
+        if (activePos != null && activePos.isOpen) {
+            if (session == null) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id,
+                        direction = if (activePos.isLong) SignalDirection.LONG else SignalDirection.SHORT,
+                        barOpenTimeUtc = currBarTime, entryRef = currClose, strategyName = name,
+                        reason = "SORM Hard Session EXIT: Current bar outside trade session window",
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            }
+            val orState = state as? SessionState
+            if (orState != null) {
+                if (activePos.isLong && currClose < orState.orLow) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                            barOpenTimeUtc = currBarTime, entryRef = currClose, strategyName = name,
+                            reason = "SORM Long EXIT: Price fell back inside Opening Range (Close %.2f < OR Low %.2f)".format(currClose, orState.orLow),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                } else if (activePos.isShort && currClose > orState.orHigh) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                            barOpenTimeUtc = currBarTime, entryRef = currClose, strategyName = name,
+                            reason = "SORM Short EXIT: Price rose back inside Opening Range (Close %.2f > OR High %.2f)".format(currClose, orState.orHigh),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            }
+        }
+
         if (session == null) {
             return StrategyResult(null, state, listOf(RejectionCode.S4_REGIME_OUTSIDE_SESSION))
         }
@@ -118,7 +158,6 @@ class SormStrategy(
 
         val orHeight = orHigh - orLow
         val atr = TechnicalIndicators.calculateAtr(series, 14, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
 
         if (atrPct < minAtrPct || atrPct > maxAtrPct) {

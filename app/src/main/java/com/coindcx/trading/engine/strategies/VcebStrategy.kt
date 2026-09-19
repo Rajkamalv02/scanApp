@@ -47,9 +47,34 @@ class VcebStrategy(
             return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
         }
 
+        // 0. Active Position Exit Management
+        val currClose = series.close(0)
+        val activePos = ctx.activePosition
+        if (activePos != null && activePos.isOpen) {
+            val bb0 = TechnicalIndicators.calculateBollingerBands(series, bbPeriod, bbStdDevMultiplier, barIndex = 0)
+            if (activePos.isLong && currClose < bb0.basis) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "VCEB Long EXIT: Price fell back inside pre-breakout range (Close %.2f < Basis %.2f)".format(currClose, bb0.basis),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            } else if (activePos.isShort && currClose > bb0.basis) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "VCEB Short EXIT: Price fell back inside pre-breakout range (Close %.2f > Basis %.2f)".format(currClose, bb0.basis),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = state
+                )
+            }
+        }
+
         // 1. G3/G4 ATR Bounds
         val atr = TechnicalIndicators.calculateAtr(series, 14, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
 
         if (atrPct < minAtrPct || atrPct > maxAtrPct) {

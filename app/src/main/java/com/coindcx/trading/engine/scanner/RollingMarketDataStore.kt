@@ -79,6 +79,11 @@ class RollingMarketDataStore(
         return synchronized(deque) { deque.size }
     }
 
+    fun getLatestSnapshot(pair: String): TickerSnapshot? {
+        val deque = store[pair] ?: return null
+        return synchronized(deque) { deque.lastOrNull() }
+    }
+
     /**
      * Computes True Relative Volume (RVOL) with per-metric warm-up and matched denominators.
      *

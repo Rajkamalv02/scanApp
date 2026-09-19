@@ -57,15 +57,45 @@ class EdtmStrategy(
             htfBearish = htfClose <= htfEma50
         }
 
-        // 2. Efficiency Ratio Filter (1H closed bars)
+        val atr = TechnicalIndicators.calculateAtr(series, atrPeriod, barIndex = 0)
+        val currClose = series.close(0)
         val er = TechnicalIndicators.calculateEfficiencyRatio(series, erPeriod, barIndex = 0)
+        val channel = TechnicalIndicators.donchian(series, donchianPeriod, endIndex = 1)
+
+        // 0. Active Position Exit Management (Donchian 20 channel breach or ER < 0.20 collapse)
+        val activePos = ctx.activePosition
+        if (activePos != null && activePos.isOpen) {
+            if (activePos.isLong) {
+                if (currClose < channel.lower || er < 0.20) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "EDTM Long EXIT: Donchian 20 breach (Close %.2f < %.2f) or ER collapse (%.2f < 0.20)".format(currClose, channel.lower, er),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            } else if (activePos.isShort) {
+                if (currClose > channel.upper || er < 0.20) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "EDTM Short EXIT: Donchian 20 breach (Close %.2f > %.2f) or ER collapse (%.2f < 0.20)".format(currClose, channel.upper, er),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            }
+        }
+
+        // 2. Efficiency Ratio Filter (1H closed bars)
         if (er < erThreshold) {
             rejections.add(RejectionCode.S10_REGIME_EFFICIENCY_RATIO)
         }
 
         // 3. Volatility Bounds (1H ATR%)
-        val atr = TechnicalIndicators.calculateAtr(series, atrPeriod, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
         if (atrPct < minAtrPct || atrPct > maxAtrPct) {
             rejections.add(RejectionCode.S10_REGIME_ATR_BOUNDS)
@@ -74,8 +104,6 @@ class EdtmStrategy(
         // 4. Trend Filter: EMA 100
         val ema100 = TechnicalIndicators.calculateEmaAt(series, emaPeriod, barIndex = 0)
 
-        // 5. 20-bar Donchian Channel calculated strictly over bars ending at bar 1 (bars 1..20)
-        val channel = TechnicalIndicators.donchian(series, donchianPeriod, endIndex = 1)
         val barRange = series.high(0) - series.low(0)
         val safeRange = if (barRange > 0.0) barRange else 0.0001
 

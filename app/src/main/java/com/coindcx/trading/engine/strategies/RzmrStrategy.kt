@@ -49,9 +49,58 @@ class RzmrStrategy(
             return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
         }
 
+        val currClose = series.close(0)
+        val sma0 = TechnicalIndicators.calculateSmaAt(series, zPeriod, barIndex = 0)
+        val adx = TechnicalIndicators.calculateAdx(series, 14, barIndex = 0)
+
+        // 0. Active Position Exit Management (Mean touch or regime break ADX > 28)
+        val activePos = ctx.activePosition
+        if (activePos != null && activePos.isOpen) {
+            if (activePos.isLong) {
+                if (currClose >= sma0) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "RZMR Long EXIT: Reached mean target (Close %.2f >= SMA50 %.2f)".format(currClose, sma0),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                } else if (adx > 28.0) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "RZMR Long EXIT: Range regime broken (ADX %.1f > 28.0)".format(adx),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            } else if (activePos.isShort) {
+                if (currClose <= sma0) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "RZMR Short EXIT: Reached mean target (Close %.2f <= SMA50 %.2f)".format(currClose, sma0),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                } else if (adx > 28.0) {
+                    return StrategyResult(
+                        signal = Signal(
+                            symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                            barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                            reason = "RZMR Short EXIT: Range regime broken (ADX %.1f > 28.0)".format(adx),
+                            explicitAction = SignalAction.EXIT
+                        ), newState = state
+                    )
+                }
+            }
+        }
+
         // 1. G3/G4 ATR Bounds
         val atr = TechnicalIndicators.calculateAtr(series, 14, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
 
         if (atrPct < minAtrPct) {
@@ -62,7 +111,6 @@ class RzmrStrategy(
         }
 
         // 2. Range Regime Validation (ADX & Choppiness)
-        val adx = TechnicalIndicators.calculateAdx(series, 14, barIndex = 0)
         if (adx > maxAdx) {
             rejections.add(RejectionCode.S7_REGIME_ADX_CAP)
         }
@@ -82,7 +130,6 @@ class RzmrStrategy(
         }
 
         // 4. Mean Drift Stability (SMA50 slope <= 1.0% over 10 bars)
-        val sma0 = TechnicalIndicators.calculateSmaAt(series, zPeriod, barIndex = 0)
         val sma10 = TechnicalIndicators.calculateSmaAt(series, zPeriod, barIndex = 10)
         if (sma10 > 0.0 && (abs(sma0 - sma10) / sma10) > 0.010) {
             rejections.add(RejectionCode.S7_REGIME_MEAN_DRIFT)

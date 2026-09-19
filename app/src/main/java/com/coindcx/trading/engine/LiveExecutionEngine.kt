@@ -96,38 +96,57 @@ class LiveExecutionEngine(
         val isBuy = signal.action == SignalAction.ENTER_LONG
         val side = if (isBuy) "buy" else "sell"
 
-        val spec = universeManager?.getInstrumentSpec(pair)
-        val step = spec?.step ?: 0.001
-        val minNotionalUsdt = 6.0.coerceAtLeast(spec?.minNotionalUsdt ?: 5.0)
+        val futuresSpec = com.coindcx.trading.engine.scanner.FuturesContractRegistry.getFuturesSpec(pair)
+        val spec = universeManager?.getInstrumentSpec(pair) ?: futuresSpec
+        val step = futuresSpec?.step ?: spec?.step ?: 0.001
+        val minQty = futuresSpec?.minQuantity ?: spec?.minQuantity ?: step
+        val minNotionalUsdt = kotlin.math.max(6.0, futuresSpec?.minNotionalUsdt ?: spec?.minNotionalUsdt ?: 5.0)
 
         val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, currentPrice)
 
-        // Quantize to step size and guarantee CoinDCX minimum order notional
-        var steps = if (step > 0) kotlin.math.round(rawQty / step) else rawQty
-        var quantity = if (step > 0) steps * step else rawQty
-        if (quantity * currentPrice < minNotionalUsdt && step * currentPrice > 0) {
-            steps = kotlin.math.ceil(minNotionalUsdt / (step * currentPrice))
-            quantity = steps * step
+        // 1. Calculate minimum quantity needed for CoinDCX minimum notional floor
+        val minNotionalFloorQty = if (currentPrice > 0 && step > 0) {
+            kotlin.math.ceil(minNotionalUsdt / (step * currentPrice)) * step
+        } else {
+            minQty
         }
-        val precision = (spec?.targetCurrencyPrecision ?: 3).coerceIn(0, 8)
+
+        // 2. Target quantity must satisfy raw allocated margin, contract lot size (minQty), and minimum notional floor
+        val targetQty = kotlin.math.max(rawQty, kotlin.math.max(minQty, minNotionalFloorQty))
+
+        // 3. Align with contract step size
+        val steps = if (step > 0) kotlin.math.round(targetQty / step) else targetQty
+        var quantity = if (step > 0) steps * step else targetQty
+        if (quantity < minQty) {
+            quantity = minQty
+        }
+
+        val precision = (futuresSpec?.targetCurrencyPrecision ?: spec?.targetCurrencyPrecision ?: 3).coerceIn(0, 8)
         val roundedQty = java.math.BigDecimal.valueOf(quantity)
             .setScale(precision, java.math.RoundingMode.HALF_UP)
             .toDouble()
-        val finalQty = roundedQty.coerceAtLeast(spec?.minQuantity ?: step)
+        val finalQty = roundedQty.coerceAtLeast(minQty)
 
         val notionalUsdt = finalQty * currentPrice
         val requiredMarginInr = (notionalUsdt * currencyConverter.getCachedUsdtInrRate()) / leverage
         val availableInr = getAvailableBalanceInr()
         if (requiredMarginInr > availableInr && availableInr > 0) {
-            AppLogManager.w("LIVE_EXEC", "Quantized order for $pair requires ₹%.2f margin, exceeding available cash ₹%.2f"
-                .format(requiredMarginInr, availableInr))
+            AppLogManager.w("LIVE_EXEC", "Quantized order for $pair requires ₹%.2f margin (qty=%.4f @ $%.2f = $%.2f USDT), exceeding available cash ₹%.2f"
+                .format(requiredMarginInr, finalQty, currentPrice, notionalUsdt, availableInr))
             return ExecutionResult.Failed("Quantized margin requirement (₹%.0f) exceeds available cash (₹%.0f)"
                 .format(requiredMarginInr, availableInr))
         }
 
+        if (finalQty < minQty) {
+            return ExecutionResult.Failed("Order quantity %.4f is below minimum futures contract lot size %.4f".format(finalQty, minQty))
+        }
+        if (notionalUsdt < minNotionalUsdt) {
+            return ExecutionResult.Failed("Order notional $%.2f USDT is below minimum floor $%.2f USDT".format(notionalUsdt, minNotionalUsdt))
+        }
+
         AppLogManager.trade("LIVE_EXEC",
-            "Quantized order qty for %s: raw=%.6f -> final=%.6f (step=%s, precision=%d, notional=$%.2f USDT, floor=%.2f USDT)"
-                .format(pair, rawQty, finalQty, step.toString(), precision, notionalUsdt, minNotionalUsdt)
+            "Quantized order qty for %s: raw=%.6f -> final=%.6f (minQty=%.4f, step=%s, precision=%d, notional=$%.2f USDT, floor=%.2f USDT)"
+                .format(pair, rawQty, finalQty, minQty, step.toString(), precision, notionalUsdt, minNotionalUsdt)
         )
 
         val pricePrecision = (spec?.baseCurrencyPrecision ?: if (currentPrice < 1.0) 4 else 2).coerceIn(0, 8)

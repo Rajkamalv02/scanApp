@@ -51,9 +51,35 @@ class IrcStrategy(
             return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
         }
 
+        val currClose = series.close(0)
+
+        // 0. Active Position Exit Management (Failure exit: close beyond Fib 61.8%)
+        val activePos = ctx.activePosition
+        val impulseInState = state as? ImpulseState
+        if (activePos != null && activePos.isOpen && impulseInState != null) {
+            if (activePos.isLong && currClose < impulseInState.fib618) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.LONG,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "IRC Long EXIT: Fib 61.8% support breached (Close %.2f < Fib %.2f)".format(currClose, impulseInState.fib618),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = null
+                )
+            } else if (activePos.isShort && currClose > impulseInState.fib618) {
+                return StrategyResult(
+                    signal = Signal(
+                        symbol = ctx.symbol, strategyId = id, direction = SignalDirection.SHORT,
+                        barOpenTimeUtc = series.openTime(0), entryRef = currClose, strategyName = name,
+                        reason = "IRC Short EXIT: Fib 61.8% resistance breached (Close %.2f > Fib %.2f)".format(currClose, impulseInState.fib618),
+                        explicitAction = SignalAction.EXIT
+                    ), newState = null
+                )
+            }
+        }
+
         // 1. G3/G4 ATR Bounds
         val atr = TechnicalIndicators.calculateAtr(series, 14, barIndex = 0)
-        val currClose = series.close(0)
         val atrPct = if (currClose > 0.0) (atr / currClose) * 100.0 else 0.0
 
         if (atrPct < minAtrPct || atrPct > maxAtrPct) {

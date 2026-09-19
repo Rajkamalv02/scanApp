@@ -3,6 +3,7 @@ package com.coindcx.trading.engine.scanner
 import com.coindcx.trading.data.api.CoinDCXApiService
 import com.coindcx.trading.engine.MarketRegimePreference
 import com.coindcx.trading.engine.Strategy
+import com.coindcx.trading.engine.UniverseStrategy
 import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -38,12 +39,14 @@ class FuturesUniverseManager(
         const val FALLBACK_MIN_QUOTE_VOLUME_USDT = 250_000.0 // $250k fallback floor
         const val FALLBACK_MAX_BBO_SPREAD_PCT = 0.35 // Max 0.35% fallback ceiling
 
-        const val ENTRY_RANK_CEILING = 20
-        const val EXIT_RANK_FLOOR = 28
+        const val TARGET_DYNAMIC_MOVERS = 50
+        const val ENTRY_RANK_CEILING = 50
+        const val EXIT_RANK_FLOOR = 65
         const val EXIT_MIN_MAS_SCORE = 40.0
         const val MIN_DWELL_CYCLES = 2
-        const val HARD_CEILING_TOTAL_POOL = 23
-        const val CACHE_TTL_MS = 2 * 60 * 1000L // 2 Minutes (matches scan cycle)
+        const val HARD_CEILING_TOTAL_POOL = 50
+        const val DAILY_CACHE_TTL_MS = 24 * 60 * 60 * 1000L // 24 Hours daily market recalculation
+        const val CACHE_TTL_MS = DAILY_CACHE_TTL_MS
 
         val CORE_ANCHORS = listOf("B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT")
 
@@ -56,9 +59,20 @@ class FuturesUniverseManager(
             "B-ADA_USDT", "B-BNB_USDT", "B-AVAX_USDT", "B-LINK_USDT", "B-NEAR_USDT",
             "B-SUI_USDT", "B-APT_USDT", "B-POL_USDT", "B-PEPE_USDT", "B-SHIB_USDT",
             "B-ARB_USDT", "B-OP_USDT", "B-TIA_USDT", "B-RENDER_USDT", "B-INJ_USDT",
-            "B-AAVE_USDT", "B-LTC_USDT", "B-UNI_USDT", "B-DOT_USDT", "B-RUNE_USDT"
+            "B-AAVE_USDT", "B-LTC_USDT", "B-UNI_USDT", "B-DOT_USDT", "B-RUNE_USDT",
+            "B-TRUMP_USDT", "B-FIL_USDT", "B-QNT_USDT", "B-PENDLE_USDT", "B-ZEC_USDT",
+            "B-DASH_USDT", "B-ONDO_USDT", "B-ORDI_USDT", "B-MORPHO_USDT", "B-PROVE_USDT"
         )
     }
+
+    data class AccountConstraints(
+        val availableBalanceInr: Double,
+        val leverage: Int,
+        val riskPerTradePercent: Double = 1.0,
+        val maxSingleExposurePercent: Double = 30.0,
+        val usdtInrRate: Double = 90.0,
+        val isLiveTrading: Boolean = true
+    )
 
     data class ActiveCandidateRecord(
         val pair: String,
@@ -85,7 +99,7 @@ class FuturesUniverseManager(
 
     val rollingStore = RollingMarketDataStore(maxSnapshotsPerPair = 60)
 
-    private val universeRef = AtomicReference<List<String>>(CORE_ANCHORS + FALLBACK_MAJORS.take(20))
+    private val universeRef = AtomicReference<List<String>>(FALLBACK_MAJORS.take(50))
     private val majorsRef = AtomicReference<List<String>>(CORE_ANCHORS)
     private val specsRef = AtomicReference<Map<String, InstrumentSpec>>(emptyMap())
     private val masScoresRef = AtomicReference<Map<String, MarketActivityScorer.MarketActivityScore>>(emptyMap())
@@ -97,31 +111,79 @@ class FuturesUniverseManager(
     private var lastRefreshTimestamp: Long = 0L
 
     @Volatile
+    private var lastDailyRefreshUtcDay: Int = -1
+
+    @Volatile
     private var currentCycleCount: Long = 0L
 
     fun getActiveUniverse(): List<String> = universeRef.get()
     fun getMajorUniverse(): List<String> = majorsRef.get()
     fun isTier1Major(pair: String): Boolean = CORE_ANCHORS.contains(pair) || majorsRef.get().contains(pair)
-    fun getInstrumentSpec(pair: String): InstrumentSpec? = specsRef.get()[pair]
+    fun getInstrumentSpec(pair: String): InstrumentSpec? = specsRef.get()[pair] ?: FuturesContractRegistry.getFuturesSpec(pair)
     fun getMasScore(pair: String): MarketActivityScorer.MarketActivityScore? = masScoresRef.get()[pair]
     fun getAllMasScores(): Map<String, MarketActivityScorer.MarketActivityScore> = masScoresRef.get()
+    fun getLatestTicker(pair: String): RollingMarketDataStore.TickerSnapshot? = rollingStore.getLatestSnapshot(pair)
     fun getCurrentCycle(): Long = currentCycleCount
 
     /**
-     * Lock-free read of universe with transparent background refresh if expired.
+     * Determines whether a futures contract is affordable and tradable given live account constraints.
+     */
+    fun isContractAffordable(
+        pair: String,
+        lastPrice: Double,
+        spec: InstrumentSpec?,
+        constraints: AccountConstraints?
+    ): Boolean {
+        if (constraints == null || !constraints.isLiveTrading || constraints.availableBalanceInr <= 0.0) {
+            return true
+        }
+        if (lastPrice <= 0.0) return false
+
+        val futuresSpec = spec ?: FuturesContractRegistry.getFuturesSpec(pair)
+        val minQty = futuresSpec?.minQuantity ?: 0.001
+        val step = futuresSpec?.step ?: minQty
+        val minNotionalUsdt = kotlin.math.max(6.0, futuresSpec?.minNotionalUsdt ?: 5.0)
+
+        val minQtyForNotional = if (step > 0) kotlin.math.ceil(minNotionalUsdt / (step * lastPrice)) * step else minQty
+        val minOrderQty = kotlin.math.max(minQty, minQtyForNotional)
+        val minOrderNotionalUsdt = minOrderQty * lastPrice
+        val minMarginRequiredInr = (minOrderNotionalUsdt * constraints.usdtInrRate) / constraints.leverage
+
+        if (minMarginRequiredInr > constraints.availableBalanceInr) {
+            AppLogManager.d("UNIVERSE", "[$pair] Excluded by Affordability: Min order requires ₹%.2f margin ($%.2f USDT, qty=%.4f @ $%.2f), exceeding balance ₹%.2f (Lev: %dx)"
+                .format(minMarginRequiredInr, minOrderNotionalUsdt, minOrderQty, lastPrice, constraints.availableBalanceInr, constraints.leverage))
+            return false
+        }
+
+        if (constraints.maxSingleExposurePercent in 1.0..99.0) {
+            val maxExposureInr = constraints.availableBalanceInr * (constraints.maxSingleExposurePercent / 100.0)
+            if (minMarginRequiredInr > maxExposureInr) {
+                AppLogManager.d("UNIVERSE", "[$pair] Excluded by Single Exposure Cap: Min order margin ₹%.2f > single position limit ₹%.2f (%.0f%% of ₹%.2f)"
+                    .format(minMarginRequiredInr, maxExposureInr, constraints.maxSingleExposurePercent, constraints.availableBalanceInr))
+                return false
+            }
+        }
+
+        return true
+    }
+
+    /**
+     * Lock-free read of universe with transparent background daily refresh if expired.
      */
     suspend fun getOrRefreshUniverse(
         forceRefresh: Boolean = false,
-        openPositionPairs: List<String> = emptyList()
+        openPositionPairs: List<String> = emptyList(),
+        accountConstraints: AccountConstraints? = null
     ): List<String> {
         val now = System.currentTimeMillis()
-        val isExpired = (now - lastRefreshTimestamp) >= CACHE_TTL_MS
+        val currentUtcDay = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).get(java.util.Calendar.DAY_OF_YEAR)
+        val isExpired = (now - lastRefreshTimestamp) >= DAILY_CACHE_TTL_MS || (lastDailyRefreshUtcDay != -1 && currentUtcDay != lastDailyRefreshUtcDay)
         val currentList = universeRef.get()
 
         if ((isExpired || forceRefresh || currentList.isEmpty()) && refreshMutex.tryLock()) {
             try {
                 withContext(Dispatchers.IO) {
-                    refreshUniverseInternal(openPositionPairs)
+                    refreshUniverseInternal(openPositionPairs, accountConstraints)
                 }
             } finally {
                 refreshMutex.unlock()
@@ -173,10 +235,31 @@ class FuturesUniverseManager(
         )
     }
 
-    private suspend fun refreshUniverseInternal(openPositionPairs: List<String> = emptyList()) {
+    /**
+     * Cross-sectional UniverseStrategy candidate prioritization.
+     */
+    fun getStrategyCandidates(
+        strategy: UniverseStrategy,
+        openPositionPairs: List<String> = emptyList()
+    ): List<String> = getStrategyCandidates(
+        object : Strategy {
+            override val id: String = strategy.id
+            override val name: String = strategy.name
+            override val description: String = strategy.description
+            override val parametersSummary: String = strategy.parametersSummary
+            override val requiredCandleCount: Int = strategy.requiredCandleCount
+            override val preferredRegime: MarketRegimePreference = strategy.preferredRegime
+        },
+        openPositionPairs
+    )
+
+    private suspend fun refreshUniverseInternal(
+        openPositionPairs: List<String> = emptyList(),
+        accountConstraints: AccountConstraints? = null
+    ) {
         try {
             currentCycleCount++
-            AppLogManager.scanner("Refreshing dynamic futures universe (Cycle #$currentCycleCount)...")
+            AppLogManager.scanner("Refreshing dynamic futures universe (Cycle #$currentCycleCount, Daily TTL: 24h)...")
 
             // 1. Fetch active futures instruments (e.g. 500+ active perpetuals)
             val activeResp = apiService.getActiveInstruments()
@@ -210,11 +293,13 @@ class FuturesUniverseManager(
                     nameToPair[coindcxName] = pair
                 }
 
-                val step = item["step"]?.toString()?.toDoubleOrNull() ?: 0.001
-                val minQty = item["min_quantity"]?.toString()?.toDoubleOrNull() ?: 0.001
-                val precision = item["target_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 3
-                val minNotional = item["min_notional"]?.toString()?.toDoubleOrNull() ?: 5.0
-                val basePrecision = item["base_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 4
+                // FuturesContractRegistry provides authoritative derivatives lot sizes (e.g. 0.1 for AAVE vs 0.001 spot)
+                val futuresSpec = FuturesContractRegistry.getFuturesSpec(pair)
+                val step = futuresSpec?.step ?: item["step"]?.toString()?.toDoubleOrNull() ?: 0.001
+                val minQty = futuresSpec?.minQuantity ?: item["min_quantity"]?.toString()?.toDoubleOrNull() ?: 0.001
+                val precision = futuresSpec?.targetCurrencyPrecision ?: item["target_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 3
+                val minNotional = kotlin.math.max(6.0, futuresSpec?.minNotionalUsdt ?: item["min_notional"]?.toString()?.toDoubleOrNull() ?: 5.0)
+                val basePrecision = futuresSpec?.baseCurrencyPrecision ?: item["base_currency_precision"]?.toString()?.toDoubleOrNull()?.toInt() ?: 4
                 specsMap[pair] = InstrumentSpec(pair, step, minQty, precision, minNotional, basePrecision)
             }
             if (specsMap.isNotEmpty()) {
@@ -310,12 +395,12 @@ class FuturesUniverseManager(
                 )
             }
 
-            // 4. Stage 1: Adaptive Pre-Filter
+            // 4. Stage 1: Adaptive Pre-Filter (Daily Market Evaluation independent of strategy timeframe)
             var stage1Passing = candidateList.filter {
                 it.quoteVolumeUsdt >= PRIMARY_MIN_QUOTE_VOLUME_USDT && it.spreadPct <= PRIMARY_MAX_BBO_SPREAD_PCT
             }
 
-            val isFallbackActive = stage1Passing.size < 20
+            val isFallbackActive = stage1Passing.size < TARGET_DYNAMIC_MOVERS
             if (isFallbackActive) {
                 stage1Passing = candidateList.filter {
                     it.quoteVolumeUsdt >= FALLBACK_MIN_QUOTE_VOLUME_USDT && it.spreadPct <= FALLBACK_MAX_BBO_SPREAD_PCT
@@ -328,9 +413,23 @@ class FuturesUniverseManager(
                 return
             }
 
-            // 5. Stage 2: MAS Scoring on all Stage 1 passing pairs
+            // Apply Live-Trading Account Configuration & Affordability Pre-Filter
+            val affordableCandidates = if (accountConstraints != null && accountConstraints.isLiveTrading && accountConstraints.availableBalanceInr > 0.0) {
+                val passingAffordable = stage1Passing.filter { cand ->
+                    isContractAffordable(cand.pair, cand.lastPrice, specsMap[cand.pair], accountConstraints)
+                }
+                AppLogManager.scanner(
+                    "Account Affordability Pre-Filter: %d of %d qualified pairs affordable with balance ₹%.2f @ %dx leverage"
+                        .format(passingAffordable.size, stage1Passing.size, accountConstraints.availableBalanceInr, accountConstraints.leverage)
+                )
+                if (passingAffordable.isNotEmpty()) passingAffordable else stage1Passing
+            } else {
+                stage1Passing
+            }
+
+            // 5. Stage 2: MAS Scoring on all affordable Stage 1 passing pairs
             val masScoresMap = mutableMapOf<String, MarketActivityScorer.MarketActivityScore>()
-            for (cand in stage1Passing) {
+            for (cand in affordableCandidates) {
                 val rvolResult = rollingStore.calculateRvol(cand.pair)
                 val velocityResult = rollingStore.calculateVelocity(cand.pair)
 
@@ -350,30 +449,29 @@ class FuturesUniverseManager(
             }
 
             // Rank Stage 1 passing pairs by MAS score descending
-            val rankedByMas = stage1Passing.mapNotNull { masScoresMap[it.pair] }
+            val rankedByMas = affordableCandidates.mapNotNull { masScoresMap[it.pair] }
                 .sortedByDescending { it.totalScore }
             val pairToMasRank = rankedByMas.mapIndexed { index, score -> score.pair to (index + 1) }.toMap()
 
-            // 6. Stage 3: Schmitt-Trigger with Strict Hard Ceiling (<= 23 pairs)
-            val anchorSet = CORE_ANCHORS.toSet()
+            // 6. Stage 3: Dynamic 50 Movers with Schmitt-Trigger Hysteresis
             val pinnedSet = openPositionPairs.filter { activeSet.contains(it) }.toSet()
 
-            // Calculate dynamic mover capacity: max 20, or (23 - anchors - pinned)
-            val maxDynamicMovers = (HARD_CEILING_TOTAL_POOL - anchorSet.size - (pinnedSet - anchorSet).size).coerceAtLeast(0)
+            // Dynamic mover capacity up to TARGET_DYNAMIC_MOVERS (50)
+            val maxDynamicMovers = (HARD_CEILING_TOTAL_POOL - pinnedSet.size).coerceAtLeast(0)
 
             val qualifiedDynamicCandidates = mutableListOf<String>()
-            val passingPairSet = stage1Passing.map { it.pair }.toSet()
+            val passingPairSet = affordableCandidates.map { it.pair }.toSet()
 
             // A. Existing pool members evaluated against exit criteria
             val existingCandidates = activePoolHistory.keys.toList()
             for (pair in existingCandidates) {
-                if (anchorSet.contains(pair) || pinnedSet.contains(pair)) continue
+                if (pinnedSet.contains(pair)) continue
                 val record = activePoolHistory[pair] ?: continue
                 val rank = pairToMasRank[pair] ?: 999
                 val score = masScoresMap[pair]?.totalScore ?: 0.0
                 val dwellCycles = currentCycleCount - record.entryCycle
 
-                // Exit Condition: Drops if not in Stage 1, OR (rank > 28 OR score < 40.0) AFTER 2 dwell cycles
+                // Exit Condition: Drops if not in Stage 1, OR (rank > EXIT_RANK_FLOOR OR score < EXIT_MIN_MAS_SCORE) AFTER dwell cycles
                 val shouldEvict = !passingPairSet.contains(pair) || (dwellCycles >= MIN_DWELL_CYCLES && (rank > EXIT_RANK_FLOOR || score < EXIT_MIN_MAS_SCORE))
 
                 if (!shouldEvict) {
@@ -385,10 +483,10 @@ class FuturesUniverseManager(
                 }
             }
 
-            // B. Newly qualifying pairs: Rank <= 20
+            // B. Newly qualifying pairs: Rank <= ENTRY_RANK_CEILING (50)
             for (ranked in rankedByMas) {
                 val pair = ranked.pair
-                if (anchorSet.contains(pair) || pinnedSet.contains(pair)) continue
+                if (pinnedSet.contains(pair)) continue
                 val rank = pairToMasRank[pair] ?: 999
                 if (rank <= ENTRY_RANK_CEILING && !qualifiedDynamicCandidates.contains(pair)) {
                     qualifiedDynamicCandidates.add(pair)
@@ -402,20 +500,17 @@ class FuturesUniverseManager(
             }
 
             // C. Enforce Strict Hard Ceiling on dynamic movers
-            // If qualified count exceeds capacity, the Hard Ceiling supersedes dwell time!
             val selectedDynamicMovers = if (qualifiedDynamicCandidates.size > maxDynamicMovers) {
-                // Sort strictly by MAS score descending (with earlier entryCycle tie-breaker)
                 qualifiedDynamicCandidates.sortedWith(
                     compareByDescending<String> { masScoresMap[it]?.totalScore ?: 0.0 }
                         .thenBy { activePoolHistory[it]?.entryCycle ?: Long.MAX_VALUE }
                 ).take(maxDynamicMovers)
             } else if (qualifiedDynamicCandidates.size < maxDynamicMovers) {
-                // Backfill from top rankedByMas that pass Stage 1
                 val backfilled = qualifiedDynamicCandidates.toMutableList()
                 for (ranked in rankedByMas) {
                     if (backfilled.size >= maxDynamicMovers) break
                     val pair = ranked.pair
-                    if (!anchorSet.contains(pair) && !pinnedSet.contains(pair) && !backfilled.contains(pair)) {
+                    if (!pinnedSet.contains(pair) && !backfilled.contains(pair)) {
                         backfilled.add(pair)
                         activePoolHistory[pair] = ActiveCandidateRecord(
                             pair = pair,
@@ -438,26 +533,27 @@ class FuturesUniverseManager(
                 }
             }
 
-            // D. Assemble final universe: Anchors + Dynamic Movers + Pinned Positions
-            val finalUniverse = (CORE_ANCHORS + selectedDynamicMovers + pinnedSet).distinct()
+            // D. Assemble final universe: Pinned Positions + Dynamic Movers (strictly data-driven)
+            val finalUniverse = (pinnedSet + selectedDynamicMovers).distinct().take(HARD_CEILING_TOTAL_POOL + pinnedSet.size)
 
             universeRef.set(finalUniverse)
-            majorsRef.set(CORE_ANCHORS)
+            majorsRef.set(finalUniverse.take(10).ifEmpty { CORE_ANCHORS })
             masScoresRef.set(masScoresMap)
             lastRefreshTimestamp = System.currentTimeMillis()
+            lastDailyRefreshUtcDay = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).get(java.util.Calendar.DAY_OF_YEAR)
 
             val avgMas = finalUniverse.mapNotNull { masScoresMap[it]?.totalScore }.average().let { if (it.isNaN()) 0.0 else it }
             val topMas = finalUniverse.mapNotNull { masScoresMap[it]?.totalScore }.maxOrNull() ?: 0.0
 
             AppLogManager.scanner(
-                "Dynamic Universe Updated: %d pairs (3 Anchors, %d Dynamic Movers, %d Pinned | Top MAS: %.1f, Avg MAS: %.1f | Hard Cap: %d)."
+                "Dynamic Universe Updated: %d pairs (%d Dynamic Movers, %d Pinned | Top MAS: %.1f, Avg MAS: %.1f | Daily Ceiling: %d)."
                     .format(finalUniverse.size, selectedDynamicMovers.size, pinnedSet.size, topMas, avgMas, HARD_CEILING_TOTAL_POOL)
             )
 
             MarketScanState.updateUniverseSummary(
                 MarketScanState.UniverseDiscoverySummary(
                     totalActivePoolSize = finalUniverse.size,
-                    anchorCount = CORE_ANCHORS.size,
+                    anchorCount = 0,
                     dynamicMoverCount = selectedDynamicMovers.size,
                     pinnedCount = pinnedSet.size,
                     topMasScore = topMas,
