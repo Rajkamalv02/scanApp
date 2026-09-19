@@ -109,7 +109,12 @@ object TradeQualityScorer {
         val isEntry = signal.action == SignalAction.ENTER_LONG || signal.action == SignalAction.ENTER_SHORT
         var netRr = 0.0
         val rrScore = if (isEntry) {
-            if (signal.takeProfitPrice != null && signal.stopLossPrice != null && currentPrice > 0.0) {
+            if (signal.openEndedTarget) {
+                // Open-ended trailing strategies (e.g. S10 EDTM) do not have a fixed nominal take-profit target at entry.
+                // Bypass nominal R:R threshold gate and award full 10 points based on trailing stop specification.
+                netRr = 2.0 // Nominal expectation
+                10
+            } else if (signal.takeProfitPrice != null && signal.stopLossPrice != null && currentPrice > 0.0) {
                 netRr = calculateNetRiskReward(currentPrice, signal.takeProfitPrice, signal.stopLossPrice)
 
                 if (netRr < MIN_NET_RR_THRESHOLD) {
