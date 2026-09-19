@@ -849,7 +849,7 @@ class TradingForegroundService : Service() {
                                 pair = opp.pair,
                                 action = opp.actionLabel,
                                 status = com.coindcx.trading.engine.scanner.AuditStatus.EXECUTED,
-                                reason = "Executed — Placed ${opp.actionLabel} [Conf: ${"%.1f".format(opp.confidenceScore)}%] with ₹%.0f risk margin @ %dx".format(marginToAllocate, actualLeverage)
+                                reason = "Executed — Placed ${opp.actionLabel} [Conf: ${"%.1f".format(opp.confidenceScore)}%] with ₹${"%.0f".format(marginToAllocate)} risk margin @ ${actualLeverage}x"
                             )
                         )
                         AppLogManager.trade("EXEC", "Rank #${opp.rank} ${opp.pair} (${opp.actionLabel}, Conf: ${"%.1f".format(opp.confidenceScore)}%) executed in ${orderDurationMs}ms: ${execResult.message}")
