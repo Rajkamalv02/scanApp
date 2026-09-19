@@ -58,12 +58,22 @@ class CycleCandleCache(
     private suspend fun fetchCandlesWithBackoffInternal(
         pair: String,
         timeframe: String,
-        maxRetries: Int = 3
+        maxRetries: Int = 2
     ): List<MarketCandle>? {
         var backoffMs = 1000L
         for (attempt in 1..maxRetries) {
             try {
-                val resp = apiService.getCandles(pair, timeframe)
+                val resp = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                    apiService.getCandles(pair, timeframe)
+                }
+                if (resp == null) {
+                    AppLogManager.w("SCANNER", "[$pair] Timeout (10s) fetching $timeframe candles (Attempt $attempt/$maxRetries)")
+                    if (attempt == maxRetries) return null
+                    delay(backoffMs)
+                    backoffMs *= 2
+                    continue
+                }
+
                 if (resp.code() == 429) {
                     AppLogManager.w("SCANNER", "[$pair] HTTP 429 rate limited on $timeframe candles (Attempt $attempt/$maxRetries). Backing off for ${backoffMs}ms...")
                     delay(backoffMs)

@@ -103,10 +103,15 @@ class LiveExecutionEngine(
         val minNotionalUsdt = kotlin.math.max(6.0, futuresSpec?.minNotionalUsdt ?: spec?.minNotionalUsdt ?: 5.0)
 
         val rawQty = currencyConverter.convertInrMarginToContractQuantity(marginInr, leverage, currentPrice)
+        val precision = (futuresSpec?.targetCurrencyPrecision ?: spec?.targetCurrencyPrecision ?: 3).coerceIn(0, 8)
+        val stepBD = java.math.BigDecimal.valueOf(step).stripTrailingZeros()
+        val minQtyBD = java.math.BigDecimal.valueOf(minQty).stripTrailingZeros()
 
-        // 1. Calculate minimum quantity needed for CoinDCX minimum notional floor
+        // 1. Calculate minimum quantity needed for CoinDCX minimum notional floor aligned to step size
         val minNotionalFloorQty = if (currentPrice > 0 && step > 0) {
-            kotlin.math.ceil(minNotionalUsdt / (step * currentPrice)) * step
+            val minQtyExact = minNotionalUsdt / currentPrice
+            val stepsNeeded = kotlin.math.ceil(minQtyExact / step)
+            java.math.BigDecimal.valueOf(stepsNeeded * step).setScale(precision, java.math.RoundingMode.HALF_UP).toDouble()
         } else {
             minQty
         }
@@ -114,18 +119,16 @@ class LiveExecutionEngine(
         // 2. Target quantity must satisfy raw allocated margin, contract lot size (minQty), and minimum notional floor
         val targetQty = kotlin.math.max(rawQty, kotlin.math.max(minQty, minNotionalFloorQty))
 
-        // 3. Align with contract step size
-        val steps = if (step > 0) kotlin.math.round(targetQty / step) else targetQty
-        var quantity = if (step > 0) steps * step else targetQty
-        if (quantity < minQty) {
-            quantity = minQty
+        // 3. Enforce strict lot divisibility quantization: floor(targetQty / step) * step in BigDecimal
+        val targetQtyBD = java.math.BigDecimal.valueOf(targetQty)
+        val stepsBD = if (step > 0) {
+            targetQtyBD.divide(stepBD, 0, java.math.RoundingMode.FLOOR)
+        } else {
+            targetQtyBD
         }
-
-        val precision = (futuresSpec?.targetCurrencyPrecision ?: spec?.targetCurrencyPrecision ?: 3).coerceIn(0, 8)
-        val roundedQty = java.math.BigDecimal.valueOf(quantity)
-            .setScale(precision, java.math.RoundingMode.HALF_UP)
-            .toDouble()
-        val finalQty = roundedQty.coerceAtLeast(minQty)
+        val quantizedQty = if (step > 0) stepsBD.multiply(stepBD).setScale(precision, java.math.RoundingMode.HALF_UP) else targetQtyBD
+        val finalQtyBD = quantizedQty.max(minQtyBD).max(java.math.BigDecimal.valueOf(minNotionalFloorQty))
+        val finalQty = finalQtyBD.setScale(precision, java.math.RoundingMode.HALF_UP).toDouble()
 
         val notionalUsdt = finalQty * currentPrice
         val requiredMarginInr = (notionalUsdt * currencyConverter.getCachedUsdtInrRate()) / leverage
@@ -149,20 +152,45 @@ class LiveExecutionEngine(
                 .format(pair, rawQty, finalQty, minQty, step.toString(), precision, notionalUsdt, minNotionalUsdt)
         )
 
-        val pricePrecision = (spec?.baseCurrencyPrecision ?: if (currentPrice < 1.0) 4 else 2).coerceIn(0, 8)
-        val formattedSl = signal.stopLossPrice?.let {
+        val pricePrecision = (spec?.baseCurrencyPrecision ?: futuresSpec?.baseCurrencyPrecision ?: if (currentPrice < 1.0) 4 else 2).coerceIn(0, 8)
+        val tickSize = java.math.BigDecimal.ONE.movePointLeft(pricePrecision).toDouble()
+
+        var formattedSl = signal.stopLossPrice?.let {
             if (it > 0.0) {
                 java.math.BigDecimal.valueOf(it)
                     .setScale(pricePrecision, java.math.RoundingMode.HALF_UP)
                     .toDouble()
             } else null
         }
-        val formattedTp = signal.takeProfitPrice?.let {
+        var formattedTp = signal.takeProfitPrice?.let {
             if (it > 0.0) {
                 java.math.BigDecimal.valueOf(it)
                     .setScale(pricePrecision, java.math.RoundingMode.HALF_UP)
                     .toDouble()
             } else null
+        }
+
+        // Directional validation to guarantee CoinDCX never rejects bracket orders with HTTP 422:
+        // LONG: formattedSl < currentPrice, formattedTp > currentPrice
+        // SHORT: formattedSl > currentPrice, formattedTp < currentPrice
+        if (isBuy) {
+            if (formattedSl != null && formattedSl >= currentPrice) {
+                formattedSl = java.math.BigDecimal.valueOf(currentPrice - tickSize)
+                    .setScale(pricePrecision, java.math.RoundingMode.HALF_UP).toDouble()
+            }
+            if (formattedTp != null && formattedTp <= currentPrice) {
+                formattedTp = java.math.BigDecimal.valueOf(currentPrice + tickSize)
+                    .setScale(pricePrecision, java.math.RoundingMode.HALF_UP).toDouble()
+            }
+        } else {
+            if (formattedSl != null && formattedSl <= currentPrice) {
+                formattedSl = java.math.BigDecimal.valueOf(currentPrice + tickSize)
+                    .setScale(pricePrecision, java.math.RoundingMode.HALF_UP).toDouble()
+            }
+            if (formattedTp != null && formattedTp >= currentPrice) {
+                formattedTp = java.math.BigDecimal.valueOf(currentPrice - tickSize)
+                    .setScale(pricePrecision, java.math.RoundingMode.HALF_UP).toDouble()
+            }
         }
 
         AppLogManager.trade("LIVE_EXEC",

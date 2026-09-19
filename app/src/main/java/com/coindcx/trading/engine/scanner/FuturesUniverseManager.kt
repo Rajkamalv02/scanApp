@@ -157,9 +157,19 @@ class FuturesUniverseManager(
 
         if (constraints.maxSingleExposurePercent in 1.0..99.0) {
             val maxExposureInr = constraints.availableBalanceInr * (constraints.maxSingleExposurePercent / 100.0)
-            if (minMarginRequiredInr > maxExposureInr) {
-                AppLogManager.d("UNIVERSE", "[$pair] Excluded by Single Exposure Cap: Min order margin ₹%.2f > single position limit ₹%.2f (%.0f%% of ₹%.2f)"
-                    .format(minMarginRequiredInr, maxExposureInr, constraints.maxSingleExposurePercent, constraints.availableBalanceInr))
+            // On micro-accounts, the physical exchange notional floor ($6 USDT ~ ₹270 @ 2x) may naturally exceed
+            // a strict % cap (e.g. 30% of ₹990 = ₹297). Allow single minimum contract lot tolerance if it
+            // stays within safe micro-account ceiling (up to 50% of available cash).
+            val isMicroAccount = constraints.availableBalanceInr < 5000.0
+            val effectiveExposureCap = if (isMicroAccount) {
+                kotlin.math.max(maxExposureInr, constraints.availableBalanceInr * 0.50)
+            } else {
+                maxExposureInr
+            }
+
+            if (minMarginRequiredInr > effectiveExposureCap) {
+                AppLogManager.d("UNIVERSE", "[$pair] Excluded by Single Exposure Cap: Min order margin ₹%.2f > single position limit ₹%.2f (Base cap: ₹%.2f, %.0f%% of ₹%.2f)"
+                    .format(minMarginRequiredInr, effectiveExposureCap, maxExposureInr, constraints.maxSingleExposurePercent, constraints.availableBalanceInr))
                 return false
             }
         }

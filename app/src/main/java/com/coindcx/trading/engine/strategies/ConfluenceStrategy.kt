@@ -138,45 +138,59 @@ class ConfluenceStrategy(
         var latestConfluenceEvent = 0
         var latestStructureEvent = 0
 
+        // Pre-extract primitive arrays to eliminate per-bar heap allocations and unlock raw CPU caching
+        val n = confirmedCandles.size
+        val closes = DoubleArray(n)
+        val highs = DoubleArray(n)
+        val lows = DoubleArray(n)
+        val opens = DoubleArray(n)
+        for (idx in 0 until n) {
+            val c = confirmedCandles[idx]
+            closes[idx] = c.close
+            highs[idx] = c.high
+            lows[idx] = c.low
+            opens[idx] = c.open
+        }
+
         // Process bars chronologically
-        for (i in confirmedCandles.indices) {
-            val bar = confirmedCandles[i]
-            val currClose = bar.close
-            val barHigh = bar.high
-            val barLow = bar.low
-            val prevClose = if (i > 0) confirmedCandles[i - 1].close else currClose
+        for (i in 0 until n) {
+            val currClose = closes[i]
+            val barHigh = highs[i]
+            val barLow = lows[i]
+            val prevClose = if (i > 0) closes[i - 1] else currClose
 
             // 1. Pivot Detection (swingLen = 5)
             // A candle at index k = i - swingLen is confirmed as a pivot at bar i.
             if (i >= 2 * swingLen) {
                 val pivotIdx = i - swingLen
-                val candPivot = confirmedCandles[pivotIdx]
+                val candPivotHigh = highs[pivotIdx]
+                val candPivotLow = lows[pivotIdx]
 
                 // Check Pivot High
                 var isPivotHigh = true
                 for (j in 1..swingLen) {
-                    if (candPivot.high <= confirmedCandles[pivotIdx - j].high || candPivot.high < confirmedCandles[pivotIdx + j].high) {
+                    if (candPivotHigh <= highs[pivotIdx - j] || candPivotHigh < highs[pivotIdx + j]) {
                         isPivotHigh = false
                         break
                     }
                 }
                 if (isPivotHigh) {
                     previousSwingHigh = lastSwingHigh
-                    lastSwingHigh = candPivot.high
+                    lastSwingHigh = candPivotHigh
                     highSwept = false
                 }
 
                 // Check Pivot Low
                 var isPivotLow = true
                 for (j in 1..swingLen) {
-                    if (candPivot.low >= confirmedCandles[pivotIdx - j].low || candPivot.low > confirmedCandles[pivotIdx + j].low) {
+                    if (candPivotLow >= lows[pivotIdx - j] || candPivotLow > lows[pivotIdx + j]) {
                         isPivotLow = false
                         break
                     }
                 }
                 if (isPivotLow) {
                     previousSwingLow = lastSwingLow
-                    lastSwingLow = candPivot.low
+                    lastSwingLow = candPivotLow
                     lowSwept = false
                 }
             }
@@ -224,7 +238,7 @@ class ConfluenceStrategy(
                 }
                 structureState = -1
             }
-            if (i == confirmedCandles.lastIndex) {
+            if (i == n - 1) {
                 latestStructureEvent = structureEvent
             }
 
@@ -273,14 +287,15 @@ class ConfluenceStrategy(
                 var demandOffset: Int? = null
                 for (offset in 1..maxLookback) {
                     val idx = i - offset
-                    if (idx >= 0 && demandOffset == null && confirmedCandles[idx].close < confirmedCandles[idx].open) {
+                    if (idx >= 0 && closes[idx] < opens[idx]) {
                         demandOffset = offset
+                        break // Anchor found, early exit
                     }
                 }
                 if (demandOffset != null) {
-                    val anchor = confirmedCandles[i - demandOffset]
-                    demandZoneTop = anchor.high
-                    demandZoneBottom = anchor.low
+                    val anchorIdx = i - demandOffset
+                    demandZoneTop = highs[anchorIdx]
+                    demandZoneBottom = lows[anchorIdx]
                     demandZoneActive = true
                     demandZoneTapped = false
                     demandZoneEvent = 1
@@ -291,26 +306,36 @@ class ConfluenceStrategy(
                 var supplyOffset: Int? = null
                 for (offset in 1..maxLookback) {
                     val idx = i - offset
-                    if (idx >= 0 && supplyOffset == null && confirmedCandles[idx].close > confirmedCandles[idx].open) {
+                    if (idx >= 0 && closes[idx] > opens[idx]) {
                         supplyOffset = offset
+                        break // Anchor found, early exit
                     }
                 }
                 if (supplyOffset != null) {
-                    val anchor = confirmedCandles[i - supplyOffset]
-                    supplyZoneTop = anchor.high
-                    supplyZoneBottom = anchor.low
+                    val anchorIdx = i - supplyOffset
+                    supplyZoneTop = highs[anchorIdx]
+                    supplyZoneBottom = lows[anchorIdx]
                     supplyZoneActive = true
                     supplyZoneTapped = false
                     supplyZoneEvent = -1
                 }
             }
 
-            // 8. Impulse Engine (MAD-normalized price velocity)
+            // 8. Impulse Engine (Zero-allocation primitive MAD-normalized price velocity)
             if (i >= madLen) {
-                val windowCloses = (i - madLen + 1..i).map { confirmedCandles[it].close }
-                val impulseMean = windowCloses.average()
-                val impulseMad = windowCloses.map { abs(it - impulseMean) }.average()
-                val pastClose = if (i >= impulseLen) confirmedCandles[i - impulseLen].close else currClose
+                val startIdx = i - madLen + 1
+                var sum = 0.0
+                for (k in startIdx..i) {
+                    sum += closes[k]
+                }
+                val impulseMean = sum / madLen
+
+                var madSum = 0.0
+                for (k in startIdx..i) {
+                    madSum += abs(closes[k] - impulseMean)
+                }
+                val impulseMad = madSum / madLen
+                val pastClose = if (i >= impulseLen) closes[i - impulseLen] else currClose
                 val rawImpulse = if (impulseMad > 0) (currClose - pastClose) / impulseMad else 0.0
                 val absImpulse = abs(rawImpulse)
                 val currentImpulseDir = if (rawImpulse > 0) 1 else if (rawImpulse < 0) -1 else 0
