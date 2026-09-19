@@ -588,25 +588,33 @@ object TechnicalIndicators {
     }
 
     // =========================================================================
-    // 14. Z-Score (Population Stdev)
+    // 14. SMA, Stdev & Z-Score (Population Stdev)
     // =========================================================================
 
-    fun calculateZScore(series: CandleSeries, period: Int = 50, barIndex: Int = 0): Double {
+    fun calculateSmaAt(series: CandleSeries, period: Int = 50, barIndex: Int = 0): Double {
         if (series.size < barIndex + period) return 0.0
-
         var sum = 0.0
         for (i in barIndex until (barIndex + period)) {
             sum += series.close(i)
         }
-        val mean = sum / period
+        return sum / period
+    }
 
+    fun calculateStdev(series: CandleSeries, period: Int = 50, barIndex: Int = 0): Double {
+        if (series.size < barIndex + period) return 0.0
+        val mean = calculateSmaAt(series, period, barIndex)
         var varSum = 0.0
         for (i in barIndex until (barIndex + period)) {
             val d = series.close(i) - mean
             varSum += d * d
         }
-        val stdev = sqrt(varSum / period)
+        return sqrt(varSum / period)
+    }
 
+    fun calculateZScore(series: CandleSeries, period: Int = 50, barIndex: Int = 0): Double {
+        if (series.size < barIndex + period) return 0.0
+        val mean = calculateSmaAt(series, period, barIndex)
+        val stdev = calculateStdev(series, period, barIndex)
         return if (stdev > 0.0) (series.close(barIndex) - mean) / stdev else 0.0
     }
 
