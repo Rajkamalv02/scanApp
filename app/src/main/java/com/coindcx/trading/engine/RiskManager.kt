@@ -15,6 +15,7 @@ data class RiskSettings(
     val consecutiveLossLimit: Int = 3,               // 3 consecutive losses triggers cooldown
     val consecutiveLossCooldownMinutes: Long = 90L,  // 90-minute cooldown duration
     val liquidationBufferMultiplier: Double = 1.25,  // Tunable: Minimum 25% clearance between SL and Liquidation
+    val maxFloorRiskPercent: Double = 2.5,           // Max single-trade risk cap on exchange floor bump (allows micro-accounts to trade at 2x)
     val symbolLossCooldownMinutes: Long = 30L,       // 30-minute lockout on a specific pair after taking a loss
     val breakevenTriggerRMultiple: Double = 1.0,     // Trigger breakeven stop once profit reaches +1.0R
     val entryOrderTtlSeconds: Long = 120L            // Cancel unfilled entry limit orders after 120 seconds

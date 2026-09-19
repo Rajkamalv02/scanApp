@@ -580,7 +580,13 @@ class TradingForegroundService : Service() {
                 // Gate 3: Volatility-Adjusted Risk Parity Sizing (Single-pass Allocation SSOT Contract)
                 val fundedOpp = allocation.fundedOpportunities.firstOrNull { it.pair == opp.pair }
                 if (fundedOpp == null) {
-                    val rejectionReason = opp.statusMessage.ifBlank { opp.rejectionReason ?: "Capital allocation floor or budget exhausted" }
+                    val unfundedOpp = allocation.unfundedOpportunities.firstOrNull { it.pair == opp.pair }
+                    val rawReason = unfundedOpp?.statusMessage?.removePrefix("Unfunded: ")?.trim()
+                    val rejectionReason = if (!rawReason.isNullOrBlank()) {
+                        rawReason
+                    } else {
+                        opp.rejectionReason ?: "Capital allocation floor or budget exhausted"
+                    }
                     AppLogManager.tradeLifecycle(
                         event = "RISK_FILTER_REJECTED",
                         tradeId = tradeId,

@@ -240,7 +240,7 @@ class AllocationEngineTest {
             activePositionsCount = 0,
             leverage = 2,
             rankedOpportunities = candidates,
-            riskSettings = RiskSettings(maxConcurrentPositions = 5),
+            riskSettings = RiskSettings(maxConcurrentPositions = 5, maxFloorRiskPercent = 1.5),
             minExchangeNotionalInr = 620.0,
             riskPerTradePercent = 1.0,
             safetyReservePercent = 5.0
@@ -278,6 +278,41 @@ class AllocationEngineTest {
         assertEquals(1, result.fundedOpportunities.size)
         assertEquals(310.0, result.fundedOpportunities[0].allocatedMarginInr, 0.01)
         assertEquals(OpportunityLifecycle.SELECTED_FOR_TRADE, result.fundedOpportunities[0].lifecycleState)
+    }
+
+    @Test
+    fun testDynamicRiskParity_LiveScenario_Balance1000_StopLoss35_ApprovedWithDefault25Cap() {
+        // Equity = ₹986.87, Cash = ₹886.87, Reserve = ₹100.00
+        // Leverage = 2x, Min Notional = ₹616.39 -> Floor Margin = ₹309.00
+        // Stop Loss = 3.50% (e.g. entry 4.876, SL 4.70534)
+        // Floor Risk = 309 * 2 * 0.035 = ₹21.63 (2.19% of equity)
+        // Under default 2.5% cap: max tolerable risk = 986.87 * 0.025 = ₹24.67
+        // 21.63 <= 24.67 -> Successfully approved and funded!
+        val candidates = listOf(
+            createDummyOpportunityWithSl("B-AR_USDT", 1, 4.876, 4.70534),
+            createDummyOpportunityWithSl("B-ENA_USDT", 2, 0.2003, 0.1932895)
+        )
+
+        val result = allocator.allocateCapital(
+            accountEquityInr = 986.87,
+            availableCashInr = 886.87,
+            activePositionsCount = 0,
+            leverage = 2,
+            rankedOpportunities = candidates,
+            riskSettings = RiskSettings(maxConcurrentPositions = 3),
+            minExchangeNotionalInr = 616.39,
+            riskPerTradePercent = 1.0,
+            safetyReservePercent = 5.0
+        )
+
+        assertEquals(2, result.fundedOpportunities.size)
+        assertEquals("B-AR_USDT", result.fundedOpportunities[0].pair)
+        assertEquals(309.0, result.fundedOpportunities[0].allocatedMarginInr, 0.01)
+        assertEquals(OpportunityLifecycle.SELECTED_FOR_TRADE, result.fundedOpportunities[0].lifecycleState)
+
+        assertEquals("B-ENA_USDT", result.fundedOpportunities[1].pair)
+        assertEquals(309.0, result.fundedOpportunities[1].allocatedMarginInr, 0.01)
+        assertEquals(OpportunityLifecycle.SELECTED_FOR_TRADE, result.fundedOpportunities[1].lifecycleState)
     }
 
     @Test

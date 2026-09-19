@@ -37,7 +37,8 @@ class AllocationEngine {
         riskPerTradePercent: Double = 1.0,
         safetyReservePercent: Double = 5.0,
         maxSingleExposurePercent: Double = 30.0,
-        minTradeWeightPercent: Double = 2.0
+        minTradeWeightPercent: Double = 2.0,
+        maxFloorRiskPercent: Double = riskSettings.maxFloorRiskPercent
     ): AllocationResult {
         val effectiveLev = leverage.coerceIn(1, riskSettings.maxLeverage)
         val equity = accountEquityInr.coerceAtLeast(availableCashInr).coerceAtLeast(0.0)
@@ -110,7 +111,7 @@ class AllocationEngine {
         val unfunded = mutableListOf<MarketOpportunity>()
         val allProcessed = mutableListOf<MarketOpportunity>()
 
-        val maxTolerableRiskInr = equity * 0.015 // 1.5% max risk cap on floor bump
+        val maxTolerableRiskInr = equity * (maxFloorRiskPercent / 100.0) // Tunable max risk cap on floor bump (default 2.5% for micro-accounts)
 
         for (opp in rankedOpportunities) {
             // Signal Action Check
@@ -177,8 +178,8 @@ class AllocationEngine {
                             .format(governingFloorMargin, slotCeilingMargin)
                     }
                     floorRiskInr > maxTolerableRiskInr -> {
-                        rejectionReason = "Floor order forces ₹%.2f risk (%.2f%% of equity), exceeding 1.5%% cap"
-                            .format(floorRiskInr, (floorRiskInr / equity) * 100.0)
+                        rejectionReason = "Floor order forces ₹%.2f risk (%.2f%% of equity), exceeding %.1f%% cap"
+                            .format(floorRiskInr, (floorRiskInr / equity) * 100.0, maxFloorRiskPercent)
                     }
                     !isLiqSafe -> {
                         rejectionReason = "Liquidation distance (%.2f%%) at %dx leverage is within safety buffer (SL: %.2f%%)"

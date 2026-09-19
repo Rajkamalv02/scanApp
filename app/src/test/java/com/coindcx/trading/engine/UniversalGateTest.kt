@@ -30,11 +30,11 @@ class UniversalGateTest {
         assertFalse(resG1.isAllowed)
         assertEquals(RejectionCode.GATE_G1_UNIVERSE, resG1.rejection)
 
-        // G2: Quote volume < $5M
+        // G2: Quote volume < $300k
         val resG2 = SymbolGate.evaluate(
             pair = "B-LOWVOL_USDT",
             isInUniverse = true,
-            quoteVolume24h = 4_500_000.0,
+            quoteVolume24h = 250_000.0,
             bid = 100.0,
             ask = 100.04,
             lastPrice = 100.02
@@ -42,14 +42,14 @@ class UniversalGateTest {
         assertFalse(resG2.isAllowed)
         assertEquals(RejectionCode.GATE_G2_QUOTE_VOLUME, resG2.rejection)
 
-        // G5: Spread > 0.06% (e.g. bid=100.0, ask=100.10 -> mid=100.05, spread = 0.10/100.05 = 0.10%)
+        // G5: Spread > 0.35% (e.g. bid=100.0, ask=100.50 -> mid=100.25, spread = 0.50/100.25 = 0.498%)
         val resG5 = SymbolGate.evaluate(
             pair = "B-WIDESPREAD_USDT",
             isInUniverse = true,
             quoteVolume24h = 10_000_000.0,
             bid = 100.0,
-            ask = 100.10,
-            lastPrice = 100.05
+            ask = 100.50,
+            lastPrice = 100.25
         )
         assertFalse(resG5.isAllowed)
         assertEquals(RejectionCode.GATE_G5_SPREAD, resG5.rejection)
