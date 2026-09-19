@@ -80,3 +80,15 @@ data class RangeMaturityState(
     val consecutiveBarsInRange: Int,
     override val lastUpdatedBarOpenTime: Long
 ) : StrategyState
+
+data class RelativeStrengthHolding(
+    val symbol: String,
+    val direction: SignalDirection,
+    val entryBarOpenTime: Long,
+    val alphaRankPct: Double
+)
+
+data class CrossSectionalState(
+    val activeHoldings: Map<String, RelativeStrengthHolding> = emptyMap(),
+    override val lastUpdatedBarOpenTime: Long = 0L
+) : StrategyState
