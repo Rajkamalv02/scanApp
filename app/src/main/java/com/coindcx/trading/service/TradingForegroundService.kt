@@ -19,6 +19,7 @@ import com.coindcx.trading.engine.scanner.MarketScanState
 import com.coindcx.trading.engine.scanner.MarketScannerEngine
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
 import com.coindcx.trading.engine.scanner.OpportunityRanker
+import com.coindcx.trading.engine.scanner.TradeCandidateSelector
 import com.coindcx.trading.ui.MainActivity
 import com.coindcx.trading.util.AppLogManager
 import kotlinx.coroutines.*
@@ -38,6 +39,7 @@ class TradingForegroundService : Service() {
     private lateinit var liveEngine: LiveExecutionEngine
     private lateinit var scannerEngine: MarketScannerEngine
     private lateinit var ranker: OpportunityRanker
+    private lateinit var tradeCandidateSelector: TradeCandidateSelector
     private lateinit var allocator: AllocationEngine
     private lateinit var executionEngine: ExecutionEngine
     private lateinit var riskManager: RiskManager
@@ -78,6 +80,7 @@ class TradingForegroundService : Service() {
         scannerEngine = MarketScannerEngine(ApiClient.apiService)
         liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter, scannerEngine.universeManager)
         ranker = OpportunityRanker()
+        tradeCandidateSelector = TradeCandidateSelector()
         allocator = AllocationEngine()
         riskManager = RiskManager(context = applicationContext)
         executionEngine = paperEngine
@@ -356,10 +359,7 @@ class TradingForegroundService : Service() {
                 }
             }
 
-            // 3. Rank Opportunities from #1 to #5
-            val rankedTop5 = ranker.rankOpportunities(rawOpportunities)
-
-            // 4. Initial Dynamic Allocation (Risk-Parity & Balance-Aware)
+            // 3. Trade Candidate Selection & Dynamic Capacity Allocation (§E, §F)
             val openPositions = executionEngine.getAllOpenPositions().filter { it.isOpen }
             val totalEquityInr = if (executionEngine.isPaperTrading) {
                 paperEngine.accountManager.getAccountSummary().totalEquityInr
@@ -368,19 +368,36 @@ class TradingForegroundService : Service() {
             }
 
             val dynamicMinNotionalInr = currencyConverter.getDynamicMinNotionalInr()
+            val selection = tradeCandidateSelector.selectCandidates(
+                candidates = rawOpportunities,
+                accountEquityInr = totalEquityInr,
+                availableCashInr = initialBalanceInr,
+                activePositionsCount = openPositions.size,
+                maxConcurrentPositions = riskManager.settings.maxConcurrentPositions.coerceAtLeast(1),
+                leverage = config.leverage,
+                minExchangeNotionalInr = dynamicMinNotionalInr,
+                riskPerTradePercent = config.riskPerTradePercent,
+                maxPortfolioRiskPercent = 4.0,
+                safetyReservePercent = config.safetyReservePercent
+            )
+
+            val approvedCandidates = selection.approvedTrades
+
+            // 4. Initial Dynamic Allocation (Risk-Parity & Balance-Aware) for Approved Candidates (M <= K)
             val allocation = allocator.allocateCapital(
                 accountEquityInr = totalEquityInr,
                 availableCashInr = initialBalanceInr,
                 activePositionsCount = openPositions.size,
                 leverage = config.leverage,
-                rankedOpportunities = rankedTop5,
+                rankedOpportunities = approvedCandidates,
                 riskSettings = riskManager.settings,
                 minExchangeNotionalInr = dynamicMinNotionalInr,
                 riskPerTradePercent = config.riskPerTradePercent,
                 safetyReservePercent = config.safetyReservePercent,
                 maxSingleExposurePercent = config.maxSingleExposurePercent
             )
-            MarketScanState.update(allocation.allRankedOpportunities, allocation, cycle)
+            val allDisplayOpportunities = allocation.allRankedOpportunities + selection.deferredTrades
+            MarketScanState.update(allDisplayOpportunities, allocation, cycle)
 
             // 5. Sequential Just-In-Time Pre-Trade Validation with In-Memory Counters
             val inMemoryOpenPositions = executionEngine.getAllOpenPositions().toMutableList()
@@ -400,7 +417,7 @@ class TradingForegroundService : Service() {
                 } else null
             } catch (_: Exception) { null }
 
-            for (opp in rankedTop5) {
+            for (opp in approvedCandidates) {
                 val tradeId = opp.signal.tradeId ?: AppLogManager.TradeIdGenerator.generate(opp.pair)
 
                 // Signal Action Check: Must be actionable entry
@@ -724,6 +741,32 @@ class TradingForegroundService : Service() {
                         .format(approvedStratName, opp.actionLabel, opp.pair, actualLeverage)
                 )
 
+                try {
+                    val auditJson = org.json.JSONObject().apply {
+                        put("timestamp_utc", System.currentTimeMillis())
+                        put("symbol", opp.pair)
+                        put("is_dynamic_mover", true)
+                        put("mover_mas_score", opp.marketActivityScore)
+                        put("strategy_timeframe", config.timeframe)
+                        put("consensus_count", opp.contributingStrategies.size.coerceAtLeast(1))
+                        put("aggregated_confidence", opp.confidenceScore)
+                        put("reconciled_levels", org.json.JSONObject().apply {
+                            put("entry", opp.currentPrice)
+                            put("stop_loss", slPrice)
+                            put("take_profit", tpPrice)
+                            put("net_rr", opp.netRiskRewardRatio)
+                        })
+                        put("account_capacity_snapshot", org.json.JSONObject().apply {
+                            put("available_balance_inr", inMemoryAvailableBalance)
+                            put("capacity_k", selection.capacityK)
+                            put("active_positions", inMemoryOpenPositions.size)
+                        })
+                        put("final_decision", "APPROVED")
+                        put("decision_reason", opp.selectionReason)
+                    }
+                    AppLogManager.scanner("[AUDIT_LINEAGE] ${auditJson.toString(2)}")
+                } catch (_: Exception) {}
+
                 AppLogManager.tradeLifecycle(
                     event = "ORDER_CONSTRUCTION",
                     tradeId = tradeId,
@@ -850,14 +893,14 @@ class TradingForegroundService : Service() {
             val skippedBalanceCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.SKIPPED_INSUFFICIENT_BALANCE }
             val watchingCount = audits.count { it.status == com.coindcx.trading.engine.scanner.AuditStatus.WATCHING }
 
-            AppLogManager.scanner("Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Ranked Top ${rankedTop5.size}. Executed: $executedCount | Filtered: $watchingCount watching, $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance.")
+            AppLogManager.scanner("Scan #$cycle complete: Scanned ${rawOpportunities.size} pairs. Approved candidates: ${approvedCandidates.size} (Dynamic Capacity K=${selection.capacityK}: Slots: ${selection.capacitySlots}, Margin: ${selection.capacityMargin}, Risk: ${selection.capacityRisk}). Executed: $executedCount | Filtered: $watchingCount watching, $rejectedCount low quality, $skippedLimitCount risk limit, $skippedExistingCount held, $skippedBalanceCount balance.")
 
             // Update Notification
-            val topPick = rankedTop5.firstOrNull()?.assetSymbol ?: "None"
+            val topPick = approvedCandidates.firstOrNull()?.assetSymbol ?: "None"
             val finalBalance = executionEngine.getAvailableBalanceInr()
             updateNotification(
-                "Bot Active ($modeLabel) | Top: $topPick",
-                "Cycle #$cycle | Bal: ₹%.0f | Audited ${audits.size} | Next: ${config.scanIntervalMinutes}m".format(finalBalance)
+                "Bot Active ($modeLabel) | Approved: ${approvedCandidates.size} (K=${selection.capacityK})",
+                "Cycle #$cycle | Bal: ₹%.0f | Executed: $executedCount | Next: ${config.scanIntervalMinutes}m".format(finalBalance)
             )
         } catch (e: Exception) {
             AppLogManager.e("SCANNER", "Scan cycle #$scanCycleCounter error: ${e.message}", e)

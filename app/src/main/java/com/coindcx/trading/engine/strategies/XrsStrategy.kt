@@ -38,7 +38,9 @@ class XrsStrategy(
     val plannedRR: Double = 2.0,
     val expiryBars: Int = 30,
     override val primaryInterval: Interval = Interval.H4
-) : UniverseStrategy {
+) : UniverseStrategy, Strategy {
+
+    override val requiredIntervals: Set<Interval> = setOf(Interval.M15, Interval.H1, Interval.H4)
 
     override val id: String = "xrs"
     override val name: String = "Cross-Sectional Relative Strength Strategy"
@@ -320,5 +322,62 @@ class XrsStrategy(
             newState = updatedState,
             symbolRejections = symbolRejections
         )
+    }
+
+    override fun evaluate(ctx: SymbolContext, state: StrategyState?): StrategyResult {
+        val symbol = ctx.symbol
+        val series = ctx.primarySeries
+        if (series.size < 20) {
+            return StrategyResult(null, state, listOf(RejectionCode.GATE_G6_INSUFFICIENT_HISTORY))
+        }
+
+        val currClose = series.close(0)
+        val atr = TechnicalIndicators.calculateAtr(series, 14, 0)
+        val stopDistance = (atr * stopAtrMultiplier).coerceAtLeast(currClose * 0.005)
+
+        val decile = ctx.relativeStrengthDecile
+        if (decile >= 9) {
+            val sl = currClose - stopDistance
+            val tp = currClose + (stopDistance * plannedRR)
+            val signal = Signal(
+                symbol = symbol,
+                strategyId = id,
+                direction = SignalDirection.LONG,
+                barOpenTimeUtc = series.openTime(0),
+                entryRef = currClose,
+                stopLoss = sl,
+                target = Target.Fixed(tp, null, plannedRR),
+                riskDistance = stopDistance,
+                riskPct = if (currClose > 0) (stopDistance / currClose) * 100.0 else 0.0,
+                regimeTag = RegimeTag.TREND_UP,
+                strategyName = name,
+                reason = "XRS Long: Cross-sectional top decile leader (Decile: $decile/10, Rank: #${ctx.relativeStrengthRank})",
+                confidenceScore = 75.0 + (decile - 9) * 5.0,
+                explicitAction = SignalAction.ENTER_LONG
+            )
+            return StrategyResult(signal, state, emptyList())
+        } else if (decile <= 2 && decile > 0) {
+            val sl = currClose + stopDistance
+            val tp = currClose - (stopDistance * plannedRR)
+            val signal = Signal(
+                symbol = symbol,
+                strategyId = id,
+                direction = SignalDirection.SHORT,
+                barOpenTimeUtc = series.openTime(0),
+                entryRef = currClose,
+                stopLoss = sl,
+                target = Target.Fixed(tp, null, plannedRR),
+                riskDistance = stopDistance,
+                riskPct = if (currClose > 0) (stopDistance / currClose) * 100.0 else 0.0,
+                regimeTag = RegimeTag.TREND_DOWN,
+                strategyName = name,
+                reason = "XRS Short: Cross-sectional bottom decile laggard (Decile: $decile/10, Rank: #${ctx.relativeStrengthRank})",
+                confidenceScore = 75.0 + (2 - decile) * 5.0,
+                explicitAction = SignalAction.ENTER_SHORT
+            )
+            return StrategyResult(signal, state, emptyList())
+        }
+
+        return StrategyResult(null, state, listOf(RejectionCode.S5_NOT_IN_TARGET_DECILE))
     }
 }

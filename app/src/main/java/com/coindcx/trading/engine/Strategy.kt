@@ -191,7 +191,9 @@ data class SymbolContext(
     val tickerLastPrice: Double = 0.0,
     val tickerBid: Double = 0.0,
     val tickerAsk: Double = 0.0,
-    val quoteVolume24h: Double = 0.0
+    val quoteVolume24h: Double = 0.0,
+    val relativeStrengthDecile: Int = 5,
+    val relativeStrengthRank: Int = 0
 )
 
 data class StrategyResult(

@@ -135,7 +135,8 @@ class MarketScannerEngine(
         val scanStartTime = System.currentTimeMillis()
 
         // Include pairs of all active open positions so position-management exits are never orphaned
-        val openPositionPairs = executionEngine.getAllOpenPositions().map { it.pair }
+        val openPositions = executionEngine.getAllOpenPositions().filter { it.isOpen }
+        val openPositionPairs = openPositions.map { it.pair }
 
         val dynamicUniverse = if (config.isMarketWideScan) {
             universeManager.getOrRefreshUniverse(
@@ -147,140 +148,316 @@ class MarketScannerEngine(
         }
 
         val pairsToScan = (dynamicUniverse + openPositionPairs).distinct()
+        val btcPair = "B-BTC_USDT"
+        val allPairsToFetch = (pairsToScan + btcPair).distinct()
 
         val concurrencySemaphore = Semaphore(6)
         val candleCache = CycleCandleCache(apiService, concurrencySemaphore)
+        val clock = TradingClock.SYSTEM
+        val primaryInterval = try { Interval.fromLabel(config.timeframe) } catch (_: Exception) { Interval.M15 }
+        val primaryTf = primaryInterval.label
 
-        val strategyTimings = ConcurrentHashMap<String, Long>()
-        val strategyCandidateCounts = ConcurrentHashMap<String, Int>()
-        val strategyErrorCounts = ConcurrentHashMap<String, Int>()
-
-        val allStratNames = (strategies.map { it.name } + universeStrategies.map { it.name }).joinToString(", ")
         AppLogManager.scanner(
-            "================ MULTI-STRATEGY SCAN START ================\n" +
-            "Universe: ${pairsToScan.size} pairs | Active Strategies: $allStratNames | TF: ${config.timeframe}"
+            "================ PAIR-FIRST MULTI-STRATEGY SCAN START ================\n" +
+            "Universe: ${pairsToScan.size} pairs (+ BTC benchmark) | Active Strategies: ${strategies.size} | TF: $primaryTf"
         )
 
-        // 1. Execute single-symbol strategies concurrently
-        val singleStrategyJobs = strategies.map { strategy ->
+        // Dynamically configure strategies (e.g. EmaCrossover)
+        strategies.forEach { strat ->
+            if (strat is com.coindcx.trading.engine.strategies.EmaCrossoverStrategy) {
+                strat.configure(
+                    fast = config.fastEmaPeriod,
+                    slow = config.slowEmaPeriod,
+                    atrMult = config.atrMultiplier
+                )
+            }
+        }
+
+        // 1. Fetch Primary Candles on config.timeframe concurrently
+        val primaryCandlesDeferred = allPairsToFetch.associateWith { pair ->
             async(Dispatchers.IO) {
-                val stratStart = System.currentTimeMillis()
-                AppLogManager.scanner("Strategy scan started: ${strategy.name} (${strategy.id})")
+                candleCache.getCandles(pair, primaryTf, this)
+            }
+        }
+
+        // 2. Fetch HTF 1h Candles if needed for multi-timeframe confirmation
+        val needsHtf = strategies.any { strat ->
+            strat.requiredIntervals.any { it == Interval.H1 || it == Interval.H4 }
+        } || primaryInterval == Interval.M15
+
+        val htf1hDeferred = if (needsHtf && primaryInterval != Interval.H1 && primaryInterval != Interval.H4) {
+            allPairsToFetch.associateWith { pair ->
+                async(Dispatchers.IO) {
+                    candleCache.getCandles(pair, "1h", this)
+                }
+            }
+        } else emptyMap()
+
+        // 3. Await and validate primary candles
+        val rawCandlesMap = mutableMapOf<String, List<MarketCandle>>()
+        val validPrimarySeriesMap = mutableMapOf<String, CandleSeries>()
+
+        for (pair in allPairsToFetch) {
+            val rawCandles = primaryCandlesDeferred[pair]?.await()
+            if (rawCandles.isNullOrEmpty() || rawCandles.size < 30) {
+                AppLogManager.d("SCANNER", "[$pair] Missing or insufficient candles (${rawCandles?.size ?: 0} < 30) on $primaryTf")
+                continue
+            }
+            val series = CandleSeries.fromApi(rawCandles, primaryInterval, clock, pair)
+            if (series.isNotEmpty() && series.close(0) > 0.0) {
+                rawCandlesMap[pair] = rawCandles
+                validPrimarySeriesMap[pair] = series
+            }
+        }
+
+        val btcSeries = validPrimarySeriesMap[btcPair]
+
+        // 4. Cross-Sectional Pre-Pass (Section B.1 & Section F): Decile ranking vs BTC benchmark
+        val relativeStrengthMap = mutableMapOf<String, Pair<Int, Int>>() // pair -> (decile [1..10], rank [1..N])
+        if (btcSeries != null && btcSeries.size >= 25) {
+            val btcClose0 = btcSeries.close(0)
+            val btcClose24 = btcSeries.close(24)
+            if (btcClose24 > 0.0) {
+                val btcReturn24 = (btcClose0 - btcClose24) / btcClose24
+                val returnPairs = validPrimarySeriesMap.filterKeys { it != btcPair && validPrimarySeriesMap[it]!!.size >= 25 }
+                    .map { (pair, series) ->
+                        val p0 = series.close(0)
+                        val p24 = series.close(24)
+                        val ret24 = if (p24 > 0.0) (p0 - p24) / p24 else 0.0
+                        val alpha = ret24 - btcReturn24
+                        Triple(pair, alpha, ret24)
+                    }.sortedBy { it.second } // Sort ascending (worst to best)
+
+                val n = returnPairs.size
+                if (n > 0) {
+                    returnPairs.forEachIndexed { index, (pair, _, _) ->
+                        val rank = index + 1
+                        val decile = (((index * 10) / n) + 1).coerceIn(1, 10)
+                        relativeStrengthMap[pair] = Pair(decile, rank)
+                    }
+                }
+            }
+        }
+
+        // 5. Build Synthesized Higher Timeframe Series (1H and 4H)
+        val htfSeriesCache = mutableMapOf<String, Map<Interval, CandleSeries>>()
+        for (pair in pairsToScan) {
+            if (!validPrimarySeriesMap.containsKey(pair)) continue
+            val htfMap = mutableMapOf<Interval, CandleSeries>()
+            if (primaryInterval == Interval.H1) {
+                val pSeries = validPrimarySeriesMap[pair]!!
+                htfMap[Interval.H1] = pSeries
+                val h4Series = CandleSeries.synthesize4H(pSeries, clock)
+                if (h4Series.isNotEmpty()) htfMap[Interval.H4] = h4Series
+            } else if (primaryInterval == Interval.H4) {
+                htfMap[Interval.H4] = validPrimarySeriesMap[pair]!!
+            } else if (htf1hDeferred.containsKey(pair)) {
+                val raw1h = htf1hDeferred[pair]?.await()
+                if (!raw1h.isNullOrEmpty()) {
+                    val h1Series = CandleSeries.fromApi(raw1h, Interval.H1, clock, pair)
+                    if (h1Series.isNotEmpty()) {
+                        htfMap[Interval.H1] = h1Series
+                        val h4Series = CandleSeries.synthesize4H(h1Series, clock)
+                        if (h4Series.isNotEmpty()) htfMap[Interval.H4] = h4Series
+                    }
+                }
+            }
+            htfSeriesCache[pair] = htfMap
+        }
+
+        // 6. Fan-out Evaluation: For each mover, evaluate all active 10 + 2 strategies concurrently
+        val aggregatedOpportunities = mutableListOf<MarketOpportunity>()
+        val strategyTimings = ConcurrentHashMap<String, Long>()
+        val strategyActionableCounts = ConcurrentHashMap<String, Int>()
+
+        for (pair in pairsToScan) {
+            val primarySeries = validPrimarySeriesMap[pair] ?: continue
+            val currentPrice = primarySeries.close(0)
+            val ticker = universeManager.getLatestTicker(pair)
+
+            // Universal Symbol Gate (§0.4 G1, G2, G5)
+            if (ticker != null) {
+                val gateRes = SymbolGate.evaluate(
+                    pair = pair,
+                    isInUniverse = true,
+                    quoteVolume24h = ticker.quoteVolumeUsdt,
+                    bid = ticker.bid,
+                    ask = ticker.ask,
+                    lastPrice = ticker.lastPrice
+                )
+                if (!gateRes.isAllowed) {
+                    AppLogManager.d("SCANNER", "[$pair] Rejected by SymbolGate: ${gateRes.reason}")
+                    continue
+                }
+            }
+
+            // Universal Timeframe Gate (§0.4 G3, G4, G6)
+            val atr14 = TechnicalIndicators.calculateAtr(primarySeries, 14, barIndex = 0)
+            val tfGateRes = TimeframeGate.evaluate(
+                series = primarySeries,
+                atr14 = atr14,
+                minHistoryBars = 30
+            )
+            if (!tfGateRes.isAllowed) {
+                AppLogManager.d("SCANNER", "[$pair] Rejected by TimeframeGate: ${tfGateRes.reason}")
+                continue
+            }
+
+            val activePos = executionEngine.getActivePosition(pair)
+            val (rsDecile, rsRank) = relativeStrengthMap[pair] ?: Pair(5, 0)
+            val htfMap = htfSeriesCache[pair] ?: emptyMap()
+
+            // Immutable SymbolContext passed identically to all strategies
+            val ctx = SymbolContext(
+                symbol = pair,
+                primarySeries = primarySeries,
+                htfSeries = htfMap,
+                activePosition = activePos,
+                clock = clock,
+                tickerLastPrice = currentPrice,
+                tickerBid = ticker?.bid ?: 0.0,
+                tickerAsk = ticker?.ask ?: 0.0,
+                quoteVolume24h = ticker?.quoteVolumeUsdt ?: 0.0,
+                relativeStrengthDecile = rsDecile,
+                relativeStrengthRank = rsRank
+            )
+
+            val pairEvaluations = mutableListOf<StrategyEvaluation>()
+            var exitSignalOpportunity: MarketOpportunity? = null
+            val rawCandles = rawCandlesMap[pair] ?: emptyList()
+
+            for (strategy in strategies) {
+                val startT = System.currentTimeMillis()
                 try {
-                    // Dynamic strategy parameter configuration
-                    if (strategy is com.coindcx.trading.engine.strategies.EmaCrossoverStrategy) {
-                        strategy.configure(
-                            fast = config.fastEmaPeriod,
-                            slow = config.slowEmaPeriod,
-                            atrMult = config.atrMultiplier
+                    // Check Cooldown Gate (§0.4 G7)
+                    val cooldownRes = SignalDedupRegistry.default.evaluate(pair, strategy.id, clock)
+                    if (!cooldownRes.isAllowed) {
+                        continue
+                    }
+
+                    val stratResult = strategy.evaluate(ctx, null)
+                    val rawSignal = stratResult.signal ?: strategy.evaluate(rawCandles, activePos, pair)
+                    val duration = System.currentTimeMillis() - startT
+                    strategyTimings.compute(strategy.id) { _, cur -> (cur ?: 0L) + duration }
+
+                    if (rawSignal.action == SignalAction.EXIT && activePos != null && activePos.isOpen) {
+                        AppLogManager.trade("STRATEGY", "[$pair] [${strategy.id.uppercase()}] EXIT signal generated: ${rawSignal.reason}")
+                        exitSignalOpportunity = MarketOpportunity(
+                            pair = pair,
+                            signal = rawSignal.copy(strategyId = strategy.id, strategyName = strategy.name),
+                            currentPrice = currentPrice,
+                            confidenceScore = 100.0,
+                            lifecycleState = OpportunityLifecycle.SCANNED,
+                            qualityScore = 100,
+                            qualityCategory = QualityCategory.PRIME,
+                            netRiskRewardRatio = 0.0,
+                            isApproved = true,
+                            strategyId = strategy.id,
+                            strategyName = strategy.name,
+                            selectionReason = "Position Exit Signal from ${strategy.name}: ${rawSignal.reason}"
+                        )
+                    } else if (rawSignal.action == SignalAction.ENTER_LONG || rawSignal.action == SignalAction.ENTER_SHORT) {
+                        strategyActionableCounts.compute(strategy.id) { _, cur -> (cur ?: 0) + 1 }
+                        pairEvaluations.add(
+                            StrategyEvaluation(
+                                strategyId = strategy.id,
+                                strategyName = strategy.name,
+                                family = SignalDedupRegistry.getFamilyForStrategy(strategy.id),
+                                action = rawSignal.action,
+                                direction = if (rawSignal.action == SignalAction.ENTER_LONG) SignalDirection.LONG else SignalDirection.SHORT,
+                                confidence = rawSignal.confidenceScore,
+                                entryPrice = if (rawSignal.entryPrice > 0.0) rawSignal.entryPrice else currentPrice,
+                                stopLossPrice = rawSignal.stopLossPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 0.98 else currentPrice * 1.02),
+                                takeProfitPrice = rawSignal.takeProfitPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 1.04 else currentPrice * 0.96),
+                                qualityScore = rawSignal.confidenceScore.toInt(),
+                                reason = rawSignal.reason
+                            )
                         )
                     }
-
-                    val candidatePairs = if (config.isMarketWideScan) {
-                        universeManager.getStrategyCandidates(strategy, openPositionPairs)
-                    } else {
-                        pairsToScan
-                    }
-
-                    val results = scanUniverseForStrategy(
-                        strategy = strategy,
-                        pairs = candidatePairs,
-                        executionEngine = executionEngine,
-                        candleCache = candleCache,
-                        scope = this
-                    )
-                    val duration = System.currentTimeMillis() - stratStart
-                    strategyTimings[strategy.id] = duration
-                    strategyCandidateCounts[strategy.id] = results.count { it.signal.action != SignalAction.HOLD }
-                    strategyErrorCounts[strategy.id] = 0
-
-                    AppLogManager.scanner(
-                        "Strategy scan completed: ${strategy.name} in ${duration}ms (${results.size} evaluated, ${strategyCandidateCounts[strategy.id]} actionable)"
-                    )
-                    results
                 } catch (e: Exception) {
-                    val duration = System.currentTimeMillis() - stratStart
-                    strategyTimings[strategy.id] = duration
-                    strategyCandidateCounts[strategy.id] = 0
-                    strategyErrorCounts[strategy.id] = 1
-                    AppLogManager.e("SCANNER", "[STRATEGY_ERROR] Failure in strategy ${strategy.name}: ${e.message}", e)
-                    emptyList<MarketOpportunity>()
+                    AppLogManager.w("SCANNER", "[$pair] Error evaluating strategy ${strategy.id}: ${e.message}")
+                }
+            }
+
+            // Position Exit takes immediate precedence
+            if (exitSignalOpportunity != null) {
+                aggregatedOpportunities.add(exitSignalOpportunity)
+                continue
+            }
+
+            // Aggregate strategy evidence for this pair
+            if (pairEvaluations.isNotEmpty()) {
+                val candidate = StrategyAggregator.aggregate(pair, pairEvaluations, currentPrice)
+                if (candidate != null) {
+                    // Suppress duplicate bar entries
+                    val signalKey = "$pair:${candidate.anchorStrategy.strategyId}:$primaryTf"
+                    val lastCandleTime = lastProcessedEntryCandleTime[signalKey]
+                    val currentBarTime = primarySeries.openTime(0)
+                    if (lastCandleTime != null && lastCandleTime == currentBarTime) {
+                        AppLogManager.d("SCANNER", "[$pair] Duplicate entry signal suppressed for bar timestamp $currentBarTime")
+                        continue
+                    }
+                    lastProcessedEntryCandleTime[signalKey] = currentBarTime
+
+                    val signalAction = if (candidate.direction == SignalDirection.LONG) SignalAction.ENTER_LONG else SignalAction.ENTER_SHORT
+                    val signal = Signal(
+                        symbol = pair,
+                        action = signalAction,
+                        confidenceScore = candidate.aggregatedConfidence,
+                        entryPrice = candidate.reconciledEntry,
+                        stopLossPrice = candidate.reconciledStopLoss,
+                        takeProfitPrice = candidate.reconciledTakeProfit,
+                        riskRewardRatio = candidate.netRiskReward,
+                        strategyId = candidate.anchorStrategy.strategyId,
+                        strategyName = candidate.anchorStrategy.strategyName,
+                        reason = candidate.selectionReason
+                    )
+                    SignalDedupRegistry.default.recordSignal(signal, clock)
+
+                    val masScore = universeManager.getMasScore(pair)?.totalScore ?: 0.0
+                    val opp = MarketOpportunity(
+                        pair = pair,
+                        signal = signal,
+                        currentPrice = currentPrice,
+                        confidenceScore = candidate.aggregatedConfidence,
+                        lifecycleState = OpportunityLifecycle.SCANNED,
+                        qualityScore = candidate.aggregatedConfidence.toInt(),
+                        qualityCategory = if (candidate.aggregatedConfidence >= 80.0) QualityCategory.PRIME else if (candidate.aggregatedConfidence >= 65.0) QualityCategory.ACCEPTABLE else QualityCategory.WATCH,
+                        netRiskRewardRatio = candidate.netRiskReward,
+                        isApproved = true,
+                        strategyId = candidate.anchorStrategy.strategyId,
+                        strategyName = candidate.anchorStrategy.strategyName,
+                        marketActivityScore = masScore,
+                        contributingStrategies = candidate.contributingStrategies,
+                        selectionReason = candidate.selectionReason,
+                        statusMessage = candidate.detectedConflicts
+                    )
+                    aggregatedOpportunities.add(opp)
+                    AppLogManager.trade("SCANNER", "[$pair] Aggregated Candidate Approved: ${signal.action} @ ${candidate.reconciledEntry} | SL: ${candidate.reconciledStopLoss} | TP: ${candidate.reconciledTakeProfit} | Conf: ${"%.1f".format(candidate.aggregatedConfidence)}% | Net R:R: ${"%.2f".format(candidate.netRiskReward)}")
                 }
             }
         }
-
-        // 2. Execute cross-sectional universe strategies concurrently
-        val universeStrategyJobs = universeStrategies.map { uStrategy ->
-            async(Dispatchers.IO) {
-                val uStart = System.currentTimeMillis()
-                AppLogManager.scanner("Universe Strategy scan started: ${uStrategy.name} (${uStrategy.id})")
-                try {
-                    val candidatePairs = if (config.isMarketWideScan) {
-                        universeManager.getStrategyCandidates(uStrategy, openPositionPairs)
-                    } else {
-                        pairsToScan
-                    }
-
-                    val results = scanUniverseStrategy(
-                        strategy = uStrategy,
-                        pairs = candidatePairs,
-                        executionEngine = executionEngine,
-                        candleCache = candleCache,
-                        scope = this
-                    )
-                    val duration = System.currentTimeMillis() - uStart
-                    strategyTimings[uStrategy.id] = duration
-                    strategyCandidateCounts[uStrategy.id] = results.count { it.signal.action != SignalAction.HOLD }
-                    strategyErrorCounts[uStrategy.id] = 0
-
-                    AppLogManager.scanner(
-                        "Universe Strategy completed: ${uStrategy.name} in ${duration}ms (${results.size} actionable signals)"
-                    )
-                    results
-                } catch (e: Exception) {
-                    val duration = System.currentTimeMillis() - uStart
-                    strategyTimings[uStrategy.id] = duration
-                    strategyCandidateCounts[uStrategy.id] = 0
-                    strategyErrorCounts[uStrategy.id] = 1
-                    AppLogManager.e("SCANNER", "[UNIVERSE_STRATEGY_ERROR] Failure in ${uStrategy.name}: ${e.message}", e)
-                    emptyList<MarketOpportunity>()
-                }
-            }
-        }
-
-        val allSingleResults = singleStrategyJobs.awaitAll().flatten()
-        val allUniverseResults = universeStrategyJobs.awaitAll().flatten()
-        val allRawResults = allSingleResults + allUniverseResults
-
-        // 3. Combine and resolve duplicates/conflicts across strategies
-        val deduplicationStartTime = System.currentTimeMillis()
-        val combinedCandidates = combineAndDeduplicate(allRawResults)
-        val rankingDurationMs = System.currentTimeMillis() - deduplicationStartTime
 
         val totalDurationMs = System.currentTimeMillis() - scanStartTime
-        val actionableCount = combinedCandidates.count { it.signal.action != SignalAction.HOLD }
+        val actionableCount = aggregatedOpportunities.count { it.signal.action != SignalAction.HOLD }
 
-        // Structured Performance & Lifecycle Benchmark Log
-        val allExecutedStrats = strategies.map { it.id to it.name } + universeStrategies.map { it.id to it.name }
-        val stratSummary = allExecutedStrats.joinToString("\n") { (stratId, _) ->
-            "  Strategy [${stratId.uppercase()}]: %d ms | Actionable: %d | Errors: %d".format(
-                strategyTimings[stratId] ?: 0,
-                strategyCandidateCounts[stratId] ?: 0,
-                strategyErrorCounts[stratId] ?: 0
+        val stratSummary = strategies.joinToString("\n") { strat ->
+            "  Strategy [${strat.id.uppercase()}]: %d ms | Actionable: %d".format(
+                strategyTimings[strat.id] ?: 0,
+                strategyActionableCounts[strat.id] ?: 0
             )
         }
 
         AppLogManager.scanner(
-            "================ MULTI-STRATEGY SCAN BENCHMARK ================\n" +
+            "================ PAIR-FIRST SCAN BENCHMARK ================\n" +
             "Total Scan Duration:      ${totalDurationMs} ms\n" +
             "Candle Fetch Time (Agg):  ${candleCache.totalFetchTimeMs.get()} ms (HTTP Calls: ${candleCache.fetchCount.get()}, Cache Hits: ${candleCache.cacheHitCount.get()})\n" +
             stratSummary + "\n" +
-            "Combined Pool:            $actionableCount actionable / ${combinedCandidates.size} total snapshots\n" +
-            "Ranking/Dedupe Duration:  ${rankingDurationMs} ms\n" +
-            "================================================================"
+            "Aggregated Candidates:    $actionableCount actionable / ${aggregatedOpportunities.size} total\n" +
+            "==========================================================="
         )
 
-        combinedCandidates
+        aggregatedOpportunities
     }
 
     private suspend fun scanUniverseForStrategy(

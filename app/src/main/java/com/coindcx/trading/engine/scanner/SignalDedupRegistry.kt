@@ -43,10 +43,10 @@ class SignalDedupRegistry(
         val default = SignalDedupRegistry()
 
         fun getFamilyForStrategy(strategyId: String): StrategyFamily = when (strategyId.lowercase()) {
-            "pbc", "s1", "edtm", "s10", "ema_crossover" -> StrategyFamily.TREND
-            "vceb", "s2", "sorm", "s4", "irc", "s8" -> StrategyFamily.BREAKOUT
+            "pbc", "s1", "edtm", "s10", "ema_crossover", "confluence" -> StrategyFamily.TREND
+            "vceb", "s2", "sorm", "s4" -> StrategyFamily.BREAKOUT
             "lsr", "s3", "fpx", "s6", "rzmr", "s7" -> StrategyFamily.MEANREV
-            "sbob", "s9", "confluence" -> StrategyFamily.STRUCTURE
+            "irc", "s8", "sbob", "s9" -> StrategyFamily.STRUCTURE
             "xrs", "s5" -> StrategyFamily.ROTATION
             else -> StrategyFamily.TREND
         }

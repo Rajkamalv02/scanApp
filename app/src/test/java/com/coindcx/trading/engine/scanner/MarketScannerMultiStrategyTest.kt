@@ -417,11 +417,12 @@ class MarketScannerMultiStrategyTest {
                 activePosition: com.coindcx.trading.data.api.models.FuturesPosition?,
                 pair: String
             ): Signal {
+                val lastClose = candles.lastOrNull()?.close ?: 100.0
                 return Signal(
                     action = SignalAction.ENTER_LONG,
                     confidenceScore = 85.0,
-                    stopLossPrice = 90.0,
-                    takeProfitPrice = 120.0,
+                    stopLossPrice = lastClose * 0.98,
+                    takeProfitPrice = lastClose * 1.05,
                     reason = "Test Long Signal",
                     strategyId = id,
                     strategyName = name

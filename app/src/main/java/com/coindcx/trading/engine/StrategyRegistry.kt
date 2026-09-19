@@ -54,6 +54,7 @@ object StrategyRegistry {
         ircStrategy,
         sbobStrategy,
         edtmStrategy,
+        xrsStrategy,
         emaCrossoverStrategy,
         confluenceStrategy
     )
