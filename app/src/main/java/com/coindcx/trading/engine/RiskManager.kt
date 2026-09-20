@@ -18,6 +18,8 @@ data class RiskSettings(
     val maxFloorRiskPercent: Double = 2.5,           // Max single-trade risk cap on exchange floor bump (allows micro-accounts to trade at 2x)
     val symbolLossCooldownMinutes: Long = 30L,       // 30-minute lockout on a specific pair after taking a loss
     val breakevenTriggerRMultiple: Double = 1.0,     // Trigger breakeven stop once profit reaches +1.0R
+    val trailingStopActivationRMultiple: Double = 1.5, // Activate dynamic trailing stop once profit reaches +1.5R
+    val trailingStopDistanceRMultiple: Double = 1.0,   // Trailing distance in units of initial risk (1.0R)
     val entryOrderTtlSeconds: Long = 120L            // Cancel unfilled entry limit orders after 120 seconds
 )
 
