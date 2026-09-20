@@ -91,7 +91,8 @@ class TradingForegroundService : Service() {
         tradeCandidateSelector = TradeCandidateSelector()
         allocator = AllocationEngine()
         riskManager = RiskManager(context = applicationContext)
-        executionEngine = paperEngine
+        val isLive = configRepo.isLiveMode()
+        executionEngine = if (isLive) liveEngine else paperEngine
 
         val reconciliationEngine = ReconciliationEngine(
             apiService = ApiClient.apiService,
@@ -151,10 +152,13 @@ class TradingForegroundService : Service() {
             startForeground(NOTIFICATION_ID, initialNotification)
         }
 
-        if (intent?.hasExtra(EXTRA_IS_PAPER) == true) {
-            val isPaper = intent.getBooleanExtra(EXTRA_IS_PAPER, true)
-            executionEngine = if (isPaper) paperEngine else liveEngine
+        val isPaper = if (intent?.hasExtra(EXTRA_IS_PAPER) == true) {
+            intent.getBooleanExtra(EXTRA_IS_PAPER, !configRepo.isLiveMode())
+        } else {
+            !configRepo.isLiveMode()
         }
+        executionEngine = if (isPaper) paperEngine else liveEngine
+        configRepo.setLiveMode(!isPaper)
 
         when (intent?.action) {
             ACTION_START -> {
@@ -178,6 +182,7 @@ class TradingForegroundService : Service() {
                 AppLogManager.i("SERVICE", "Trading Bot Stopped by user.")
             }
             ACTION_SET_MODE -> {
+                configRepo.setLiveMode(!executionEngine.isPaperTrading)
                 val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
                 updateNotification("Bot Mode Changed ($modeLabel)", "Strategy: ${StrategyRegistry.activeStrategy.name}")
                 AppLogManager.i("MODE", "Switched execution mode to $modeLabel")
@@ -1033,7 +1038,6 @@ class TradingForegroundService : Service() {
                                 currentOpenPairs.add(pos.pair)
 
                                 val markPrice = pos.markPrice ?: continue
-                                val entryPrice = pos.avgPrice
                                 val meta = activeTradeMetadata[pos.pair]
                                 val originalSl = meta?.initialSl ?: pos.stopLossTrigger
                                 val tp = meta?.initialTp ?: pos.takeProfitTrigger

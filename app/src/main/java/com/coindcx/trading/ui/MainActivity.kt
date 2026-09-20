@@ -97,9 +97,9 @@ class MainActivity : AppCompatActivity() {
         if (configRepo.isBotRunning()) {
             binding.tvBotStatus.text = "ACTIVE"
             binding.tvBotStatus.setTextColor(getColor(R.color.accent_green))
-            val isPaper = !binding.switchLiveMode.isChecked
+            val isLive = configRepo.isLiveMode()
             sendServiceIntent(TradingForegroundService.ACTION_START) {
-                putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
+                putExtra(TradingForegroundService.EXTRA_IS_PAPER, !isLive)
             }
         }
     }
@@ -108,6 +108,9 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         updateStoragePermissionUi()
         binding.tvLogFileSize.text = AppLogManager.getLogFileSizeFormatted()
+
+        // Synchronize UI with persisted mode
+        updateModeUi(configRepo.isLiveMode())
     }
 
     override fun onPause() {
@@ -312,6 +315,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupExecutionModeToggle() {
+        val initialIsLive = configRepo.isLiveMode()
+        updateModeUi(initialIsLive)
+
         binding.switchLiveMode.setOnCheckedChangeListener { _, isChecked ->
             if (!isUserSwitchingMode) return@setOnCheckedChangeListener
 
@@ -324,9 +330,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     .setNegativeButton("Cancel") { dialog, _ ->
                         dialog.dismiss()
-                        isUserSwitchingMode = false
-                        binding.switchLiveMode.isChecked = false
-                        isUserSwitchingMode = true
+                        applyModeChange(isLive = false)
                     }
                     .setCancelable(false)
                     .show()
@@ -336,7 +340,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyModeChange(isLive: Boolean) {
+    private fun updateModeUi(isLive: Boolean) {
+        if (binding.switchLiveMode.isChecked != isLive) {
+            isUserSwitchingMode = false
+            binding.switchLiveMode.isChecked = isLive
+            isUserSwitchingMode = true
+        }
         if (isLive) {
             binding.tvModeBadge.text = "LIVE (REAL CAPITAL)"
             binding.tvModeBadge.setTextColor(getColor(R.color.accent_red))
@@ -350,15 +359,23 @@ class MainActivity : AppCompatActivity() {
             binding.tvModeWarning.text = "Risk-free simulation with slippage & taker fees. Real capital is untouched."
             binding.tvModeWarning.setTextColor(getColor(R.color.text_secondary))
         }
+    }
+
+    private fun applyModeChange(isLive: Boolean) {
+        configRepo.setLiveMode(isLive)
+        updateModeUi(isLive)
 
         sendServiceIntent(TradingForegroundService.ACTION_SET_MODE) {
             putExtra(TradingForegroundService.EXTRA_IS_PAPER, !isLive)
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            refreshAccountData()
         }
     }
 
     private fun setupButtons() {
         binding.btnStartTrading.setOnClickListener {
-            val isPaper = !binding.switchLiveMode.isChecked
+            val isPaper = !configRepo.isLiveMode()
             configRepo.setBotRunning(true)
             sendServiceIntent(TradingForegroundService.ACTION_START) {
                 putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
@@ -381,7 +398,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnRefreshExchange.setOnClickListener {
-            val isPaper = !binding.switchLiveMode.isChecked
+            val isPaper = !configRepo.isLiveMode()
             sendServiceIntent(TradingForegroundService.ACTION_REFRESH_EXCHANGE) {
                 putExtra(TradingForegroundService.EXTRA_IS_PAPER, isPaper)
             }
@@ -409,7 +426,7 @@ class MainActivity : AppCompatActivity() {
                         SystemLogEntity(level = "RISK", tag = "KILL_SWITCH", message = "Emergency Kill Switch Activated! Flattening positions and cancelling orders...")
                     )
 
-                    val isLiveMode = binding.switchLiveMode.isChecked
+                    val isLiveMode = configRepo.isLiveMode()
                     if (isLiveMode) {
                         // 1. Flatten all active live positions with market close orders first
                         val positionsPayload = mapOf(
@@ -817,7 +834,7 @@ class MainActivity : AppCompatActivity() {
                     renderPortfolio()
                 }
                 // Also update exchange live positions card if in paper mode
-                if (!binding.switchLiveMode.isChecked) {
+                if (!configRepo.isLiveMode()) {
                     renderPaperOpenPositions(openTrades)
                 }
             }
@@ -1130,7 +1147,7 @@ class MainActivity : AppCompatActivity() {
                     binding.tvUnrealizedPnl.setTextColor(getColor(R.color.accent_red))
                 }
 
-                if (binding.switchLiveMode.isChecked) {
+                if (configRepo.isLiveMode()) {
                     renderLiveOpenPositions(openPositions)
                 }
             }

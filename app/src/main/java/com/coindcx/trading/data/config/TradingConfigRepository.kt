@@ -34,6 +34,7 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_RSI_OVERSOLD = "rsi_oversold"
         private const val KEY_RSI_OVERBOUGHT = "rsi_overbought"
         private const val KEY_ALLOW_TIER2_LIVE = "allow_tier2_live"
+        private const val KEY_LIVE_MODE = "is_live_mode"
 
         @Volatile
         private var INSTANCE: TradingConfigRepository? = null
@@ -71,6 +72,16 @@ class TradingConfigRepository(context: Context) {
 
     fun setBotRunning(running: Boolean) {
         prefs.edit().putBoolean(KEY_BOT_RUNNING, running).apply()
+    }
+
+    /**
+     * Default execution mode is Live Mode (true).
+     * Once set by the user, it strictly persists across refreshes, navigation, and restarts.
+     */
+    fun isLiveMode(): Boolean = prefs.getBoolean(KEY_LIVE_MODE, true)
+
+    fun setLiveMode(isLive: Boolean) {
+        prefs.edit().putBoolean(KEY_LIVE_MODE, isLive).apply()
     }
 
     fun updateRiskProfile(profile: String, riskPct: Double) {
