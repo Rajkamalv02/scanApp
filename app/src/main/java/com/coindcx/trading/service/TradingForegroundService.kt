@@ -64,6 +64,17 @@ class TradingForegroundService : Service() {
         const val EXTRA_RESET_BALANCE = "EXTRA_RESET_BALANCE"
     }
 
+    data class ActiveTradeMetadata(
+        val pair: String,
+        val isLong: Boolean,
+        val entryPrice: Double,
+        val initialSl: Double,
+        val initialTp: Double,
+        val riskPerUnit: Double,
+        val strategyId: String,
+        val entryTimestamp: Long = System.currentTimeMillis()
+    )
+
     data class TrailingStopState(
         val pair: String,
         val isLong: Boolean,
@@ -73,11 +84,13 @@ class TradingForegroundService : Service() {
         var peakPrice: Double,
         var effectiveStop: Double,
         var isBreakevenActive: Boolean = false,
-        var isTrailingActive: Boolean = false
+        var isTrailingActive: Boolean = false,
+        var consecutiveBreachCount: Int = 0
     )
 
     private var positionMonitorJob: kotlinx.coroutines.Job? = null
     private val trailingStopStates = java.util.concurrent.ConcurrentHashMap<String, TrailingStopState>()
+    private val activeTradeMetadata = java.util.concurrent.ConcurrentHashMap<String, ActiveTradeMetadata>()
 
     override fun onCreate() {
         super.onCreate()
@@ -343,13 +356,23 @@ class TradingForegroundService : Service() {
                 accountConstraints = accountConstraints
             )
 
-            // 2.5. Process Strategy-Triggered Exits on Open Positions
+            // 2.5. Process Strategy-Triggered Exits on Open Positions (Strict Ownership Isolation)
             for (opp in rawOpportunities) {
                 if (opp.signal.action == com.coindcx.trading.engine.SignalAction.EXIT) {
+                    val tradeMeta = activeTradeMetadata[opp.pair]
+                    val oppStratId = opp.strategyId.ifBlank { opp.signal.strategyId }
+                    if (tradeMeta != null && !oppStratId.equals(tradeMeta.strategyId, ignoreCase = true)) {
+                        AppLogManager.d(
+                            "STRATEGY_EXIT",
+                            "Ignoring EXIT signal on ${opp.pair} from [$oppStratId] because position is owned by [${tradeMeta.strategyId}]"
+                        )
+                        continue
+                    }
+
                     val activePos = executionEngine.getActivePosition(opp.pair)
                     if (activePos != null && activePos.isOpen) {
                         val posTradeId = activePos.id
-                        val exitCondition = "${opp.strategyId.uppercase()}_EXIT_SIGNAL"
+                        val exitCondition = "${oppStratId.uppercase()}_EXIT_SIGNAL"
                         AppLogManager.tradeLifecycle(
                             event = "EXIT_SIGNAL",
                             tradeId = posTradeId,
@@ -357,13 +380,15 @@ class TradingForegroundService : Service() {
                             mode = modeLabel,
                             attributes = mapOf(
                                 "exit_condition" to exitCondition,
-                                "strategy" to opp.strategyId.ifBlank { opp.signal.strategyId },
+                                "strategy" to oppStratId,
                                 "reason" to opp.signal.reason,
                                 "current_price" to "%.4f".format(opp.currentPrice)
                             ),
-                            narrative = "Strategy [%s] EXIT signal on %s: %s @ %.4f".format(opp.strategyId.uppercase(), opp.pair, opp.signal.reason, opp.currentPrice)
+                            narrative = "Strategy [%s] EXIT signal on %s: %s @ %.4f".format(oppStratId.uppercase(), opp.pair, opp.signal.reason, opp.currentPrice)
                         )
                         executionEngine.exitPosition(opp.pair, opp.currentPrice, opp.signal.reason, posTradeId)
+                        activeTradeMetadata.remove(opp.pair)
+                        trailingStopStates.remove(opp.pair)
                     }
                 }
             }
@@ -854,6 +879,18 @@ class TradingForegroundService : Service() {
                             )
                         )
 
+                        val realR = kotlin.math.abs(opp.currentPrice - slPrice).coerceAtLeast(opp.currentPrice * 0.005)
+                        val tradeStratId = opp.strategyId.ifBlank { opp.signal.strategyId }
+                        activeTradeMetadata[opp.pair] = ActiveTradeMetadata(
+                            pair = opp.pair,
+                            isLong = opp.isBuy,
+                            entryPrice = opp.currentPrice,
+                            initialSl = slPrice,
+                            initialTp = tpPrice,
+                            riskPerUnit = realR,
+                            strategyId = tradeStratId
+                        )
+
                         AppLogManager.trade("ORDER_SUBMITTED", "[${opp.pair}] ${opp.actionLabel} -> order placed on exchange | Margin: ₹${"%.2f".format(marginToAllocate)} | Leverage: ${actualLeverage}x")
                         audits.add(
                             com.coindcx.trading.engine.scanner.TradeExecutionAudit(
@@ -1006,15 +1043,16 @@ class TradingForegroundService : Service() {
 
                                 val markPrice = pos.markPrice ?: continue
                                 val entryPrice = pos.avgPrice
-                                val originalSl = pos.stopLossTrigger
-                                val tp = pos.takeProfitTrigger
+                                val meta = activeTradeMetadata[pos.pair]
+                                val originalSl = meta?.initialSl ?: pos.stopLossTrigger
+                                val tp = meta?.initialTp ?: pos.takeProfitTrigger
 
                                 // Dynamic Breakeven & Continuous Trailing Stop Ratchet Engine
                                 if (entryPrice > 0.0) {
                                     val state = trailingStopStates.computeIfAbsent(pos.pair) {
                                         val fallbackSl = if (pos.isLong) entryPrice * 0.97 else entryPrice * 1.03
                                         val resolvedSl = if (originalSl != null && originalSl > 0.0) originalSl else fallbackSl
-                                        val rPerUnit = kotlin.math.abs(entryPrice - resolvedSl).coerceAtLeast(entryPrice * 0.005)
+                                        val rPerUnit = meta?.riskPerUnit ?: kotlin.math.abs(entryPrice - resolvedSl).coerceAtLeast(entryPrice * 0.005)
                                         TrailingStopState(
                                             pair = pos.pair,
                                             isLong = pos.isLong,
@@ -1024,14 +1062,15 @@ class TradingForegroundService : Service() {
                                             peakPrice = markPrice,
                                             effectiveStop = resolvedSl,
                                             isBreakevenActive = false,
-                                            isTrailingActive = false
+                                            isTrailingActive = false,
+                                            consecutiveBreachCount = 0
                                         )
                                     }
 
                                     val targetBeR = riskManager.settings.breakevenTriggerRMultiple
                                     val targetTrailR = riskManager.settings.trailingStopActivationRMultiple
                                     val trailDistR = riskManager.settings.trailingStopDistanceRMultiple
-                                    val feeBuffer = entryPrice * 0.001 // 0.1% round-trip fee buffer
+                                    val feeBuffer = maxOf(entryPrice * 0.0015, state.riskPerUnit * 0.20) // 0.2R fee/slippage cushion
 
                                     if (pos.isLong) {
                                         if (markPrice > state.peakPrice) {
@@ -1039,9 +1078,11 @@ class TradingForegroundService : Service() {
                                         }
                                         val currentGain = markPrice - entryPrice
                                         val currentR = currentGain / state.riskPerUnit
+                                        val peakGain = state.peakPrice - entryPrice
+                                        val peakR = peakGain / state.riskPerUnit
 
-                                        // 1. Dynamic Breakeven Ratchet (+1.0R)
-                                        if (currentR >= targetBeR && !state.isBreakevenActive) {
+                                        // 1. Dynamic Breakeven Ratchet (+1.5R)
+                                        if (peakR >= targetBeR && !state.isBreakevenActive) {
                                             val beStop = entryPrice + feeBuffer
                                             if (beStop > state.effectiveStop) {
                                                 state.effectiveStop = beStop
@@ -1054,17 +1095,19 @@ class TradingForegroundService : Service() {
                                                     attributes = mapOf(
                                                         "entry_price" to "%.4f".format(entryPrice),
                                                         "mark_price" to "%.4f".format(markPrice),
+                                                        "peak_price" to "%.4f".format(state.peakPrice),
                                                         "gain_r" to "%.2fR".format(currentR),
+                                                        "peak_r" to "%.2fR".format(peakR),
                                                         "breakeven_stop" to "%.4f".format(beStop)
                                                     ),
-                                                    narrative = "BREAKEVEN_RATCHET: %s reached +%.2fR gain @ %.4f. Stop loss secured at breakeven: %.4f"
-                                                        .format(pos.pair, currentR, markPrice, beStop)
+                                                    narrative = "BREAKEVEN_RATCHET: %s reached peak +%.2fR gain @ %.4f. Stop loss secured at breakeven: %.4f"
+                                                        .format(pos.pair, peakR, markPrice, beStop)
                                                 )
                                             }
                                         }
 
-                                        // 2. Continuous Trailing Stop Ratchet (+1.5R and beyond)
-                                        if (currentR >= targetTrailR) {
+                                        // 2. Continuous Volatility Trailing Stop Ratchet (+2.5R and beyond)
+                                        if (peakR >= targetTrailR) {
                                             state.isTrailingActive = true
                                             val trailDistance = state.riskPerUnit * trailDistR
                                             val candidateTrailStop = state.peakPrice - trailDistance
@@ -1080,10 +1123,11 @@ class TradingForegroundService : Service() {
                                                         "peak_price" to "%.4f".format(state.peakPrice),
                                                         "mark_price" to "%.4f".format(markPrice),
                                                         "gain_r" to "%.2fR".format(currentR),
+                                                        "peak_r" to "%.2fR".format(peakR),
                                                         "trailing_stop" to "%.4f".format(candidateTrailStop)
                                                     ),
                                                     narrative = "TRAILING_STOP_RATCHET: %s peak @ %.4f (+%.2fR). Trailing stop ratcheted to: %.4f"
-                                                        .format(pos.pair, state.peakPrice, currentR, candidateTrailStop)
+                                                        .format(pos.pair, state.peakPrice, peakR, candidateTrailStop)
                                                 )
                                             }
                                         }
@@ -1093,9 +1137,11 @@ class TradingForegroundService : Service() {
                                         }
                                         val currentGain = entryPrice - markPrice
                                         val currentR = currentGain / state.riskPerUnit
+                                        val peakGain = entryPrice - state.peakPrice
+                                        val peakR = peakGain / state.riskPerUnit
 
-                                        // 1. Dynamic Breakeven Ratchet (+1.0R)
-                                        if (currentR >= targetBeR && !state.isBreakevenActive) {
+                                        // 1. Dynamic Breakeven Ratchet (+1.5R)
+                                        if (peakR >= targetBeR && !state.isBreakevenActive) {
                                             val beStop = entryPrice - feeBuffer
                                             if (beStop < state.effectiveStop) {
                                                 state.effectiveStop = beStop
@@ -1108,17 +1154,19 @@ class TradingForegroundService : Service() {
                                                     attributes = mapOf(
                                                         "entry_price" to "%.4f".format(entryPrice),
                                                         "mark_price" to "%.4f".format(markPrice),
+                                                        "peak_price" to "%.4f".format(state.peakPrice),
                                                         "gain_r" to "%.2fR".format(currentR),
+                                                        "peak_r" to "%.2fR".format(peakR),
                                                         "breakeven_stop" to "%.4f".format(beStop)
                                                     ),
-                                                    narrative = "BREAKEVEN_RATCHET: %s reached +%.2fR gain @ %.4f. Stop loss secured at breakeven: %.4f"
-                                                        .format(pos.pair, currentR, markPrice, beStop)
+                                                    narrative = "BREAKEVEN_RATCHET: %s reached peak +%.2fR gain @ %.4f. Stop loss secured at breakeven: %.4f"
+                                                        .format(pos.pair, peakR, markPrice, beStop)
                                                 )
                                             }
                                         }
 
-                                        // 2. Continuous Trailing Stop Ratchet (+1.5R and beyond)
-                                        if (currentR >= targetTrailR) {
+                                        // 2. Continuous Volatility Trailing Stop Ratchet (+2.5R and beyond)
+                                        if (peakR >= targetTrailR) {
                                             state.isTrailingActive = true
                                             val trailDistance = state.riskPerUnit * trailDistR
                                             val candidateTrailStop = state.peakPrice + trailDistance
@@ -1134,10 +1182,11 @@ class TradingForegroundService : Service() {
                                                         "peak_price" to "%.4f".format(state.peakPrice),
                                                         "mark_price" to "%.4f".format(markPrice),
                                                         "gain_r" to "%.2fR".format(currentR),
+                                                        "peak_r" to "%.2fR".format(peakR),
                                                         "trailing_stop" to "%.4f".format(candidateTrailStop)
                                                     ),
                                                     narrative = "TRAILING_STOP_RATCHET: %s peak @ %.4f (+%.2fR). Trailing stop ratcheted to: %.4f"
-                                                        .format(pos.pair, state.peakPrice, currentR, candidateTrailStop)
+                                                        .format(pos.pair, state.peakPrice, peakR, candidateTrailStop)
                                                 )
                                             }
                                         }
@@ -1153,41 +1202,68 @@ class TradingForegroundService : Service() {
                                     else ts ?: originalSl ?: 0.0
                                 }
 
-                                var shouldTriggerExit = false
-                                var exitReason = ""
+                                val maxBreachTicks = riskManager.settings.trailingStopDebounceTicks.coerceAtLeast(1)
+                                var isSlBreached = false
+                                var isDeepBreached = false
+                                var isTpBreached = false
 
                                 val slTag = when {
                                     trailingState?.isTrailingActive == true -> "Trailing Stop (Locked: %.4f)".format(effectiveSl)
-                                    trailingState?.isBreakevenActive == true -> "Breakeven (+1.0R secured)"
+                                    trailingState?.isBreakevenActive == true -> "Breakeven (+1.5R secured)"
                                     else -> "SL"
                                 }
 
                                 if (pos.isLong) {
                                     if (effectiveSl > 0.0 && markPrice <= effectiveSl) {
-                                        shouldTriggerExit = true
-                                        exitReason = "Client-side $slTag watchdog breach (Mark: $markPrice <= Trigger: $effectiveSl)"
-                                    } else if (tp != null && tp > 0.0 && markPrice >= tp) {
-                                        shouldTriggerExit = true
-                                        exitReason = "Client-side TP watchdog breach (Mark: $markPrice >= TP: $tp)"
+                                        isSlBreached = true
+                                        if (markPrice <= effectiveSl * 0.998) isDeepBreached = true
+                                    }
+                                    if (tp != null && tp > 0.0 && markPrice >= tp) {
+                                        isTpBreached = true
                                     }
                                 } else if (pos.isShort) {
                                     if (effectiveSl > 0.0 && markPrice >= effectiveSl) {
-                                        shouldTriggerExit = true
-                                        exitReason = "Client-side $slTag watchdog breach (Mark: $markPrice >= Trigger: $effectiveSl)"
-                                    } else if (tp != null && tp > 0.0 && markPrice <= tp) {
-                                        shouldTriggerExit = true
-                                        exitReason = "Client-side TP watchdog breach (Mark: $markPrice <= TP: $tp)"
+                                        isSlBreached = true
+                                        if (markPrice >= effectiveSl * 1.002) isDeepBreached = true
                                     }
+                                    if (tp != null && tp > 0.0 && markPrice <= tp) {
+                                        isTpBreached = true
+                                    }
+                                }
+
+                                var shouldTriggerExit = false
+                                var exitReason = ""
+
+                                if (isTpBreached) {
+                                    shouldTriggerExit = true
+                                    exitReason = "Client-side TP watchdog breach (Mark: $markPrice >= TP: $tp)"
+                                } else if (isSlBreached) {
+                                    val curBreaches = (trailingState?.consecutiveBreachCount ?: 0) + 1
+                                    trailingState?.consecutiveBreachCount = curBreaches
+                                    if (isDeepBreached || curBreaches >= maxBreachTicks) {
+                                        shouldTriggerExit = true
+                                        val breachDesc = if (isDeepBreached) "Deep penetration >0.2%" else "$curBreaches/$maxBreachTicks ticks confirmed"
+                                        exitReason = "Client-side $slTag watchdog breach ($breachDesc: Mark: $markPrice vs Trigger: $effectiveSl)"
+                                    } else {
+                                        AppLogManager.w(
+                                            "WATCHDOG",
+                                            "[${pos.pair}] Soft $slTag breach detected ($curBreaches/$maxBreachTicks) @ Mark $markPrice vs Trigger $effectiveSl. Debouncing before emergency exit."
+                                        )
+                                    }
+                                } else {
+                                    trailingState?.consecutiveBreachCount = 0
                                 }
 
                                 if (shouldTriggerExit) {
                                     AppLogManager.w("WATCHDOG", "[${pos.pair}] Triggering emergency client-side exit: $exitReason")
                                     executionEngine.exitPosition(pos.pair, markPrice, exitReason)
                                     trailingStopStates.remove(pos.pair)
+                                    activeTradeMetadata.remove(pos.pair)
                                 }
                             }
                             // Clean up trailing state for closed positions
                             trailingStopStates.keys.retainAll(currentOpenPairs)
+                            activeTradeMetadata.keys.retainAll(currentOpenPairs)
                         }
                     }
                 } catch (_: Exception) {}
