@@ -6,7 +6,7 @@ package com.coindcx.trading.data.config
 data class TradingConfig(
     val riskProfile: String = "BALANCED", // "CONSERVATIVE" (0.5%), "BALANCED" (1.0%), "GROWTH" (1.5%)
     val riskPerTradePercent: Double = 1.0,
-    val safetyReservePercent: Double = 5.0,
+    val safetyReservePercent: Double = 0.0,
     val maxSingleExposurePercent: Double = 30.0,
     val minMarginPerTradeInr: Double = 500.0, // Legacy fallback
     val leverage: Int = 2,

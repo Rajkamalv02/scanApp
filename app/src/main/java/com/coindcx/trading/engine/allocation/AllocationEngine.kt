@@ -35,7 +35,7 @@ class AllocationEngine {
         riskSettings: RiskSettings = RiskSettings(),
         minExchangeNotionalInr: Double = 620.0,
         riskPerTradePercent: Double = 1.0,
-        safetyReservePercent: Double = 5.0,
+        safetyReservePercent: Double = 0.0,
         maxSingleExposurePercent: Double = 30.0,
         minTradeWeightPercent: Double = 2.0,
         maxFloorRiskPercent: Double = riskSettings.maxFloorRiskPercent
@@ -43,9 +43,9 @@ class AllocationEngine {
         val effectiveLev = leverage.coerceIn(1, riskSettings.maxLeverage)
         val equity = accountEquityInr.coerceAtLeast(availableCashInr).coerceAtLeast(0.0)
 
-        // Stage 1: Solvency & Slot Allocation
-        val safetyReserveInr = (equity * (safetyReservePercent / 100.0)).coerceAtLeast(100.0)
-        val availableCashForTrading = (availableCashInr - safetyReserveInr).coerceAtLeast(0.0)
+        // Stage 1: Solvency & Slot Allocation (Reservation Feature Removed)
+        val safetyReserveInr = 0.0
+        val availableCashForTrading = availableCashInr.coerceAtLeast(0.0)
         val availableSlots = (riskSettings.maxConcurrentPositions - activePositionsCount).coerceAtLeast(0)
 
         // Stage 2: Boundaries & Floors
@@ -68,8 +68,8 @@ class AllocationEngine {
             val failureReason = when {
                 availableSlots <= 0 -> "Portfolio Limit Reached: All %d concurrent positions active."
                     .format(riskSettings.maxConcurrentPositions)
-                availableCashForTrading < minExchangeMarginFloor -> "Insufficient Balance: Available trading cash (₹%.2f) < ₹%.2f min exchange requirement at %dx leverage (Reserve protected: ₹%.2f)."
-                    .format(availableCashForTrading, minExchangeMarginFloor, effectiveLev, safetyReserveInr)
+                availableCashForTrading < minExchangeMarginFloor -> "Insufficient Balance: Available cash (₹%.2f) < ₹%.2f min exchange requirement at %dx leverage."
+                    .format(availableCashForTrading, minExchangeMarginFloor, effectiveLev)
                 else -> "No ranked candidate opportunities available."
             }
 
@@ -94,7 +94,7 @@ class AllocationEngine {
                 isInsufficientBalance = availableCashForTrading < minExchangeMarginFloor,
                 statusMessage = failureReason,
                 accountEquityInr = equity,
-                safetyReserveInr = safetyReserveInr,
+                safetyReserveInr = 0.0,
                 exchangeFloorMarginInr = minExchangeMarginFloor,
                 economicFloorMarginInr = economicMarginFloor,
                 targetRiskPerTradeInr = targetRiskPerTradeInr,
@@ -234,15 +234,15 @@ class AllocationEngine {
             maxTradesAllowed = dynamicMaxTrades,
             allocatedTradesCount = nTrades,
             totalAllocatedInr = totalAllocated,
-            remainingBalanceInr = remainingCash + safetyReserveInr,
+            remainingBalanceInr = remainingCash,
             fundedOpportunities = funded,
             unfundedOpportunities = unfunded,
             allRankedOpportunities = allProcessed,
             isInsufficientBalance = false,
-            statusMessage = "Allocated ₹%.0f across %d trades (Reserve protected: ₹%.0f)."
-                .format(totalAllocated, nTrades, safetyReserveInr),
+            statusMessage = "Allocated ₹%.0f across %d trades."
+                .format(totalAllocated, nTrades),
             accountEquityInr = equity,
-            safetyReserveInr = safetyReserveInr,
+            safetyReserveInr = 0.0,
             exchangeFloorMarginInr = minExchangeMarginFloor,
             economicFloorMarginInr = economicMarginFloor,
             targetRiskPerTradeInr = targetRiskPerTradeInr,

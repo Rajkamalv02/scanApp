@@ -25,6 +25,17 @@ data class FuturesWallet(
     @SerializedName("cross_user_margin")
     val crossUserMargin: String
 ) {
+    /**
+     * In CoinDCX Futures, `balance` is ALREADY the unencumbered available cash margin.
+     * `locked_balance` is the margin currently locked in active positions or open orders.
+     * Total wallet cash = balance + lockedBalance.
+     */
     val availableBalance: Double
-        get() = (balance.toDoubleOrNull() ?: 0.0) - (lockedBalance.toDoubleOrNull() ?: 0.0)
+        get() = balance.toDoubleOrNull() ?: 0.0
+
+    val lockedMargin: Double
+        get() = lockedBalance.toDoubleOrNull() ?: 0.0
+
+    val totalWalletBalance: Double
+        get() = availableBalance + lockedMargin
 }

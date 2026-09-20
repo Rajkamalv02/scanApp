@@ -64,13 +64,12 @@ class TradeCandidateSelector {
         minExchangeNotionalInr: Double,
         riskPerTradePercent: Double = 1.0,
         maxPortfolioRiskPercent: Double = 4.0,
-        safetyReservePercent: Double = 5.0
+        safetyReservePercent: Double = 0.0
     ): CandidateSelectionResult {
         // 1. Calculate Capacities (§E)
         val kSlots = max(0, maxConcurrentPositions - activePositionsCount)
 
-        val safetyReserve = max(accountEquityInr * (safetyReservePercent / 100.0), 100.0)
-        val availableTradingCash = max(0.0, availableCashInr - safetyReserve)
+        val availableTradingCash = max(0.0, availableCashInr)
         val effectiveLev = leverage.coerceAtLeast(1)
         val minMarginRequired = max(1.0, minExchangeNotionalInr / effectiveLev)
         val kMargin = floor(availableTradingCash / minMarginRequired).toInt()
@@ -137,7 +136,7 @@ class TradeCandidateSelector {
 
         val logSummary = buildString {
             appendLine("================ TRADE CANDIDATE SELECTION (DYNAMIC CAPACITY K=$capacityK) ================")
-            appendLine("Account Constraints: Slots: $kSlots | Margin Cap: $kMargin trades (Available: ₹${"%.2f".format(availableTradingCash)}, Reserve: ₹${"%.2f".format(safetyReserve)}) | Risk Cap: $kRisk trades")
+            appendLine("Account Constraints: Slots: $kSlots | Margin Cap: $kMargin trades (Available: ₹${"%.2f".format(availableTradingCash)}) | Risk Cap: $kRisk trades")
             appendLine("Actionable Setups: ${actionableCandidates.size} | Approved: ${approved.size} | Deferred: ${deferred.size}")
             if (approved.isNotEmpty()) {
                 appendLine("--- APPROVED TRADES ---")

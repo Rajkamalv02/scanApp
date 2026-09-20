@@ -308,21 +308,19 @@ class StrategyAggregatorTest {
             ) // n = 1
         )
 
-        // Account params from Case D:
-        // Cash = 650, AvailableCash - Reserve(100) = 550
-        // MinMarginRequired = 572.89 / 2 = 286.45
-        // K_margin = 1, K_slots = 3, K_risk = 4 -> K = 1
+        // Account params from Case D (Reserve removed):
+        // Cash = 550.0, MinMarginRequired = 572.89 / 2 = 286.45
+        // K_margin = floor(550.0 / 286.45) = 1, K_slots = 3, K_risk = 4 -> K = 1
         val result = selector.selectCandidates(
             candidates = listOf(dogeOpp, suiOpp),
             accountEquityInr = 650.0,
-            availableCashInr = 650.0,
+            availableCashInr = 550.0,
             activePositionsCount = 0,
             maxConcurrentPositions = 3,
             leverage = 2,
             minExchangeNotionalInr = 572.89,
             riskPerTradePercent = 1.0,
-            maxPortfolioRiskPercent = 4.0,
-            safetyReservePercent = 5.0
+            maxPortfolioRiskPercent = 4.0
         )
 
         assertEquals(1, result.capacityK)

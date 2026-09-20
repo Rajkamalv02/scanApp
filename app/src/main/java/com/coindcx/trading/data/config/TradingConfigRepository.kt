@@ -49,7 +49,7 @@ class TradingConfigRepository(context: Context) {
         return TradingConfig(
             riskProfile = prefs.getString(KEY_RISK_PROFILE, "BALANCED") ?: "BALANCED",
             riskPerTradePercent = prefs.getFloat(KEY_RISK_PER_TRADE, 1.0f).toDouble(),
-            safetyReservePercent = prefs.getFloat(KEY_SAFETY_RESERVE, 5.0f).toDouble(),
+            safetyReservePercent = prefs.getFloat(KEY_SAFETY_RESERVE, 0.0f).toDouble(),
             maxSingleExposurePercent = prefs.getFloat(KEY_MAX_SINGLE_EXPOSURE, 30.0f).toDouble(),
             minMarginPerTradeInr = prefs.getFloat(KEY_MIN_MARGIN_INR, 500.0f).toDouble(),
             leverage = prefs.getInt(KEY_LEVERAGE, 2),

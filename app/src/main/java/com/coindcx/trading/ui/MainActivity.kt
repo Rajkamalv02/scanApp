@@ -632,8 +632,8 @@ class MainActivity : AppCompatActivity() {
                     binding.tvMinMarginDisplay.text = "%.1f%% (₹%.0f)".format(riskPct, allocation.exchangeFloorMarginInr)
                     binding.tvSelectedOpportunitiesCount.text = "${allocation.allocatedTradesCount} of ${allocation.maxTradesAllowed} Funded"
                     binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
-                    binding.tvSafetyReserveDisplay.text = "Safety Reserve: ₹ %.2f (5%%)".format(allocation.safetyReserveInr)
-                    binding.tvRemainingBalanceDisplay.text = "Unused: ₹ %.2f".format(allocation.remainingBalanceInr)
+                    binding.tvSafetyReserveDisplay.visibility = View.GONE
+                    binding.tvRemainingBalanceDisplay.text = "Unallocated: ₹ %.2f".format(allocation.remainingBalanceInr)
 
                     if (allocation.isInsufficientBalance) {
                         binding.bannerInsufficientBalance.visibility = View.VISIBLE
@@ -1060,7 +1060,23 @@ class MainActivity : AppCompatActivity() {
             binding.btnRefreshExchange.isEnabled = false
         }
         try {
-            // 1. Fetch Wallets in INR
+            // 1. Fetch Live Positions to determine active margin and unrealized P&L
+            val posPayload = mapOf(
+                "page" to "1",
+                "size" to "50",
+                "margin_currency_short_name" to listOf("INR", "USDT"),
+                "timestamp" to System.currentTimeMillis()
+            )
+            val posResp = ApiClient.apiService.getPositions(posPayload)
+            val openPositions = if (posResp.isSuccessful && posResp.body() != null) {
+                posResp.body()!!.filter { it.isOpen }
+            } else {
+                emptyList()
+            }
+            val totalUnrealizedPnlUsdt = openPositions.sumOf { PnlEngine.calculateUnrealizedPnl(it) }
+            val totalUnrealizedPnlInr = currencyConverter.convertUsdtToInr(totalUnrealizedPnlUsdt)
+
+            // 2. Fetch Futures Wallets (balance is unallocated free cash; totalWalletBalance is free cash + locked margin)
             val walletResp = ApiClient.apiService.getFuturesWallets()
             if (walletResp.isSuccessful && !walletResp.body().isNullOrEmpty()) {
                 val inrWallet = walletResp.body()!!.find { it.currencyShortName.equals("INR", ignoreCase = true) }
@@ -1068,17 +1084,22 @@ class MainActivity : AppCompatActivity() {
                     val usdtWallet = walletResp.body()!!.find { it.currencyShortName.equals("USDT", ignoreCase = true) }
                     if (usdtWallet != null) currencyConverter.convertUsdtToInr(usdtWallet.availableBalance) else 0.0
                 }
+                val totalWalletCash = inrWallet?.totalWalletBalance ?: run {
+                    val usdtWallet = walletResp.body()!!.find { it.currencyShortName.equals("USDT", ignoreCase = true) }
+                    if (usdtWallet != null) currencyConverter.convertUsdtToInr(usdtWallet.totalWalletBalance) else availableInr
+                }
+                val accountEquityInr = (totalWalletCash + totalUnrealizedPnlInr).coerceAtLeast(availableInr)
 
                 val config = configRepo.configFlow.value
                 val allocation = allocationEngine.allocateCapital(
-                    accountEquityInr = availableInr,
+                    accountEquityInr = accountEquityInr,
                     availableCashInr = availableInr,
-                    activePositionsCount = 0,
+                    activePositionsCount = openPositions.size,
                     leverage = config.leverage,
                     rankedOpportunities = MarketScanState.topOpportunities.value,
                     minExchangeNotionalInr = currencyConverter.getDynamicMinNotionalInr(),
                     riskPerTradePercent = config.riskPerTradePercent,
-                    safetyReservePercent = config.safetyReservePercent,
+                    safetyReservePercent = 0.0,
                     maxSingleExposurePercent = config.maxSingleExposurePercent
                 )
 
@@ -1088,8 +1109,8 @@ class MainActivity : AppCompatActivity() {
                     binding.tvMinMarginDisplay.text = "%.1f%% (₹%.0f)".format(config.riskPerTradePercent, allocation.exchangeFloorMarginInr)
                     binding.tvSelectedOpportunitiesCount.text = "${allocation.allocatedTradesCount} of ${allocation.maxTradesAllowed} Funded"
                     binding.tvTotalAllocatedDisplay.text = "₹ %.2f".format(allocation.totalAllocatedInr)
-                    binding.tvSafetyReserveDisplay.text = "Safety Reserve: ₹ %.2f (5%%)".format(allocation.safetyReserveInr)
-                    binding.tvRemainingBalanceDisplay.text = "Unused: ₹ %.2f".format(allocation.remainingBalanceInr)
+                    binding.tvSafetyReserveDisplay.visibility = View.GONE
+                    binding.tvRemainingBalanceDisplay.text = "Unallocated: ₹ %.2f".format(allocation.remainingBalanceInr)
 
                     if (allocation.isInsufficientBalance) {
                         binding.bannerInsufficientBalance.visibility = View.VISIBLE
@@ -1100,31 +1121,17 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // 2. Fetch Live Positions
-            val posPayload = mapOf(
-                "page" to "1",
-                "size" to "50",
-                "margin_currency_short_name" to listOf("INR", "USDT"),
-                "timestamp" to System.currentTimeMillis()
-            )
-            val posResp = ApiClient.apiService.getPositions(posPayload)
-            if (posResp.isSuccessful && posResp.body() != null) {
-                val openPositions = posResp.body()!!.filter { it.isOpen }
-                val totalUnrealizedPnlUsdt = openPositions.sumOf { PnlEngine.calculateUnrealizedPnl(it) }
-                val totalUnrealizedPnlInr = currencyConverter.convertUsdtToInr(totalUnrealizedPnlUsdt)
+            withContext(Dispatchers.Main) {
+                binding.tvPositionsCount.text = "${openPositions.size} Open Trades"
+                binding.tvUnrealizedPnl.text = "P&L: ₹ %.2f".format(totalUnrealizedPnlInr)
+                if (totalUnrealizedPnlInr >= 0) {
+                    binding.tvUnrealizedPnl.setTextColor(getColor(R.color.accent_green))
+                } else {
+                    binding.tvUnrealizedPnl.setTextColor(getColor(R.color.accent_red))
+                }
 
-                withContext(Dispatchers.Main) {
-                    binding.tvPositionsCount.text = "${openPositions.size} Open Trades"
-                    binding.tvUnrealizedPnl.text = "P&L: ₹ %.2f".format(totalUnrealizedPnlInr)
-                    if (totalUnrealizedPnlInr >= 0) {
-                        binding.tvUnrealizedPnl.setTextColor(getColor(R.color.accent_green))
-                    } else {
-                        binding.tvUnrealizedPnl.setTextColor(getColor(R.color.accent_red))
-                    }
-
-                    if (binding.switchLiveMode.isChecked) {
-                        renderLiveOpenPositions(openPositions)
-                    }
+                if (binding.switchLiveMode.isChecked) {
+                    renderLiveOpenPositions(openPositions)
                 }
             }
 

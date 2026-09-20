@@ -214,13 +214,12 @@ class AllocationEngineTest {
         )
 
         assertFalse(result.isInsufficientBalance)
-        assertEquals(500.0, result.safetyReserveInr, 0.01)
+        assertEquals(0.0, result.safetyReserveInr, 0.01)
         assertEquals(310.0, result.exchangeFloorMarginInr, 0.01)
         assertEquals(5, result.fundedOpportunities.size)
-        // Ensure total allocated margin does not exceed available cash minus safety reserve
-        assertTrue(result.totalAllocatedInr <= 9500.0)
-        // Reserve is preserved in remaining balance
-        assertTrue(result.remainingBalanceInr >= 500.0)
+        // Ensure total allocated margin does not exceed available cash
+        assertTrue(result.totalAllocatedInr <= 10000.0)
+        assertTrue(result.remainingBalanceInr >= 0.0)
     }
 
     @Test
@@ -316,10 +315,10 @@ class AllocationEngineTest {
     }
 
     @Test
-    fun testDynamicRiskParity_InsufficientCashAfterReserve_Yields0Trades() {
-        // Equity = 350, Cash = 350, Reserve = 100. Cash for trading = 250.
+    fun testDynamicRiskParity_NoReserveBlocksTrade_SmallAccount350_FundsValidTrade() {
+        // Equity = 350, Cash = 350. No reservation deduction!
         // Floor at 2x = 310.
-        // Cash for trading (250) < Floor (310) -> Insufficient balance!
+        // Available cash (350) >= Floor (310) -> Valid trade is successfully approved!
         val candidates = listOf(
             createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 99.2)
         )
@@ -327,6 +326,28 @@ class AllocationEngineTest {
         val result = allocator.allocateCapital(
             accountEquityInr = 350.0,
             availableCashInr = 350.0,
+            activePositionsCount = 0,
+            leverage = 2,
+            rankedOpportunities = candidates,
+            minExchangeNotionalInr = 620.0
+        )
+
+        assertFalse(result.isInsufficientBalance)
+        assertEquals(1, result.fundedOpportunities.size)
+        assertEquals(310.0, result.fundedOpportunities[0].allocatedMarginInr, 0.01)
+    }
+
+    @Test
+    fun testDynamicRiskParity_InsufficientCashBelowExchangeFloor_Yields0Trades() {
+        // Equity = 200, Cash = 200. Floor at 2x = 310.
+        // Available cash (200) < Floor (310) -> True insufficient balance!
+        val candidates = listOf(
+            createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 99.2)
+        )
+
+        val result = allocator.allocateCapital(
+            accountEquityInr = 200.0,
+            availableCashInr = 200.0,
             activePositionsCount = 0,
             leverage = 2,
             rankedOpportunities = candidates,

@@ -304,9 +304,10 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Safety Reserve: ₹ 0.00 (5%)"
+                        android:text="Safety Reserve: ₹ 0.00"
                         android:textColor="@color/accent_amber"
-                        android:textSize="11sp" />
+                        android:textSize="11sp"
+                        android:visibility="gone" />
 
                     <TextView
                         android:id="@+id/tvRemainingBalanceDisplay"

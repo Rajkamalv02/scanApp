@@ -75,21 +75,7 @@ class TradingForegroundService : Service() {
         val entryTimestamp: Long = System.currentTimeMillis()
     )
 
-    data class TrailingStopState(
-        val pair: String,
-        val isLong: Boolean,
-        val entryPrice: Double,
-        val initialSl: Double,
-        val riskPerUnit: Double,
-        var peakPrice: Double,
-        var effectiveStop: Double,
-        var isBreakevenActive: Boolean = false,
-        var isTrailingActive: Boolean = false,
-        var consecutiveBreachCount: Int = 0
-    )
-
     private var positionMonitorJob: kotlinx.coroutines.Job? = null
-    private val trailingStopStates = java.util.concurrent.ConcurrentHashMap<String, TrailingStopState>()
     private val activeTradeMetadata = java.util.concurrent.ConcurrentHashMap<String, ActiveTradeMetadata>()
 
     override fun onCreate() {
@@ -388,7 +374,6 @@ class TradingForegroundService : Service() {
                         )
                         executionEngine.exitPosition(opp.pair, opp.currentPrice, opp.signal.reason, posTradeId)
                         activeTradeMetadata.remove(opp.pair)
-                        trailingStopStates.remove(opp.pair)
                     }
                 }
             }
@@ -398,7 +383,15 @@ class TradingForegroundService : Service() {
             val totalEquityInr = if (executionEngine.isPaperTrading) {
                 paperEngine.accountManager.getAccountSummary().totalEquityInr
             } else {
-                (initialBalanceInr + openPositions.sumOf { it.lockedUserMargin.coerceAtLeast(0.0) }).coerceAtLeast(initialBalanceInr)
+                val lockedMarginInr = openPositions.sumOf { pos ->
+                    val posMarginUsdt = pos.lockedMargin.takeIf { it > 0.0 } ?: pos.lockedUserMargin
+                    currencyConverter.convertUsdtToInr(posMarginUsdt)
+                }
+                val unrealizedPnlInr = openPositions.sumOf { pos ->
+                    val pnlUsdt = com.coindcx.trading.engine.PnlEngine.calculateUnrealizedPnl(pos)
+                    currencyConverter.convertUsdtToInr(pnlUsdt)
+                }
+                (initialBalanceInr + lockedMarginInr + unrealizedPnlInr).coerceAtLeast(initialBalanceInr)
             }
 
             val dynamicMinNotionalInr = currencyConverter.getDynamicMinNotionalInr()
@@ -411,8 +404,7 @@ class TradingForegroundService : Service() {
                 leverage = config.leverage,
                 minExchangeNotionalInr = dynamicMinNotionalInr,
                 riskPerTradePercent = config.riskPerTradePercent,
-                maxPortfolioRiskPercent = 4.0,
-                safetyReservePercent = config.safetyReservePercent
+                maxPortfolioRiskPercent = 4.0
             )
 
             val approvedCandidates = selection.approvedTrades
@@ -427,7 +419,7 @@ class TradingForegroundService : Service() {
                 riskSettings = riskManager.settings,
                 minExchangeNotionalInr = dynamicMinNotionalInr,
                 riskPerTradePercent = config.riskPerTradePercent,
-                safetyReservePercent = config.safetyReservePercent,
+                safetyReservePercent = 0.0,
                 maxSingleExposurePercent = config.maxSingleExposurePercent
             )
             val selectedOpportunities = allocation.allRankedOpportunities
@@ -628,7 +620,6 @@ class TradingForegroundService : Service() {
                             "gate" to "GATE_3_SIZING",
                             "reason" to rejectionReason,
                             "available_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
-                            "safety_reserve_inr" to "₹%.2f".format(allocation.safetyReserveInr),
                             "dynamic_min_notional_floor_inr" to "₹%.2f".format(dynamicMinNotionalInr)
                         ),
                         narrative = "Gate 3 (Risk Sizing & Allocation) REJECTED: %s".format(rejectionReason)
@@ -1047,222 +1038,35 @@ class TradingForegroundService : Service() {
                                 val originalSl = meta?.initialSl ?: pos.stopLossTrigger
                                 val tp = meta?.initialTp ?: pos.takeProfitTrigger
 
-                                // Dynamic Breakeven & Continuous Trailing Stop Ratchet Engine
-                                if (entryPrice > 0.0) {
-                                    val state = trailingStopStates.computeIfAbsent(pos.pair) {
-                                        val fallbackSl = if (pos.isLong) entryPrice * 0.97 else entryPrice * 1.03
-                                        val resolvedSl = if (originalSl != null && originalSl > 0.0) originalSl else fallbackSl
-                                        val rPerUnit = meta?.riskPerUnit ?: kotlin.math.abs(entryPrice - resolvedSl).coerceAtLeast(entryPrice * 0.005)
-                                        TrailingStopState(
-                                            pair = pos.pair,
-                                            isLong = pos.isLong,
-                                            entryPrice = entryPrice,
-                                            initialSl = resolvedSl,
-                                            riskPerUnit = rPerUnit,
-                                            peakPrice = markPrice,
-                                            effectiveStop = resolvedSl,
-                                            isBreakevenActive = false,
-                                            isTrailingActive = false,
-                                            consecutiveBreachCount = 0
-                                        )
-                                    }
-
-                                    val targetBeR = riskManager.settings.breakevenTriggerRMultiple
-                                    val targetTrailR = riskManager.settings.trailingStopActivationRMultiple
-                                    val trailDistR = riskManager.settings.trailingStopDistanceRMultiple
-                                    val feeBuffer = maxOf(entryPrice * 0.0015, state.riskPerUnit * 0.20) // 0.2R fee/slippage cushion
-
-                                    if (pos.isLong) {
-                                        if (markPrice > state.peakPrice) {
-                                            state.peakPrice = markPrice
-                                        }
-                                        val currentGain = markPrice - entryPrice
-                                        val currentR = currentGain / state.riskPerUnit
-                                        val peakGain = state.peakPrice - entryPrice
-                                        val peakR = peakGain / state.riskPerUnit
-
-                                        // 1. Dynamic Breakeven Ratchet (+1.5R)
-                                        if (peakR >= targetBeR && !state.isBreakevenActive) {
-                                            val beStop = entryPrice + feeBuffer
-                                            if (beStop > state.effectiveStop) {
-                                                state.effectiveStop = beStop
-                                                state.isBreakevenActive = true
-                                                AppLogManager.tradeLifecycle(
-                                                    event = "BREAKEVEN_RATCHET",
-                                                    tradeId = pos.id,
-                                                    symbol = pos.pair,
-                                                    mode = "LIVE",
-                                                    attributes = mapOf(
-                                                        "entry_price" to "%.4f".format(entryPrice),
-                                                        "mark_price" to "%.4f".format(markPrice),
-                                                        "peak_price" to "%.4f".format(state.peakPrice),
-                                                        "gain_r" to "%.2fR".format(currentR),
-                                                        "peak_r" to "%.2fR".format(peakR),
-                                                        "breakeven_stop" to "%.4f".format(beStop)
-                                                    ),
-                                                    narrative = "BREAKEVEN_RATCHET: %s reached peak +%.2fR gain @ %.4f. Stop loss secured at breakeven: %.4f"
-                                                        .format(pos.pair, peakR, markPrice, beStop)
-                                                )
-                                            }
-                                        }
-
-                                        // 2. Continuous Volatility Trailing Stop Ratchet (+2.5R and beyond)
-                                        if (peakR >= targetTrailR) {
-                                            state.isTrailingActive = true
-                                            val trailDistance = state.riskPerUnit * trailDistR
-                                            val candidateTrailStop = state.peakPrice - trailDistance
-                                            if (candidateTrailStop > state.effectiveStop) {
-                                                state.effectiveStop = candidateTrailStop
-                                                AppLogManager.tradeLifecycle(
-                                                    event = "TRAILING_STOP_RATCHET",
-                                                    tradeId = pos.id,
-                                                    symbol = pos.pair,
-                                                    mode = "LIVE",
-                                                    attributes = mapOf(
-                                                        "entry_price" to "%.4f".format(entryPrice),
-                                                        "peak_price" to "%.4f".format(state.peakPrice),
-                                                        "mark_price" to "%.4f".format(markPrice),
-                                                        "gain_r" to "%.2fR".format(currentR),
-                                                        "peak_r" to "%.2fR".format(peakR),
-                                                        "trailing_stop" to "%.4f".format(candidateTrailStop)
-                                                    ),
-                                                    narrative = "TRAILING_STOP_RATCHET: %s peak @ %.4f (+%.2fR). Trailing stop ratcheted to: %.4f"
-                                                        .format(pos.pair, state.peakPrice, peakR, candidateTrailStop)
-                                                )
-                                            }
-                                        }
-                                    } else if (pos.isShort) {
-                                        if (markPrice < state.peakPrice) {
-                                            state.peakPrice = markPrice
-                                        }
-                                        val currentGain = entryPrice - markPrice
-                                        val currentR = currentGain / state.riskPerUnit
-                                        val peakGain = entryPrice - state.peakPrice
-                                        val peakR = peakGain / state.riskPerUnit
-
-                                        // 1. Dynamic Breakeven Ratchet (+1.5R)
-                                        if (peakR >= targetBeR && !state.isBreakevenActive) {
-                                            val beStop = entryPrice - feeBuffer
-                                            if (beStop < state.effectiveStop) {
-                                                state.effectiveStop = beStop
-                                                state.isBreakevenActive = true
-                                                AppLogManager.tradeLifecycle(
-                                                    event = "BREAKEVEN_RATCHET",
-                                                    tradeId = pos.id,
-                                                    symbol = pos.pair,
-                                                    mode = "LIVE",
-                                                    attributes = mapOf(
-                                                        "entry_price" to "%.4f".format(entryPrice),
-                                                        "mark_price" to "%.4f".format(markPrice),
-                                                        "peak_price" to "%.4f".format(state.peakPrice),
-                                                        "gain_r" to "%.2fR".format(currentR),
-                                                        "peak_r" to "%.2fR".format(peakR),
-                                                        "breakeven_stop" to "%.4f".format(beStop)
-                                                    ),
-                                                    narrative = "BREAKEVEN_RATCHET: %s reached peak +%.2fR gain @ %.4f. Stop loss secured at breakeven: %.4f"
-                                                        .format(pos.pair, peakR, markPrice, beStop)
-                                                )
-                                            }
-                                        }
-
-                                        // 2. Continuous Volatility Trailing Stop Ratchet (+2.5R and beyond)
-                                        if (peakR >= targetTrailR) {
-                                            state.isTrailingActive = true
-                                            val trailDistance = state.riskPerUnit * trailDistR
-                                            val candidateTrailStop = state.peakPrice + trailDistance
-                                            if (candidateTrailStop < state.effectiveStop) {
-                                                state.effectiveStop = candidateTrailStop
-                                                AppLogManager.tradeLifecycle(
-                                                    event = "TRAILING_STOP_RATCHET",
-                                                    tradeId = pos.id,
-                                                    symbol = pos.pair,
-                                                    mode = "LIVE",
-                                                    attributes = mapOf(
-                                                        "entry_price" to "%.4f".format(entryPrice),
-                                                        "peak_price" to "%.4f".format(state.peakPrice),
-                                                        "mark_price" to "%.4f".format(markPrice),
-                                                        "gain_r" to "%.2fR".format(currentR),
-                                                        "peak_r" to "%.2fR".format(peakR),
-                                                        "trailing_stop" to "%.4f".format(candidateTrailStop)
-                                                    ),
-                                                    narrative = "TRAILING_STOP_RATCHET: %s peak @ %.4f (+%.2fR). Trailing stop ratcheted to: %.4f"
-                                                        .format(pos.pair, state.peakPrice, peakR, candidateTrailStop)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-
-                                val trailingState = trailingStopStates[pos.pair]
-                                val effectiveSl = if (pos.isLong) {
-                                    maxOf(originalSl ?: 0.0, trailingState?.effectiveStop ?: 0.0)
-                                } else {
-                                    val ts = trailingState?.effectiveStop
-                                    if (originalSl != null && originalSl > 0.0 && ts != null) minOf(originalSl, ts)
-                                    else ts ?: originalSl ?: 0.0
-                                }
-
-                                val maxBreachTicks = riskManager.settings.trailingStopDebounceTicks.coerceAtLeast(1)
-                                var isSlBreached = false
-                                var isDeepBreached = false
-                                var isTpBreached = false
-
-                                val slTag = when {
-                                    trailingState?.isTrailingActive == true -> "Trailing Stop (Locked: %.4f)".format(effectiveSl)
-                                    trailingState?.isBreakevenActive == true -> "Breakeven (+1.5R secured)"
-                                    else -> "SL"
-                                }
-
-                                if (pos.isLong) {
-                                    if (effectiveSl > 0.0 && markPrice <= effectiveSl) {
-                                        isSlBreached = true
-                                        if (markPrice <= effectiveSl * 0.998) isDeepBreached = true
-                                    }
-                                    if (tp != null && tp > 0.0 && markPrice >= tp) {
-                                        isTpBreached = true
-                                    }
-                                } else if (pos.isShort) {
-                                    if (effectiveSl > 0.0 && markPrice >= effectiveSl) {
-                                        isSlBreached = true
-                                        if (markPrice >= effectiveSl * 1.002) isDeepBreached = true
-                                    }
-                                    if (tp != null && tp > 0.0 && markPrice <= tp) {
-                                        isTpBreached = true
-                                    }
-                                }
-
+                                // Client-side Fixed Stop Loss & Take Profit Watchdog (Emergency Fallback)
                                 var shouldTriggerExit = false
                                 var exitReason = ""
 
-                                if (isTpBreached) {
-                                    shouldTriggerExit = true
-                                    exitReason = "Client-side TP watchdog breach (Mark: $markPrice >= TP: $tp)"
-                                } else if (isSlBreached) {
-                                    val curBreaches = (trailingState?.consecutiveBreachCount ?: 0) + 1
-                                    trailingState?.consecutiveBreachCount = curBreaches
-                                    if (isDeepBreached || curBreaches >= maxBreachTicks) {
+                                if (pos.isLong) {
+                                    if (originalSl != null && originalSl > 0.0 && markPrice <= originalSl) {
                                         shouldTriggerExit = true
-                                        val breachDesc = if (isDeepBreached) "Deep penetration >0.2%" else "$curBreaches/$maxBreachTicks ticks confirmed"
-                                        exitReason = "Client-side $slTag watchdog breach ($breachDesc: Mark: $markPrice vs Trigger: $effectiveSl)"
-                                    } else {
-                                        AppLogManager.w(
-                                            "WATCHDOG",
-                                            "[${pos.pair}] Soft $slTag breach detected ($curBreaches/$maxBreachTicks) @ Mark $markPrice vs Trigger $effectiveSl. Debouncing before emergency exit."
-                                        )
+                                        exitReason = "Fixed SL watchdog breach (Mark: %.4f <= SL: %.4f)".format(markPrice, originalSl)
+                                    } else if (tp != null && tp > 0.0 && markPrice >= tp) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Fixed TP watchdog breach (Mark: %.4f >= TP: %.4f)".format(markPrice, tp)
                                     }
-                                } else {
-                                    trailingState?.consecutiveBreachCount = 0
+                                } else if (pos.isShort) {
+                                    if (originalSl != null && originalSl > 0.0 && markPrice >= originalSl) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Fixed SL watchdog breach (Mark: %.4f >= SL: %.4f)".format(markPrice, originalSl)
+                                    } else if (tp != null && tp > 0.0 && markPrice <= tp) {
+                                        shouldTriggerExit = true
+                                        exitReason = "Fixed TP watchdog breach (Mark: %.4f <= TP: %.4f)".format(markPrice, tp)
+                                    }
                                 }
 
                                 if (shouldTriggerExit) {
                                     AppLogManager.w("WATCHDOG", "[${pos.pair}] Triggering emergency client-side exit: $exitReason")
                                     executionEngine.exitPosition(pos.pair, markPrice, exitReason)
-                                    trailingStopStates.remove(pos.pair)
                                     activeTradeMetadata.remove(pos.pair)
                                 }
                             }
-                            // Clean up trailing state for closed positions
-                            trailingStopStates.keys.retainAll(currentOpenPairs)
+                            // Clean up active metadata for closed positions
                             activeTradeMetadata.keys.retainAll(currentOpenPairs)
                         }
                     }
