@@ -26,7 +26,9 @@ class VcebStrategy(
     val expansionVolMultiplier: Double = 1.4,
     val minAtrPct: Double = 0.45,
     val maxAtrPct: Double = 6.0,
-    val plannedRR: Double = 0.75,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5,
+    val plannedRR: Double = targetPricePercent / stopLossPercent,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -163,14 +165,9 @@ class VcebStrategy(
             }
 
             if (rejections.isEmpty()) {
-                val rawStop = min(bb0.basis, series.low(0) - 0.2 * atr)
-                val rawDist = currClose - rawStop
-                val minSlDist = currClose * 0.014
-                val maxSlDist = currClose * 0.030
-                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
+                val clampedDist = currClose * (stopLossPercent / 100.0)
                 val stopLoss = currClose - clampedDist
-                val rawTpDist = clampedDist * plannedRR
-                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val clampedTpDist = currClose * (targetPricePercent / 100.0)
                 val takeProfit = currClose + clampedTpDist
 
                 val strengths = mapOf(
@@ -187,9 +184,9 @@ class VcebStrategy(
                     barOpenTimeUtc = series.openTime(0),
                     entryRef = currClose,
                     stopLoss = stopLoss,
-                    target = Target.Fixed(tp1 = takeProfit, plannedRR = plannedRR),
+                    target = Target.Fixed(tp1 = takeProfit, plannedRR = targetPricePercent / stopLossPercent),
                     riskDistance = clampedDist,
-                    riskPct = (clampedDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.EXPANSION,
                     strengths = strengths,
                     expiryBars = expiryBars,
@@ -210,14 +207,9 @@ class VcebStrategy(
             }
 
             if (rejections.isEmpty()) {
-                val rawStop = max(bb0.basis, series.high(0) + 0.2 * atr)
-                val rawDist = rawStop - currClose
-                val minSlDist = currClose * 0.014
-                val maxSlDist = currClose * 0.030
-                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
+                val clampedDist = currClose * (stopLossPercent / 100.0)
                 val stopLoss = currClose + clampedDist
-                val rawTpDist = clampedDist * plannedRR
-                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val clampedTpDist = currClose * (targetPricePercent / 100.0)
                 val takeProfit = currClose - clampedTpDist
 
                 val strengths = mapOf(
@@ -234,9 +226,9 @@ class VcebStrategy(
                     barOpenTimeUtc = series.openTime(0),
                     entryRef = currClose,
                     stopLoss = stopLoss,
-                    target = Target.Fixed(tp1 = takeProfit, plannedRR = plannedRR),
+                    target = Target.Fixed(tp1 = takeProfit, plannedRR = targetPricePercent / stopLossPercent),
                     riskDistance = clampedDist,
-                    riskPct = (clampedDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.EXPANSION,
                     strengths = strengths,
                     expiryBars = expiryBars,

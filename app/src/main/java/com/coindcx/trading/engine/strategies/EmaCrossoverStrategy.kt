@@ -25,7 +25,9 @@ class EmaCrossoverStrategy(
     initialFastPeriod: Int = 9,
     initialSlowPeriod: Int = 21,
     initialAtrMultiplier: Double = 1.5,
-    val riskRewardRatio: Double = 0.75
+    val riskRewardRatio: Double = 0.75,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5
 ) : Strategy {
 
     override val id: String = "ema_crossover"
@@ -225,17 +227,13 @@ class EmaCrossoverStrategy(
         // 3. New Entry Signal Generation on Fresh Confirmed Crossover
         if (isBullishCrossover) {
             val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "EMA" })
-            val rawSlDist = (atr * atrMultiplier)
-            val minSlDist = currentPrice * 0.014
-            val maxSlDist = currentPrice * 0.030
-            val riskDistance = rawSlDist.coerceIn(minSlDist, maxSlDist)
+            val riskDistance = currentPrice * (stopLossPercent / 100.0)
             val stopLossPrice = currentPrice - riskDistance
-            val rawTpDist = riskDistance * riskRewardRatio
-            val clampedTpDist = rawTpDist.coerceIn(currentPrice * 0.015, currentPrice * 0.022)
+            val clampedTpDist = currentPrice * (targetPricePercent / 100.0)
             val takeProfitPrice = currentPrice + clampedTpDist
-            val slDistPct = (riskDistance / currentPrice) * 100.0
-            val tpDistPct = (clampedTpDist / currentPrice) * 100.0
-            val actualRR = clampedTpDist / riskDistance
+            val slDistPct = stopLossPercent
+            val tpDistPct = targetPricePercent
+            val actualRR = targetPricePercent / stopLossPercent
 
             AppLogManager.tradeLifecycle(
                 event = "SIGNAL_GENERATED",
@@ -288,17 +286,13 @@ class EmaCrossoverStrategy(
 
         if (isBearishCrossover) {
             val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "EMA" })
-            val rawSlDist = (atr * atrMultiplier)
-            val minSlDist = currentPrice * 0.014
-            val maxSlDist = currentPrice * 0.030
-            val riskDistance = rawSlDist.coerceIn(minSlDist, maxSlDist)
+            val riskDistance = currentPrice * (stopLossPercent / 100.0)
             val stopLossPrice = currentPrice + riskDistance
-            val rawTpDist = riskDistance * riskRewardRatio
-            val clampedTpDist = rawTpDist.coerceIn(currentPrice * 0.015, currentPrice * 0.022)
+            val clampedTpDist = currentPrice * (targetPricePercent / 100.0)
             val takeProfitPrice = currentPrice - clampedTpDist
-            val slDistPct = (riskDistance / currentPrice) * 100.0
-            val tpDistPct = (clampedTpDist / currentPrice) * 100.0
-            val actualRR = clampedTpDist / riskDistance
+            val slDistPct = stopLossPercent
+            val tpDistPct = targetPricePercent
+            val actualRR = targetPricePercent / stopLossPercent
 
             AppLogManager.tradeLifecycle(
                 event = "SIGNAL_GENERATED",

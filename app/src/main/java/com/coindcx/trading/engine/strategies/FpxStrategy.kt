@@ -26,7 +26,9 @@ class FpxStrategy(
     val minDistanceAtr: Double = 2.5,
     val minConsecutiveDirectionalBars: Int = 6,
     val maxHtfAdx: Double = 35.0,
-    val minNetRR: Double = 0.55,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5,
+    val minNetRR: Double = 0.50,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -141,25 +143,12 @@ class FpxStrategy(
             if (volSma > 0.0 && series.volume(0) < 1.2 * volSma) rejections.add(RejectionCode.S6_C8_VOLUME_FLOOR)
 
             if (rejections.isEmpty()) {
-                var lowestLow = currLow
-                for (b in 1..min(3, series.size - 1)) {
-                    if (series.low(b) < lowestLow) lowestLow = series.low(b)
-                }
-                val rawStop = lowestLow - 0.5 * atr
-                val rawDist = currClose - rawStop
-                val minSlDist = currClose * 0.014
-                val maxSlDist = currClose * 0.030
-                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
+                val clampedDist = currClose * (stopLossPercent / 100.0)
                 val stopLoss = currClose - clampedDist
 
-                val rawDistToMean = ema20 - currClose
-                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val clampedTpDist = currClose * (targetPricePercent / 100.0)
                 val targetPrice = currClose + clampedTpDist
-                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
-
-                if (netRR < minNetRR) {
-                    return StrategyResult(null, state, listOf(RejectionCode.S6_RR_GATE))
-                }
+                val netRR = targetPricePercent / stopLossPercent
 
                 val strengths = mapOf(
                     "positioningExtreme" to ((abs(distanceAtr) - minDistanceAtr) / 2.5).coerceIn(0.0, 1.0),
@@ -177,7 +166,7 @@ class FpxStrategy(
                     stopLoss = stopLoss,
                     target = Target.Fixed(tp1 = targetPrice, tp2 = ema50, plannedRR = netRR),
                     riskDistance = clampedDist,
-                    riskPct = (clampedDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.RANGE,
                     strengths = strengths,
                     expiryBars = expiryBars,
@@ -211,25 +200,12 @@ class FpxStrategy(
             if (volSma > 0.0 && series.volume(0) < 1.2 * volSma) rejections.add(RejectionCode.S6_C8_VOLUME_FLOOR)
 
             if (rejections.isEmpty()) {
-                var highestHigh = currHigh
-                for (b in 1..min(3, series.size - 1)) {
-                    if (series.high(b) > highestHigh) highestHigh = series.high(b)
-                }
-                val rawStop = highestHigh + 0.5 * atr
-                val rawDist = rawStop - currClose
-                val minSlDist = currClose * 0.014
-                val maxSlDist = currClose * 0.030
-                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
+                val clampedDist = currClose * (stopLossPercent / 100.0)
                 val stopLoss = currClose + clampedDist
 
-                val rawDistToMean = currClose - ema20
-                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val clampedTpDist = currClose * (targetPricePercent / 100.0)
                 val targetPrice = currClose - clampedTpDist
-                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
-
-                if (netRR < minNetRR) {
-                    return StrategyResult(null, state, listOf(RejectionCode.S6_RR_GATE))
-                }
+                val netRR = targetPricePercent / stopLossPercent
 
                 val strengths = mapOf(
                     "positioningExtreme" to ((distanceAtr - minDistanceAtr) / 2.5).coerceIn(0.0, 1.0),
@@ -247,7 +223,7 @@ class FpxStrategy(
                     stopLoss = stopLoss,
                     target = Target.Fixed(tp1 = targetPrice, tp2 = ema50, plannedRR = netRR),
                     riskDistance = clampedDist,
-                    riskPct = (clampedDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.RANGE,
                     strengths = strengths,
                     expiryBars = expiryBars,

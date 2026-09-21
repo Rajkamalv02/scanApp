@@ -35,6 +35,8 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_RSI_OVERBOUGHT = "rsi_overbought"
         private const val KEY_ALLOW_TIER2_LIVE = "allow_tier2_live"
         private const val KEY_LIVE_MODE = "is_live_mode"
+        private const val KEY_STOP_LOSS_PERCENT = "stop_loss_percent"
+        private const val KEY_TARGET_PRICE_PERCENT = "target_price_percent"
 
         @Volatile
         private var INSTANCE: TradingConfigRepository? = null
@@ -54,6 +56,8 @@ class TradingConfigRepository(context: Context) {
             maxSingleExposurePercent = prefs.getFloat(KEY_MAX_SINGLE_EXPOSURE, 30.0f).toDouble(),
             minMarginPerTradeInr = prefs.getFloat(KEY_MIN_MARGIN_INR, 500.0f).toDouble(),
             leverage = prefs.getInt(KEY_LEVERAGE, 2),
+            stopLossPercent = prefs.getFloat(KEY_STOP_LOSS_PERCENT, 3.0f).toDouble(),
+            targetPricePercent = prefs.getFloat(KEY_TARGET_PRICE_PERCENT, 1.5f).toDouble(),
             timeframe = prefs.getString(KEY_TIMEFRAME, "15m") ?: "15m",
             scanIntervalMinutes = prefs.getInt(KEY_SCAN_INTERVAL, 2),
             isMarketWideScan = prefs.getBoolean(KEY_MARKET_WIDE, true),
@@ -104,6 +108,18 @@ class TradingConfigRepository(context: Context) {
         val clamped = leverage.coerceIn(1, 20)
         prefs.edit().putInt(KEY_LEVERAGE, clamped).apply()
         _configFlow.value = _configFlow.value.copy(leverage = clamped)
+    }
+
+    fun updateStopLossPercent(percent: Double) {
+        val clamped = percent.coerceIn(0.5, 10.0)
+        prefs.edit().putFloat(KEY_STOP_LOSS_PERCENT, clamped.toFloat()).apply()
+        _configFlow.value = _configFlow.value.copy(stopLossPercent = clamped)
+    }
+
+    fun updateTargetPricePercent(percent: Double) {
+        val clamped = percent.coerceIn(0.5, 15.0)
+        prefs.edit().putFloat(KEY_TARGET_PRICE_PERCENT, clamped.toFloat()).apply()
+        _configFlow.value = _configFlow.value.copy(targetPricePercent = clamped)
     }
 
     fun updateTimeframe(timeframe: String) {

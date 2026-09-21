@@ -212,8 +212,8 @@ class IrcAndRzmrStrategyTest {
             tickerLastPrice = series.close(0)
         )
 
-        val fibStrategy = IrcStrategy(stopVariant = IrcStopVariant.IRC_FIB618_STOP)
-        val swingStrategy = IrcStrategy(stopVariant = IrcStopVariant.IRC_SWING_STOP)
+        val fibStrategy = IrcStrategy(stopVariant = IrcStopVariant.IRC_FIB618_STOP, stopLossPercent = 2.0)
+        val swingStrategy = IrcStrategy(stopVariant = IrcStopVariant.IRC_SWING_STOP, stopLossPercent = 3.5)
 
         val sigFib = fibStrategy.evaluate(ctx, null).signal!!
         val sigSwing = swingStrategy.evaluate(ctx, null).signal!!
@@ -246,7 +246,7 @@ class IrcAndRzmrStrategyTest {
     @Test
     fun `test RzmrStrategy triggers Oversold Long Mean Reversion`() {
         val series = buildRzmrOversoldSetup()
-        val strategy = RzmrStrategy(minChop = 10.0, minRangeMaturityBars = 5, minAtrPct = 0.40, minNetRR = 1.0)
+        val strategy = RzmrStrategy(minChop = 10.0, minRangeMaturityBars = 5, minAtrPct = 0.40, minNetRR = 1.0, stopLossPercent = 2.0, targetPricePercent = 2.5)
         val ctx = SymbolContext(
             symbol = "B-BTC_USDT",
             primarySeries = series,

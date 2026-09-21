@@ -377,8 +377,8 @@ class MarketScannerEngine(
                                 direction = if (rawSignal.action == SignalAction.ENTER_LONG) SignalDirection.LONG else SignalDirection.SHORT,
                                 confidence = rawSignal.confidenceScore,
                                 entryPrice = if (rawSignal.entryPrice > 0.0) rawSignal.entryPrice else currentPrice,
-                                stopLossPrice = rawSignal.stopLossPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 0.975 else currentPrice * 1.025),
-                                takeProfitPrice = rawSignal.takeProfitPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 1.018 else currentPrice * 0.982),
+                                stopLossPrice = rawSignal.stopLossPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * (1.0 - config.stopLossPercent / 100.0) else currentPrice * (1.0 + config.stopLossPercent / 100.0)),
+                                takeProfitPrice = rawSignal.takeProfitPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * (1.0 + config.targetPricePercent / 100.0) else currentPrice * (1.0 - config.targetPricePercent / 100.0)),
                                 qualityScore = rawSignal.confidenceScore.toInt(),
                                 reason = rawSignal.reason
                             )
@@ -397,7 +397,13 @@ class MarketScannerEngine(
 
             // Aggregate strategy evidence for this pair
             if (pairEvaluations.isNotEmpty()) {
-                val candidate = StrategyAggregator.aggregate(pair, pairEvaluations, currentPrice)
+                val candidate = StrategyAggregator.aggregate(
+                    symbol = pair,
+                    evaluations = pairEvaluations,
+                    currentMarketPrice = currentPrice,
+                    stopLossPercent = config.stopLossPercent,
+                    targetPricePercent = config.targetPricePercent
+                )
                 if (candidate != null) {
                     // Suppress duplicate bar entries
                     val signalKey = "$pair:${candidate.anchorStrategy.strategyId}:$primaryTf"

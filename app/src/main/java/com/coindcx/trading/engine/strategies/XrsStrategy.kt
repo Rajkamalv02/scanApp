@@ -37,6 +37,8 @@ class XrsStrategy(
     val stopAtrMultiplier: Double = 2.0,
     val plannedRR: Double = 0.75,
     val expiryBars: Int = 30,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5,
     override val primaryInterval: Interval = Interval.H4
 ) : UniverseStrategy, Strategy {
 
@@ -201,13 +203,11 @@ class XrsStrategy(
             }
 
             val currClose = candidate.close
-            val minSlDist = currClose * 0.014
-            val maxSlDist = currClose * 0.030
-            val stopDist = (stopAtrMultiplier * candidate.atr).coerceIn(minSlDist, maxSlDist)
+            val stopDist = currClose * (stopLossPercent / 100.0)
             val stopLoss = currClose - stopDist
-            val rawTpDist = stopDist * plannedRR
-            val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+            val clampedTpDist = currClose * (targetPricePercent / 100.0)
             val takeProfit = currClose + clampedTpDist
+            val netRR = targetPricePercent / stopLossPercent
 
             val strengths = mapOf(
                 "alphaRank" to (candidate.percentileRank / 100.0).coerceIn(0.0, 1.0),
@@ -225,9 +225,9 @@ class XrsStrategy(
                     barOpenTimeUtc = openTime,
                     entryRef = currClose,
                     stopLoss = stopLoss,
-                    target = Target.Fixed(tp1 = takeProfit, plannedRR = plannedRR),
+                    target = Target.Fixed(tp1 = takeProfit, plannedRR = netRR),
                     riskDistance = stopDist,
-                    riskPct = (stopDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.TREND_UP,
                     strengths = strengths,
                     expiryBars = expiryBars,
@@ -262,13 +262,11 @@ class XrsStrategy(
             }
 
             val currClose = candidate.close
-            val minSlDist = currClose * 0.014
-            val maxSlDist = currClose * 0.030
-            val stopDist = (stopAtrMultiplier * candidate.atr).coerceIn(minSlDist, maxSlDist)
+            val stopDist = currClose * (stopLossPercent / 100.0)
             val stopLoss = currClose + stopDist
-            val rawTpDist = stopDist * plannedRR
-            val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+            val clampedTpDist = currClose * (targetPricePercent / 100.0)
             val takeProfit = currClose - clampedTpDist
+            val netRR = targetPricePercent / stopLossPercent
 
             val strengths = mapOf(
                 "alphaRank" to ((100.0 - candidate.percentileRank) / 100.0).coerceIn(0.0, 1.0),
@@ -286,9 +284,9 @@ class XrsStrategy(
                     barOpenTimeUtc = openTime,
                     entryRef = currClose,
                     stopLoss = stopLoss,
-                    target = Target.Fixed(tp1 = takeProfit, plannedRR = plannedRR),
+                    target = Target.Fixed(tp1 = takeProfit, plannedRR = netRR),
                     riskDistance = stopDist,
-                    riskPct = (stopDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.TREND_DOWN,
                     strengths = strengths,
                     expiryBars = expiryBars,
@@ -340,13 +338,14 @@ class XrsStrategy(
         }
 
         val currClose = series.close(0)
-        val atr = TechnicalIndicators.calculateAtr(series, 14, 0)
-        val stopDistance = (atr * stopAtrMultiplier).coerceAtLeast(currClose * 0.005)
+        val stopDistance = currClose * (stopLossPercent / 100.0)
+        val tpDistance = currClose * (targetPricePercent / 100.0)
+        val netRR = targetPricePercent / stopLossPercent
 
         val decile = ctx.relativeStrengthDecile
         if (decile >= 9) {
             val sl = currClose - stopDistance
-            val tp = currClose + (stopDistance * plannedRR)
+            val tp = currClose + tpDistance
             val signal = Signal(
                 symbol = symbol,
                 strategyId = id,
@@ -354,9 +353,9 @@ class XrsStrategy(
                 barOpenTimeUtc = series.openTime(0),
                 entryRef = currClose,
                 stopLoss = sl,
-                target = Target.Fixed(tp, null, plannedRR),
+                target = Target.Fixed(tp, null, netRR),
                 riskDistance = stopDistance,
-                riskPct = if (currClose > 0) (stopDistance / currClose) * 100.0 else 0.0,
+                riskPct = stopLossPercent,
                 regimeTag = RegimeTag.TREND_UP,
                 strategyName = name,
                 reason = "XRS Long: Cross-sectional top decile leader (Decile: $decile/10, Rank: #${ctx.relativeStrengthRank})",
@@ -366,7 +365,7 @@ class XrsStrategy(
             return StrategyResult(signal, state, emptyList())
         } else if (decile <= 2 && decile > 0) {
             val sl = currClose + stopDistance
-            val tp = currClose - (stopDistance * plannedRR)
+            val tp = currClose - tpDistance
             val signal = Signal(
                 symbol = symbol,
                 strategyId = id,
@@ -374,9 +373,9 @@ class XrsStrategy(
                 barOpenTimeUtc = series.openTime(0),
                 entryRef = currClose,
                 stopLoss = sl,
-                target = Target.Fixed(tp, null, plannedRR),
+                target = Target.Fixed(tp, null, netRR),
                 riskDistance = stopDistance,
-                riskPct = if (currClose > 0) (stopDistance / currClose) * 100.0 else 0.0,
+                riskPct = stopLossPercent,
                 regimeTag = RegimeTag.TREND_DOWN,
                 strategyName = name,
                 reason = "XRS Short: Cross-sectional bottom decile laggard (Decile: $decile/10, Rank: #${ctx.relativeStrengthRank})",

@@ -52,7 +52,9 @@ class StrategyAggregatorTest {
         val candidate = StrategyAggregator.aggregate(
             symbol = "B-BTC_USDT",
             evaluations = listOf(pbc, edtm, irc),
-            currentMarketPrice = 60000.0
+            currentMarketPrice = 60000.0,
+            stopLossPercent = (59950.0 - 58900.0) / 59950.0 * 100.0,
+            targetPricePercent = 2.2
         )
 
         assertNotNull("Case A should be approved", candidate)
@@ -146,30 +148,23 @@ class StrategyAggregatorTest {
         val candidate = StrategyAggregator.aggregate(
             symbol = "B-SOL_USDT",
             evaluations = listOf(vceb),
-            currentMarketPrice = 140.0
+            currentMarketPrice = 140.0,
+            stopLossPercent = 3.0,
+            targetPricePercent = 2.2
         )
 
-        assertNotNull("Case C qualifies under scalping Net R:R threshold 0.55", candidate)
+        assertNotNull("Case C qualifies under scalping Net R:R threshold", candidate)
         assertEquals(0.69, candidate!!.netRiskReward, 0.05)
 
-        // Low RR candidate with Net R:R < 0.55
-        val lowRrCandidate = StrategyEvaluation(
-            strategyId = "low_rr",
-            strategyName = "Low RR Strategy",
-            family = StrategyFamily.TREND,
-            action = SignalAction.ENTER_LONG,
-            direction = SignalDirection.LONG,
-            confidence = 85.0,
-            entryPrice = 140.0,
-            stopLossPrice = 135.0,
-            takeProfitPrice = 141.0 // raw reward 1.0 (0.71%) -> clamped to min TP 1.5% = 2.1
-        )
+        // Candidate with Net R:R <= 0 (fee friction exceeds profit target)
         val rejectedCandidate = StrategyAggregator.aggregate(
             symbol = "B-SOL_USDT",
-            evaluations = listOf(lowRrCandidate),
-            currentMarketPrice = 140.0
+            evaluations = listOf(vceb),
+            currentMarketPrice = 140.0,
+            stopLossPercent = 3.0,
+            targetPricePercent = 0.10
         )
-        assertNull("Candidate with Net R:R (0.45) < 0.55 must be rejected", rejectedCandidate)
+        assertNull("Candidate with Net R:R <= 0 must be rejected", rejectedCandidate)
     }
 
     @Test
@@ -203,7 +198,9 @@ class StrategyAggregatorTest {
         val candidate = StrategyAggregator.aggregate(
             symbol = "B-AVAX_USDT",
             evaluations = listOf(stratA, stratB),
-            currentMarketPrice = 30.1
+            currentMarketPrice = 30.1,
+            stopLossPercent = 3.0,
+            targetPricePercent = 2.2
         )
 
         assertNotNull(candidate)
@@ -273,7 +270,8 @@ class StrategyAggregatorTest {
         val candidate = StrategyAggregator.aggregate(
             symbol = "B-TEST_USDT",
             evaluations = listOf(invertedStrat),
-            currentMarketPrice = 100.0
+            currentMarketPrice = 100.0,
+            stopLossPercent = -2.0
         )
 
         assertNull("Inverted level must fail invariant check and return null", candidate)

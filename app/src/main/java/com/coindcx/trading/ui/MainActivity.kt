@@ -111,6 +111,12 @@ class MainActivity : AppCompatActivity() {
 
         // Synchronize UI with persisted mode
         updateModeUi(configRepo.isLiveMode())
+
+        val currentCfg = configRepo.configFlow.value
+        binding.sliderStopLoss.value = currentCfg.stopLossPercent.toFloat().coerceIn(0.5f, 10.0f)
+        updateStopLossUi(currentCfg.stopLossPercent)
+        binding.sliderTargetPrice.value = currentCfg.targetPricePercent.toFloat().coerceIn(0.5f, 15.0f)
+        updateTargetPriceUi(currentCfg.targetPricePercent)
     }
 
     override fun onPause() {
@@ -165,7 +171,33 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. Timeframe Selection
+        // 2. Stop-Loss Slider
+        val initialSl = config.stopLossPercent.toFloat().coerceIn(0.5f, 10.0f)
+        binding.sliderStopLoss.value = initialSl
+        updateStopLossUi(config.stopLossPercent)
+
+        binding.sliderStopLoss.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                val sl = value.toDouble()
+                updateStopLossUi(sl)
+                configRepo.updateStopLossPercent(sl)
+            }
+        }
+
+        // 3. Target Price Slider
+        val initialTp = config.targetPricePercent.toFloat().coerceIn(0.5f, 15.0f)
+        binding.sliderTargetPrice.value = initialTp
+        updateTargetPriceUi(config.targetPricePercent)
+
+        binding.sliderTargetPrice.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                val tp = value.toDouble()
+                updateTargetPriceUi(tp)
+                configRepo.updateTargetPricePercent(tp)
+            }
+        }
+
+        // 4. Timeframe Selection
         when (config.timeframe) {
             "1m" -> binding.chipTimeframe1m.isChecked = true
             "15m" -> binding.chipTimeframe15m.isChecked = true
@@ -268,6 +300,48 @@ class MainActivity : AppCompatActivity() {
                 binding.tvLeverageValue.setTextColor(getColor(R.color.accent_red))
                 binding.tvLeverageRiskBadge.text = "HIGH RISK"
                 binding.tvLeverageRiskBadge.setTextColor(getColor(R.color.accent_red))
+            }
+        }
+    }
+
+    private fun updateStopLossUi(slPercent: Double) {
+        binding.tvStopLossValue.text = "${String.format(java.util.Locale.US, "%.1f", slPercent)}%"
+        when {
+            slPercent <= 1.5 -> {
+                binding.tvStopLossValue.setTextColor(getColor(R.color.accent_green))
+                binding.tvStopLossBadge.text = "TIGHT RISK"
+                binding.tvStopLossBadge.setTextColor(getColor(R.color.accent_green))
+            }
+            slPercent <= 3.5 -> {
+                binding.tvStopLossValue.setTextColor(getColor(R.color.accent_amber))
+                binding.tvStopLossBadge.text = "NORMAL RISK"
+                binding.tvStopLossBadge.setTextColor(getColor(R.color.accent_amber))
+            }
+            else -> {
+                binding.tvStopLossValue.setTextColor(getColor(R.color.accent_red))
+                binding.tvStopLossBadge.text = "WIDE RISK"
+                binding.tvStopLossBadge.setTextColor(getColor(R.color.accent_red))
+            }
+        }
+    }
+
+    private fun updateTargetPriceUi(tpPercent: Double) {
+        binding.tvTargetPriceValue.text = "${String.format(java.util.Locale.US, "%.1f", tpPercent)}%"
+        when {
+            tpPercent <= 2.5 -> {
+                binding.tvTargetPriceValue.setTextColor(getColor(R.color.accent_green))
+                binding.tvTargetPriceBadge.text = "SCALP TARGET"
+                binding.tvTargetPriceBadge.setTextColor(getColor(R.color.accent_green))
+            }
+            tpPercent <= 5.0 -> {
+                binding.tvTargetPriceValue.setTextColor(getColor(R.color.accent_blue))
+                binding.tvTargetPriceBadge.text = "MOMENTUM TARGET"
+                binding.tvTargetPriceBadge.setTextColor(getColor(R.color.accent_blue))
+            }
+            else -> {
+                binding.tvTargetPriceValue.setTextColor(getColor(R.color.accent_amber))
+                binding.tvTargetPriceBadge.text = "SWING TARGET"
+                binding.tvTargetPriceBadge.setTextColor(getColor(R.color.accent_amber))
             }
         }
     }

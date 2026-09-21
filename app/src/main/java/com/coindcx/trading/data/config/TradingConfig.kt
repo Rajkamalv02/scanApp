@@ -10,6 +10,8 @@ data class TradingConfig(
     val maxSingleExposurePercent: Double = 30.0,
     val minMarginPerTradeInr: Double = 500.0, // Legacy fallback
     val leverage: Int = 2,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5,
     val timeframe: String = "15m", // "1m", "15m", "1h", "1d"
     val scanIntervalMinutes: Int = 2, // 1, 2, 5, 15, 30, 60
     val isMarketWideScan: Boolean = true,

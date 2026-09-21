@@ -136,7 +136,9 @@ object StrategyAggregator {
     fun aggregate(
         symbol: String,
         evaluations: List<StrategyEvaluation>,
-        currentMarketPrice: Double
+        currentMarketPrice: Double,
+        stopLossPercent: Double = 3.0,
+        targetPricePercent: Double = 1.5
     ): AggregatedCandidate? {
         val approved = evaluations.filter { it.isApproved }
         if (approved.isEmpty()) {
@@ -177,7 +179,9 @@ object StrategyAggregator {
                     evaluations = winningPool,
                     overrideConfidence = penalizedConfidence,
                     conflictNote = conflictNote,
-                    currentMarketPrice = currentMarketPrice
+                    currentMarketPrice = currentMarketPrice,
+                    stopLossPercent = stopLossPercent,
+                    targetPricePercent = targetPricePercent
                 )
             } else {
                 com.coindcx.trading.util.AppLogManager.scanner(
@@ -197,7 +201,9 @@ object StrategyAggregator {
             evaluations = activePool,
             overrideConfidence = null,
             conflictNote = "NONE",
-            currentMarketPrice = currentMarketPrice
+            currentMarketPrice = currentMarketPrice,
+            stopLossPercent = stopLossPercent,
+            targetPricePercent = targetPricePercent
         )
     }
 
@@ -207,7 +213,9 @@ object StrategyAggregator {
         evaluations: List<StrategyEvaluation>,
         overrideConfidence: Double?,
         conflictNote: String,
-        currentMarketPrice: Double
+        currentMarketPrice: Double,
+        stopLossPercent: Double = 3.0,
+        targetPricePercent: Double = 1.5
     ): AggregatedCandidate? {
         val sortedByConf = evaluations.sortedByDescending { it.confidence }
         val anchor = sortedByConf.first()
@@ -222,33 +230,13 @@ object StrategyAggregator {
             max(maxEntry, currentMarketPrice)
         }
 
-        // 2. Stop-Loss Reconciliation (§D.A): Thesis Invalidation Preservation (Widest protective stop)
-        val rawReconciledSl = if (isLong) {
-            evaluations.map { it.stopLossPrice }.minOrNull() ?: (reconciledEntry * 0.975)
-        } else {
-            evaluations.map { it.stopLossPrice }.maxOrNull() ?: (reconciledEntry * 1.025)
-        }
+        // 2. Stop-Loss & Take-Profit: Configured directly from UI percentages (unscaled by leverage)
+        val slDist = reconciledEntry * (stopLossPercent / 100.0)
+        val tpDist = reconciledEntry * (targetPricePercent / 100.0)
+        val reconciledSl = if (isLong) (reconciledEntry - slDist) else (reconciledEntry + slDist)
+        val reconciledTp = if (isLong) (reconciledEntry + tpDist) else (reconciledEntry - tpDist)
 
-        // Clamp SL distance to [MIN_STOP_LOSS_DISTANCE_PCT..MAX_STOP_LOSS_DISTANCE_PCT] (1.4% to 3.0%)
-        val minAllowedSlDist = reconciledEntry * (MIN_STOP_LOSS_DISTANCE_PCT / 100.0)
-        val maxAllowedSlDist = reconciledEntry * (MAX_STOP_LOSS_DISTANCE_PCT / 100.0)
-        val rawSlDist = if (isLong) (reconciledEntry - rawReconciledSl) else (rawReconciledSl - reconciledEntry)
-        val clampedSlDist = rawSlDist.coerceIn(minAllowedSlDist, maxAllowedSlDist)
-        val reconciledSl = if (isLong) (reconciledEntry - clampedSlDist) else (reconciledEntry + clampedSlDist)
-
-        // 3. Take-Profit Reconciliation (§D.C): Scalping target clamped strictly between 1.5% and 2.2%
-        val minTpDist = reconciledEntry * 0.015 // 1.5% min scalping target
-        val maxTpDist = reconciledEntry * 0.022 // 2.2% max scalping target
-        val rawReconciledTp = if (isLong) {
-            evaluations.map { it.takeProfitPrice }.minOrNull() ?: (reconciledEntry + clampedSlDist * 0.75)
-        } else {
-            evaluations.map { it.takeProfitPrice }.maxOrNull() ?: (reconciledEntry - clampedSlDist * 0.75)
-        }
-        val rawTpDist = if (isLong) (rawReconciledTp - reconciledEntry) else (reconciledEntry - rawReconciledTp)
-        val clampedTpDist = rawTpDist.coerceIn(minTpDist, maxTpDist)
-        val reconciledTp = if (isLong) (reconciledEntry + clampedTpDist) else (reconciledEntry - clampedTpDist)
-
-        // 4. Mandatory Hard Invariant Check (§D.2)
+        // 3. Mandatory Hard Invariant Check (§D.2)
         val isGeometricallyValid = if (isLong) {
             reconciledSl < reconciledEntry && reconciledEntry < reconciledTp
         } else {
@@ -263,20 +251,19 @@ object StrategyAggregator {
             return null
         }
 
-        // 5. Risk-to-Reward Calculation with dynamic FeeFriction (§D.C)
+        // 4. Risk-to-Reward Calculation with dynamic FeeFriction (§D.C)
         val stopDist = abs(reconciledEntry - reconciledSl)
         val targetDist = abs(reconciledTp - reconciledEntry)
         if (stopDist <= 0.0 || reconciledEntry <= 0.0) return null
 
-        val stopDistPct = (stopDist / reconciledEntry) * 100.0
-        val rawRr = targetDist / stopDist
-        val feeFriction = ROUND_TRIP_FEE_SLIPPAGE_PCT / stopDistPct
+        val rawRr = targetPricePercent / stopLossPercent
+        val feeFriction = ROUND_TRIP_FEE_SLIPPAGE_PCT / stopLossPercent
         val netRr = rawRr - feeFriction
 
-        if (netRr < MIN_NET_RR_THRESHOLD) {
+        if (netRr <= 0.0) {
             com.coindcx.trading.util.AppLogManager.d(
                 "AGGREGATOR",
-                "[$symbol] Rejected by Net R:R Gate: Net R:R ${"%.2f".format(netRr)} (Raw: ${"%.2f".format(rawRr)}, FeeFriction: ${"%.4f".format(feeFriction)}) < $MIN_NET_RR_THRESHOLD threshold."
+                "[$symbol] Rejected: Net R:R ${"%.2f".format(netRr)} <= 0 (Fee friction exceeds target profit)."
             )
             return null
         }

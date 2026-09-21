@@ -27,8 +27,10 @@ class RzmrStrategy(
     val maxAdx: Double = 25.0,
     val minChop: Double = 52.0,
     val minRangeMaturityBars: Int = 15,
-    val plannedRR: Double = 0.75,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5,
     val minNetRR: Double = 0.55,
+    val plannedRR: Double = targetPricePercent / stopLossPercent,
     val expiryBars: Int = 12
 ) : Strategy {
 
@@ -197,23 +199,11 @@ class RzmrStrategy(
             }
 
             if (rejections.isEmpty()) {
-                val lowestRecent = min(series.low(0), min(series.low(1), series.low(2)))
-                val rawStop = lowestRecent - 0.5 * atr
-                val rawDist = currClose - rawStop
-                val minSlDist = currClose * 0.014
-                val maxSlDist = currClose * 0.030
-                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
+                val clampedDist = currClose * (stopLossPercent / 100.0)
                 val stopLoss = currClose - clampedDist
-
-                // Target: 50-period SMA (the mean) clamped to scalping band [1.5%..2.2%]
-                val rawDistToMean = sma0 - currClose
-                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val clampedTpDist = currClose * (targetPricePercent / 100.0)
                 val targetPrice = currClose + clampedTpDist
-                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
-
-                if (netRR < minNetRR) {
-                    return StrategyResult(null, newState, listOf(RejectionCode.S7_RR_GATE))
-                }
+                val netRR = targetPricePercent / stopLossPercent
 
                 val strengths = mapOf(
                     "zScoreDepth" to ((abs(z1) - zThreshold) / 1.5).coerceIn(0.0, 1.0),
@@ -231,7 +221,7 @@ class RzmrStrategy(
                     stopLoss = stopLoss,
                     target = Target.Fixed(tp1 = targetPrice, plannedRR = netRR),
                     riskDistance = clampedDist,
-                    riskPct = (clampedDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.RANGE,
                     strengths = strengths,
                     expiryBars = expiryBars,
@@ -262,23 +252,11 @@ class RzmrStrategy(
             }
 
             if (rejections.isEmpty()) {
-                val highestRecent = max(series.high(0), max(series.high(1), series.high(2)))
-                val rawStop = highestRecent + 0.5 * atr
-                val rawDist = rawStop - currClose
-                val minSlDist = currClose * 0.014
-                val maxSlDist = currClose * 0.030
-                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
+                val clampedDist = currClose * (stopLossPercent / 100.0)
                 val stopLoss = currClose + clampedDist
-
-                // Target: 50-period SMA (the mean) clamped to scalping band [1.5%..2.2%]
-                val rawDistToMean = currClose - sma0
-                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val clampedTpDist = currClose * (targetPricePercent / 100.0)
                 val targetPrice = currClose - clampedTpDist
-                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
-
-                if (netRR < minNetRR) {
-                    return StrategyResult(null, newState, listOf(RejectionCode.S7_RR_GATE))
-                }
+                val netRR = targetPricePercent / stopLossPercent
 
                 val strengths = mapOf(
                     "zScoreDepth" to ((z1 - zThreshold) / 1.5).coerceIn(0.0, 1.0),
@@ -296,7 +274,7 @@ class RzmrStrategy(
                     stopLoss = stopLoss,
                     target = Target.Fixed(tp1 = targetPrice, plannedRR = netRR),
                     riskDistance = clampedDist,
-                    riskPct = (clampedDist / currClose) * 100.0,
+                    riskPct = stopLossPercent,
                     regimeTag = RegimeTag.RANGE,
                     strengths = strengths,
                     expiryBars = expiryBars,

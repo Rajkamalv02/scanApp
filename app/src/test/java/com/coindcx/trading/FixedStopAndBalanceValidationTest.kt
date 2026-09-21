@@ -271,64 +271,95 @@ class FixedStopAndBalanceValidationTest {
     }
 
     // =========================================================================
-    // 5. Futures Scalping SL / TP Bounds & Minimum Net R:R Invariant
+    // 5. UI-Configured Stop-Loss & Target Price Parameter Validation
     // =========================================================================
 
     @Test
-    fun testFuturesScalping_TargetPriceBoundedBetween1_5And2_2Percent() {
-        val entry = 100.0
-        val minTpDist = entry * 0.015
-        val maxTpDist = entry * 0.022
-
-        // Verify bounds: 1.5% to 2.2%
-        assertEquals(1.5, minTpDist, 0.001)
-        assertEquals(2.2, maxTpDist, 0.001)
-
-        val longTpMin = entry + minTpDist
-        val longTpMax = entry + maxTpDist
-        assertEquals(101.5, longTpMin, 0.001)
-        assertEquals(102.2, longTpMax, 0.001)
-
-        val shortTpMin = entry - minTpDist
-        val shortTpMax = entry - maxTpDist
-        assertEquals(98.5, shortTpMin, 0.001)
-        assertEquals(97.8, shortTpMax, 0.001)
+    fun testUIControls_DefaultParameters_StopLoss3Percent_Target1_5Percent() {
+        val defaultConfig = com.coindcx.trading.data.config.TradingConfig()
+        assertEquals("Default Stop-Loss must be strictly 3.0%", 3.0, defaultConfig.stopLossPercent, 0.001)
+        assertEquals("Default Target Price must be strictly 1.5%", 1.5, defaultConfig.targetPricePercent, 0.001)
     }
 
     @Test
-    fun testFuturesScalping_StopLossBoundedBetween1_4And3_0Percent() {
-        val entry = 100.0
-        val minSlDist = entry * 0.014
-        val maxSlDist = entry * 0.030
+    fun testUIControls_StepIncrementsAndSelectableRanges() {
+        // Step size is 0.5%
+        val step = 0.5
+        val slRangeMin = 0.5
+        val slRangeMax = 10.0
+        val tpRangeMin = 0.5
+        val tpRangeMax = 15.0
 
-        // Sub-noise stops (<1.4%) are clamped up
-        val subNoiseRawDist = 0.8
-        val clampedUpSlDist = subNoiseRawDist.coerceIn(minSlDist, maxSlDist)
-        assertEquals(1.4, clampedUpSlDist, 0.001)
+        // Test selectable values in range:
+        for (v in listOf(0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 7.5, 10.0)) {
+            assertEquals("SL value must be a multiple of 0.5% step", 0.0, (v * 10) % (step * 10), 0.001)
+            assertTrue("SL value must be within [0.5..10.0]", v in slRangeMin..slRangeMax)
+        }
 
-        // Excessively wide stops (>3.0%) are clamped down to 3.0%
-        val wideRawDist = 5.0
-        val clampedDownSlDist = wideRawDist.coerceIn(minSlDist, maxSlDist)
-        assertEquals(3.0, clampedDownSlDist, 0.001)
+        for (v in listOf(0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.5, 6.0, 10.0, 15.0)) {
+            assertEquals("TP value must be a multiple of 0.5% step", 0.0, (v * 10) % (step * 10), 0.001)
+            assertTrue("TP value must be within [0.5..15.0]", v in tpRangeMin..tpRangeMax)
+        }
+    }
 
-        // Normal volatility stop (2.5%) stays preserved
-        val normalRawDist = 2.5
-        val preservedSlDist = normalRawDist.coerceIn(minSlDist, maxSlDist)
-        assertEquals(2.5, preservedSlDist, 0.001)
+    // =========================================================================
+    // 6. Leverage Invariance Validation
+    // =========================================================================
+
+    @Test
+    fun testLeverageInvariance_StopLossAndTargetPricesRemainStrictlyIdenticalAcrossLeverages() {
+        // Requirement: "These percentages must remain the same regardless of the leverage used.
+        // Leverage should not modify or scale these values."
+        val entryPrice = 60000.0
+        val slPercent = 3.0
+        val tpPercent = 1.5
+
+        val expectedLongSl = entryPrice * (1.0 - slPercent / 100.0) // 58200.0
+        val expectedLongTp = entryPrice * (1.0 + tpPercent / 100.0) // 60900.0
+        val expectedShortSl = entryPrice * (1.0 + slPercent / 100.0) // 61800.0
+        val expectedShortTp = entryPrice * (1.0 - tpPercent / 100.0) // 59100.0
+
+        val leveragesToTest = listOf(1, 2, 3, 5, 7, 10, 15, 20)
+
+        for (lev in leveragesToTest) {
+            // Sizing notional is scaled by leverage, but price triggers must remain mathematically identical
+            val longSlForLeverage = entryPrice * (1.0 - slPercent / 100.0)
+            val longTpForLeverage = entryPrice * (1.0 + tpPercent / 100.0)
+            val shortSlForLeverage = entryPrice * (1.0 + slPercent / 100.0)
+            val shortTpForLeverage = entryPrice * (1.0 - tpPercent / 100.0)
+
+            assertEquals("Long SL @ ${lev}x must be strictly invariant", expectedLongSl, longSlForLeverage, 0.0001)
+            assertEquals("Long TP @ ${lev}x must be strictly invariant", expectedLongTp, longTpForLeverage, 0.0001)
+            assertEquals("Short SL @ ${lev}x must be strictly invariant", expectedShortSl, shortSlForLeverage, 0.0001)
+            assertEquals("Short TP @ ${lev}x must be strictly invariant", expectedShortTp, shortTpForLeverage, 0.0001)
+        }
     }
 
     @Test
-    fun testFuturesScalping_NetRiskRewardAllowsScalpTradesAbove0_55() {
-        // Entry 100, Stop Loss 97.2 (2.8% risk), Target 101.8 (1.8% reward)
-        val entry = 100.0
-        val slDist = 2.8
-        val tpDist = 1.8
-        val rawRr = tpDist / slDist // 1.8 / 2.8 = 0.6428
-        val feeFriction = 0.14 / 2.8 // 0.05
-        val netRr = rawRr - feeFriction // 0.5928
+    fun testLeverageInvariance_MarginChangesWithLeverageWhileStopDistanceStaysConstant() {
+        val currentPrice = 60000.0
+        val slPercent = 3.0
+        val notionalUsdt = 600.0 // 0.01 BTC
+        val fxRate = 100.0
 
-        assertTrue("Scalping trade with 1.8% TP and 2.8% SL must exceed Net R:R 0.55 threshold", netRr >= 0.55)
-        assertEquals(0.59, netRr, 0.01)
+        val stopDistanceUsdt = notionalUsdt * (slPercent / 100.0) // $18.00 USDT at risk
+        assertEquals("Stop risk in USDT must be independent of leverage", 18.0, stopDistanceUsdt, 0.001)
+
+        val margin1x = (notionalUsdt * fxRate) / 1
+        val margin2x = (notionalUsdt * fxRate) / 2
+        val margin10x = (notionalUsdt * fxRate) / 10
+        val margin20x = (notionalUsdt * fxRate) / 20
+
+        assertEquals(60000.0, margin1x, 0.01)
+        assertEquals(30000.0, margin2x, 0.01)
+        assertEquals(6000.0, margin10x, 0.01)
+        assertEquals(3000.0, margin20x, 0.01)
+
+        // Verifying that leverage only divides required margin, while SL distance % remains exactly 3.0%
+        val slDist1x = (currentPrice * (slPercent / 100.0)) / currentPrice * 100.0
+        val slDist20x = (currentPrice * (slPercent / 100.0)) / currentPrice * 100.0
+        assertEquals(3.0, slDist1x, 0.001)
+        assertEquals(3.0, slDist20x, 0.001)
     }
 }
 

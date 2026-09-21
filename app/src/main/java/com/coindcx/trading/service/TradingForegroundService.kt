@@ -643,20 +643,20 @@ class TradingForegroundService : Service() {
                 }
 
                 val hasExplicitSl = (opp.signal.stopLossPrice ?: 0.0) > 0.0
-                val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
-                val slMethodTag = if (hasExplicitSl) "STRATEGY_SIGNAL" else "FALLBACK_FIXED_2PCT"
+                val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * (1.0 - config.stopLossPercent / 100.0) else opp.currentPrice * (1.0 + config.stopLossPercent / 100.0))
+                val slMethodTag = if (hasExplicitSl) "STRATEGY_SIGNAL" else "CONFIG_SL_${config.stopLossPercent}PCT"
                 val slDistance = kotlin.math.abs(opp.currentPrice - slPrice)
-                val slDistPct = if (opp.currentPrice > 0) (slDistance / opp.currentPrice) * 100.0 else 0.0
+                val slDistPct = if (opp.currentPrice > 0) (slDistance / opp.currentPrice) * 100.0 else config.stopLossPercent
 
                 val marginToAllocate: Double = fundedOpp.allocatedMarginInr
                 val actualLeverage: Int = config.leverage.coerceIn(1, riskManager.settings.maxLeverage)
                 val notionalInr: Double = marginToAllocate * actualLeverage
                 val targetRiskInr: Double = notionalInr * (slDistPct / 100.0)
 
-                val tpPrice = opp.signal.takeProfitPrice ?: (if (opp.isBuy) opp.currentPrice + (slDistance * 2.0) else opp.currentPrice - (slDistance * 2.0))
+                val tpPrice = opp.signal.takeProfitPrice ?: (if (opp.isBuy) opp.currentPrice * (1.0 + config.targetPricePercent / 100.0) else opp.currentPrice * (1.0 - config.targetPricePercent / 100.0))
                 val targetDistance = kotlin.math.abs(tpPrice - opp.currentPrice)
-                val targetDistPct = if (opp.currentPrice > 0) (targetDistance / opp.currentPrice) * 100.0 else 0.0
-                val rrRatio = if (opp.signal.riskRewardRatio > 0) opp.signal.riskRewardRatio else 2.0
+                val targetDistPct = if (opp.currentPrice > 0) (targetDistance / opp.currentPrice) * 100.0 else config.targetPricePercent
+                val rrRatio = if (opp.signal.riskRewardRatio > 0) opp.signal.riskRewardRatio else (config.targetPricePercent / config.stopLossPercent)
                 val expectedProfitInr = targetRiskInr * rrRatio
                 val expectedLossInr = targetRiskInr
 

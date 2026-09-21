@@ -142,9 +142,9 @@ class AllocationEngine {
 
             // Calculate Strategy-Specific Stop Loss Distance
             val hasExplicitSl = (opp.signal.stopLossPrice ?: 0.0) > 0.0
-            val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * 0.98 else opp.currentPrice * 1.02)
+            val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * 0.97 else opp.currentPrice * 1.03)
             val slDistance = abs(opp.currentPrice - slPrice)
-            val slDistPercent = if (opp.currentPrice > 0.0) (slDistance / opp.currentPrice).coerceAtLeast(0.0001) else 0.02
+            val slDistPercent = if (opp.currentPrice > 0.0) (slDistance / opp.currentPrice).coerceAtLeast(0.0001) else 0.03
 
             // Risk-Parity Target Notional
             val idealNotional = targetRiskPerTradeInr / slDistPercent

@@ -26,6 +26,8 @@ class EdtmStrategy(
     val maxAtrPct: Double = 5.0,
     val trailAtrMultiplier: Double = 2.5,
     val maxEmaDistanceAtr: Double = 4.0,
+    val stopLossPercent: Double = 3.0,
+    val targetPricePercent: Double = 1.5,
     val expiryBars: Int = 24
 ) : Strategy {
 
@@ -129,12 +131,11 @@ class EdtmStrategy(
                 return StrategyResult(null, state, listOf(RejectionCode.S10_C6_CLOSE_LOCATION))
             }
 
-            val minSlDist = currClose * 0.014
-            val maxSlDist = currClose * 0.030
-            val riskDistance = (trailAtrMultiplier * atr).coerceIn(minSlDist, maxSlDist)
+            val riskDistance = currClose * (stopLossPercent / 100.0)
             val stopLoss = currClose - riskDistance
-            val takeProfit = currClose + (riskDistance * 0.75).coerceIn(currClose * 0.015, currClose * 0.022)
-            val riskPct = (riskDistance / currClose) * 100.0
+            val takeProfitDist = currClose * (targetPricePercent / 100.0)
+            val takeProfit = currClose + takeProfitDist
+            val plannedRR = targetPricePercent / stopLossPercent
 
             val strengths = mapOf(
                 "trendStrength" to ((er - erThreshold) / (1.0 - erThreshold)).coerceIn(0.0, 1.0),
@@ -150,9 +151,9 @@ class EdtmStrategy(
                 barOpenTimeUtc = series.openTime(0),
                 entryRef = currClose,
                 stopLoss = stopLoss,
-                target = Target.Fixed(tp1 = takeProfit, plannedRR = 0.75),
+                target = Target.Fixed(tp1 = takeProfit, plannedRR = plannedRR),
                 riskDistance = riskDistance,
-                riskPct = riskPct,
+                riskPct = stopLossPercent,
                 regimeTag = RegimeTag.TREND_UP,
                 strengths = strengths,
                 expiryBars = expiryBars,
@@ -184,12 +185,11 @@ class EdtmStrategy(
                 return StrategyResult(null, state, listOf(RejectionCode.S10_C6_CLOSE_LOCATION))
             }
 
-            val minSlDist = currClose * 0.014
-            val maxSlDist = currClose * 0.030
-            val riskDistance = (trailAtrMultiplier * atr).coerceIn(minSlDist, maxSlDist)
+            val riskDistance = currClose * (stopLossPercent / 100.0)
             val stopLoss = currClose + riskDistance
-            val takeProfit = currClose - (riskDistance * 0.75).coerceIn(currClose * 0.015, currClose * 0.022)
-            val riskPct = (riskDistance / currClose) * 100.0
+            val takeProfitDist = currClose * (targetPricePercent / 100.0)
+            val takeProfit = currClose - takeProfitDist
+            val plannedRR = targetPricePercent / stopLossPercent
 
             val strengths = mapOf(
                 "trendStrength" to ((er - erThreshold) / (1.0 - erThreshold)).coerceIn(0.0, 1.0),
@@ -205,9 +205,9 @@ class EdtmStrategy(
                 barOpenTimeUtc = series.openTime(0),
                 entryRef = currClose,
                 stopLoss = stopLoss,
-                target = Target.Fixed(tp1 = takeProfit, plannedRR = 0.75),
+                target = Target.Fixed(tp1 = takeProfit, plannedRR = plannedRR),
                 riskDistance = riskDistance,
-                riskPct = riskPct,
+                riskPct = stopLossPercent,
                 regimeTag = RegimeTag.TREND_DOWN,
                 strengths = strengths,
                 expiryBars = expiryBars,
