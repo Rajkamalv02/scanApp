@@ -54,8 +54,9 @@ data class AggregatedCandidate(
 object StrategyAggregator {
 
     const val ROUND_TRIP_FEE_SLIPPAGE_PCT = 0.14 // 0.05% entry + 0.05% exit + 0.04% slippage
-    const val MIN_NET_RR_THRESHOLD = 1.50
-    const val MAX_STOP_LOSS_DISTANCE_PCT = 3.50 // 3.5% maximum allowable SL distance
+    const val MIN_NET_RR_THRESHOLD = 0.55 // Scalping threshold for 1.5%..2.2% TP against 2.5%..3.0% SL
+    const val MIN_STOP_LOSS_DISTANCE_PCT = 1.40 // 1.4% minimum noise floor (prevents sub-noise stop-outs)
+    const val MAX_STOP_LOSS_DISTANCE_PCT = 3.00 // 3.0% maximum allowable protective stop distance
     const val MARGINAL_SCALING_GAMMA = 0.20 // gamma = 0.20
 
     /**
@@ -223,27 +224,29 @@ object StrategyAggregator {
 
         // 2. Stop-Loss Reconciliation (§D.A): Thesis Invalidation Preservation (Widest protective stop)
         val rawReconciledSl = if (isLong) {
-            evaluations.map { it.stopLossPrice }.minOrNull() ?: (reconciledEntry * 0.98)
+            evaluations.map { it.stopLossPrice }.minOrNull() ?: (reconciledEntry * 0.975)
         } else {
-            evaluations.map { it.stopLossPrice }.maxOrNull() ?: (reconciledEntry * 1.02)
+            evaluations.map { it.stopLossPrice }.maxOrNull() ?: (reconciledEntry * 1.025)
         }
 
-        // Cap SL distance at MAX_STOP_LOSS_DISTANCE_PCT (3.5%) to protect minimum order feasibility
+        // Clamp SL distance to [MIN_STOP_LOSS_DISTANCE_PCT..MAX_STOP_LOSS_DISTANCE_PCT] (1.4% to 3.0%)
+        val minAllowedSlDist = reconciledEntry * (MIN_STOP_LOSS_DISTANCE_PCT / 100.0)
         val maxAllowedSlDist = reconciledEntry * (MAX_STOP_LOSS_DISTANCE_PCT / 100.0)
-        val reconciledSl = if (isLong) {
-            val dist = reconciledEntry - rawReconciledSl
-            if (dist > maxAllowedSlDist) (reconciledEntry - maxAllowedSlDist) else rawReconciledSl
-        } else {
-            val dist = rawReconciledSl - reconciledEntry
-            if (dist > maxAllowedSlDist) (reconciledEntry + maxAllowedSlDist) else rawReconciledSl
-        }
+        val rawSlDist = if (isLong) (reconciledEntry - rawReconciledSl) else (rawReconciledSl - reconciledEntry)
+        val clampedSlDist = rawSlDist.coerceIn(minAllowedSlDist, maxAllowedSlDist)
+        val reconciledSl = if (isLong) (reconciledEntry - clampedSlDist) else (reconciledEntry + clampedSlDist)
 
-        // 3. Take-Profit Reconciliation (§D.C): Conservative nearest structural target
-        val reconciledTp = if (isLong) {
-            evaluations.map { it.takeProfitPrice }.minOrNull() ?: (reconciledEntry + (reconciledEntry - reconciledSl) * 2.0)
+        // 3. Take-Profit Reconciliation (§D.C): Scalping target clamped strictly between 1.5% and 2.2%
+        val minTpDist = reconciledEntry * 0.015 // 1.5% min scalping target
+        val maxTpDist = reconciledEntry * 0.022 // 2.2% max scalping target
+        val rawReconciledTp = if (isLong) {
+            evaluations.map { it.takeProfitPrice }.minOrNull() ?: (reconciledEntry + clampedSlDist * 0.75)
         } else {
-            evaluations.map { it.takeProfitPrice }.maxOrNull() ?: (reconciledEntry - (reconciledSl - reconciledEntry) * 2.0)
+            evaluations.map { it.takeProfitPrice }.maxOrNull() ?: (reconciledEntry - clampedSlDist * 0.75)
         }
+        val rawTpDist = if (isLong) (rawReconciledTp - reconciledEntry) else (reconciledEntry - rawReconciledTp)
+        val clampedTpDist = rawTpDist.coerceIn(minTpDist, maxTpDist)
+        val reconciledTp = if (isLong) (reconciledEntry + clampedTpDist) else (reconciledEntry - clampedTpDist)
 
         // 4. Mandatory Hard Invariant Check (§D.2)
         val isGeometricallyValid = if (isLong) {

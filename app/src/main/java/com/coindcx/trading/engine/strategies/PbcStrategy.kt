@@ -25,7 +25,7 @@ class PbcStrategy(
     val adxMin: Double = 22.0,
     val adxMax: Double = 50.0,
     val minEr: Double = 0.40,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -36,7 +36,7 @@ class PbcStrategy(
     override val primaryInterval: Interval = Interval.M15
     override val requiredIntervals: Set<Interval> = setOf(Interval.M15, Interval.H4)
     override val preferredRegime: MarketRegimePreference = MarketRegimePreference.TRENDING_MOMENTUM
-    override val parametersSummary: String = "EMAs: $fastPeriod/$midPeriod/$slowPeriod, ADX: [$adxMin..$adxMax], R:R: 1:${plannedRR.toInt()}"
+    override val parametersSummary: String = "EMAs: $fastPeriod/$midPeriod/$slowPeriod, ADX: [$adxMin..$adxMax], R:R: 1:${"%.2f".format(plannedRR)}"
 
     override fun evaluate(ctx: SymbolContext, state: StrategyState?): StrategyResult {
         val series = ctx.primarySeries
@@ -143,16 +143,20 @@ class PbcStrategy(
             if (closeLocation < 0.60) rejections.add(RejectionCode.S1_C7_UPPER_HALF_CLOSE)
 
             if (rejections.isEmpty()) {
-                // Stop loss: recent swing low - 0.5 ATR, clamped 1.0 to 3.0 ATR
+                // Stop loss: recent swing low - 0.5 ATR, clamped [1.4%..3.0%]
                 var lowestLow = series.low(0)
                 for (b in 1..min(3, series.size - 1)) {
                     if (series.low(b) < lowestLow) lowestLow = series.low(b)
                 }
                 val rawStop = lowestLow - 0.5 * atr
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 3.0 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
-                val takeProfit = currClose + (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose + clampedTpDist
                 val riskPct = (clampedDist / currClose) * 100.0
 
                 val strengths = mapOf(
@@ -220,9 +224,13 @@ class PbcStrategy(
                 }
                 val rawStop = highestHigh + 0.5 * atr
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 3.0 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
-                val takeProfit = currClose - (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose - clampedTpDist
                 val riskPct = (clampedDist / currClose) * 100.0
 
                 val strengths = mapOf(

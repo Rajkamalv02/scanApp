@@ -25,7 +25,7 @@ class EmaCrossoverStrategy(
     initialFastPeriod: Int = 9,
     initialSlowPeriod: Int = 21,
     initialAtrMultiplier: Double = 1.5,
-    val riskRewardRatio: Double = 2.0
+    val riskRewardRatio: Double = 0.75
 ) : Strategy {
 
     override val id: String = "ema_crossover"
@@ -225,11 +225,17 @@ class EmaCrossoverStrategy(
         // 3. New Entry Signal Generation on Fresh Confirmed Crossover
         if (isBullishCrossover) {
             val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "EMA" })
-            val stopLossPrice = currentPrice - (atr * atrMultiplier)
-            val riskDistance = (currentPrice - stopLossPrice).coerceAtLeast(atr * 0.5)
-            val takeProfitPrice = currentPrice + (riskDistance * riskRewardRatio)
+            val rawSlDist = (atr * atrMultiplier)
+            val minSlDist = currentPrice * 0.014
+            val maxSlDist = currentPrice * 0.030
+            val riskDistance = rawSlDist.coerceIn(minSlDist, maxSlDist)
+            val stopLossPrice = currentPrice - riskDistance
+            val rawTpDist = riskDistance * riskRewardRatio
+            val clampedTpDist = rawTpDist.coerceIn(currentPrice * 0.015, currentPrice * 0.022)
+            val takeProfitPrice = currentPrice + clampedTpDist
             val slDistPct = (riskDistance / currentPrice) * 100.0
-            val tpDistPct = ((takeProfitPrice - currentPrice) / currentPrice) * 100.0
+            val tpDistPct = (clampedTpDist / currentPrice) * 100.0
+            val actualRR = clampedTpDist / riskDistance
 
             AppLogManager.tradeLifecycle(
                 event = "SIGNAL_GENERATED",
@@ -251,7 +257,7 @@ class EmaCrossoverStrategy(
                     "stop_loss" to "%.4f".format(stopLossPrice),
                     "target" to "%.4f".format(takeProfitPrice),
                     "tp_dist_pct" to "%.2f%%".format(tpDistPct),
-                    "rr_ratio" to "1:%.1f".format(riskRewardRatio),
+                    "rr_ratio" to "1:%.2f".format(actualRR),
                     "confidence" to 80.0
                 ),
                 narrative = "Bullish EMA Crossover detected: Fast(%.4f) crossed above Slow(%.4f) on confirmed bar (Prev: %.4f <= %.4f) -> Long signal -> Entry=%.4f, SL=%.4f (dist: %.4f), TP=%.4f (dist: %.4f), ATR=%.4f"
@@ -269,7 +275,7 @@ class EmaCrossoverStrategy(
                 atr = atr,
                 atrMultiplier = atrMultiplier,
                 riskDistance = riskDistance,
-                riskRewardRatio = riskRewardRatio,
+                riskRewardRatio = actualRR,
                 stopLossPrice = stopLossPrice,
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = 80.0,
@@ -282,11 +288,17 @@ class EmaCrossoverStrategy(
 
         if (isBearishCrossover) {
             val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "EMA" })
-            val stopLossPrice = currentPrice + (atr * atrMultiplier)
-            val riskDistance = (stopLossPrice - currentPrice).coerceAtLeast(atr * 0.5)
-            val takeProfitPrice = currentPrice - (riskDistance * riskRewardRatio)
+            val rawSlDist = (atr * atrMultiplier)
+            val minSlDist = currentPrice * 0.014
+            val maxSlDist = currentPrice * 0.030
+            val riskDistance = rawSlDist.coerceIn(minSlDist, maxSlDist)
+            val stopLossPrice = currentPrice + riskDistance
+            val rawTpDist = riskDistance * riskRewardRatio
+            val clampedTpDist = rawTpDist.coerceIn(currentPrice * 0.015, currentPrice * 0.022)
+            val takeProfitPrice = currentPrice - clampedTpDist
             val slDistPct = (riskDistance / currentPrice) * 100.0
-            val tpDistPct = ((currentPrice - takeProfitPrice) / currentPrice) * 100.0
+            val tpDistPct = (clampedTpDist / currentPrice) * 100.0
+            val actualRR = clampedTpDist / riskDistance
 
             AppLogManager.tradeLifecycle(
                 event = "SIGNAL_GENERATED",
@@ -308,7 +320,7 @@ class EmaCrossoverStrategy(
                     "stop_loss" to "%.4f".format(stopLossPrice),
                     "target" to "%.4f".format(takeProfitPrice),
                     "tp_dist_pct" to "%.2f%%".format(tpDistPct),
-                    "rr_ratio" to "1:%.1f".format(riskRewardRatio),
+                    "rr_ratio" to "1:%.2f".format(actualRR),
                     "confidence" to 80.0
                 ),
                 narrative = "Bearish EMA Crossover detected: Fast(%.4f) crossed below Slow(%.4f) on confirmed bar (Prev: %.4f >= %.4f) -> Short signal -> Entry=%.4f, SL=%.4f (dist: %.4f), TP=%.4f (dist: %.4f), ATR=%.4f"
@@ -326,7 +338,7 @@ class EmaCrossoverStrategy(
                 atr = atr,
                 atrMultiplier = atrMultiplier,
                 riskDistance = riskDistance,
-                riskRewardRatio = riskRewardRatio,
+                riskRewardRatio = actualRR,
                 stopLossPrice = stopLossPrice,
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = 80.0,

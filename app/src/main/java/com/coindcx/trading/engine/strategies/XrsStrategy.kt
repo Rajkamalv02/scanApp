@@ -35,7 +35,7 @@ class XrsStrategy(
     val minAtrPct: Double = 0.5,
     val maxAtrPct: Double = 15.0,
     val stopAtrMultiplier: Double = 2.0,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 30,
     override val primaryInterval: Interval = Interval.H4
 ) : UniverseStrategy, Strategy {
@@ -201,9 +201,13 @@ class XrsStrategy(
             }
 
             val currClose = candidate.close
-            val stopDist = (stopAtrMultiplier * candidate.atr).coerceAtLeast(currClose * 0.005)
+            val minSlDist = currClose * 0.014
+            val maxSlDist = currClose * 0.030
+            val stopDist = (stopAtrMultiplier * candidate.atr).coerceIn(minSlDist, maxSlDist)
             val stopLoss = currClose - stopDist
-            val takeProfit = currClose + (stopDist * plannedRR)
+            val rawTpDist = stopDist * plannedRR
+            val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+            val takeProfit = currClose + clampedTpDist
 
             val strengths = mapOf(
                 "alphaRank" to (candidate.percentileRank / 100.0).coerceIn(0.0, 1.0),
@@ -258,9 +262,13 @@ class XrsStrategy(
             }
 
             val currClose = candidate.close
-            val stopDist = (stopAtrMultiplier * candidate.atr).coerceAtLeast(currClose * 0.005)
+            val minSlDist = currClose * 0.014
+            val maxSlDist = currClose * 0.030
+            val stopDist = (stopAtrMultiplier * candidate.atr).coerceIn(minSlDist, maxSlDist)
             val stopLoss = currClose + stopDist
-            val takeProfit = currClose - (stopDist * plannedRR)
+            val rawTpDist = stopDist * plannedRR
+            val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+            val takeProfit = currClose - clampedTpDist
 
             val strengths = mapOf(
                 "alphaRank" to ((100.0 - candidate.percentileRank) / 100.0).coerceIn(0.0, 1.0),

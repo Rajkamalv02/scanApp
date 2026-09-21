@@ -206,7 +206,7 @@ class VcebAndSbobStrategyTest {
         assertTrue("Stop must be below entry", sig.stopLoss < sig.entryRef)
         val target = sig.target as Target.Fixed
         assertTrue("Target must be above entry", target.tp1 > sig.entryRef)
-        assertEquals(2.0, target.plannedRR, 0.001)
+        assertEquals(0.75, target.plannedRR, 0.001)
 
         for ((k, v) in sig.strengths) {
             assertTrue("Strength '$k' ($v) must be in 0.0..1.0", v in 0.0..1.0)

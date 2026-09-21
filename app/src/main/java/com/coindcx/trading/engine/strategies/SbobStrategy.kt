@@ -25,7 +25,7 @@ class SbobStrategy(
     val minBreakVolumeMultiplier: Double = 1.2,
     val minAtrPct: Double = 0.45,
     val maxAtrPct: Double = 6.0,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -36,7 +36,7 @@ class SbobStrategy(
     override val primaryInterval: Interval = Interval.M15
     override val requiredIntervals: Set<Interval> = setOf(Interval.M15)
     override val preferredRegime: MarketRegimePreference = MarketRegimePreference.TRENDING_MOMENTUM
-    override val parametersSummary: String = "OB MaxAge: ${obMaxAgeBars}b, BreakVol: ${minBreakVolumeMultiplier}x, Planned RR: 1:${plannedRR.toInt()}"
+    override val parametersSummary: String = "OB MaxAge: ${obMaxAgeBars}b, BreakVol: ${minBreakVolumeMultiplier}x, Planned RR: 1:${"%.2f".format(plannedRR)}"
 
     override fun evaluate(ctx: SymbolContext, state: StrategyState?): StrategyResult {
         val series = ctx.primarySeries
@@ -212,9 +212,13 @@ class SbobStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = ob.bottom - 0.2 * atr
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
-                val takeProfit = currClose + (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose + clampedTpDist
 
                 val strengths = mapOf(
                     "obPenetrationFidelity" to ((ob.top - series.low(0)) / ob.height.coerceAtLeast(0.001)).coerceIn(0.0, 1.0),
@@ -274,9 +278,13 @@ class SbobStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = ob.top + 0.2 * atr
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
-                val takeProfit = currClose - (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose - clampedTpDist
 
                 val strengths = mapOf(
                     "obPenetrationFidelity" to ((series.high(0) - ob.bottom) / ob.height.coerceAtLeast(0.001)).coerceIn(0.0, 1.0),

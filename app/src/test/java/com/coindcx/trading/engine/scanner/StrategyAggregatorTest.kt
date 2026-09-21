@@ -67,14 +67,14 @@ class StrategyAggregatorTest {
         // Reconciled SL = min(59100, 59200, 58900) = 58900.0
         assertEquals(58900.0, candidate.reconciledStopLoss, 0.001)
 
-        // Reconciled TP = min(62000, 62200, 62500) = 62000.0
-        assertEquals(62000.0, candidate.reconciledTakeProfit, 0.001)
+        // Reconciled TP: raw was 62000.0 (dist 2050.0 = 3.42%), clamped to 2.2% scalping ceiling = 59950.0 * 1.022 = 61268.9
+        assertEquals(61268.9, candidate.reconciledTakeProfit, 0.01)
 
-        // Net R:R: raw = (62000-59950)/(59950-58900) = 2050/1050 = 1.9524
+        // Net R:R: raw = 1318.9 / 1050 = 1.2561
         // feeFriction = 0.14 / (1050/59950 * 100) = 0.14 / 1.75146 = 0.07993
-        // netRR = 1.9524 - 0.07993 = ~1.87
-        assertTrue(candidate.netRiskReward >= 1.50)
-        assertEquals(1.87, candidate.netRiskReward, 0.05)
+        // netRR = 1.2561 - 0.07993 = ~1.18
+        assertTrue(candidate.netRiskReward >= 0.55)
+        assertEquals(1.18, candidate.netRiskReward, 0.05)
         assertEquals(3, candidate.consensusCount)
     }
 
@@ -128,8 +128,9 @@ class StrategyAggregatorTest {
     }
 
     @Test
-    fun `test Case C - high confidence rejected when Net RR below 1_5`() {
-        // VCEB: Entry 140, SL 135 (risk 5.0), TP 144 (reward 4.0), Conf 85.0%
+    fun `test Case C - candidate approved under scalping net RR threshold or rejected when below 0_55`() {
+        // VCEB: Entry 140, SL 135 (risk 5.0 -> clamped to 3.0% = 4.2 -> SL 135.8), TP 144 (reward 4.0 -> clamped to 2.2% = 3.08 -> TP 143.08)
+        // Raw RR = 3.08 / 4.2 = 0.733. Fee friction = 0.14 / 3.0 = 0.0467. Net RR = 0.687 >= 0.55 -> Approved!
         val vceb = StrategyEvaluation(
             strategyId = "vceb",
             strategyName = "VCEB Strategy",
@@ -148,7 +149,27 @@ class StrategyAggregatorTest {
             currentMarketPrice = 140.0
         )
 
-        assertNull("Case C must be rejected because Net R:R (0.76) < 1.50", candidate)
+        assertNotNull("Case C qualifies under scalping Net R:R threshold 0.55", candidate)
+        assertEquals(0.69, candidate!!.netRiskReward, 0.05)
+
+        // Low RR candidate with Net R:R < 0.55
+        val lowRrCandidate = StrategyEvaluation(
+            strategyId = "low_rr",
+            strategyName = "Low RR Strategy",
+            family = StrategyFamily.TREND,
+            action = SignalAction.ENTER_LONG,
+            direction = SignalDirection.LONG,
+            confidence = 85.0,
+            entryPrice = 140.0,
+            stopLossPrice = 135.0,
+            takeProfitPrice = 141.0 // raw reward 1.0 (0.71%) -> clamped to min TP 1.5% = 2.1
+        )
+        val rejectedCandidate = StrategyAggregator.aggregate(
+            symbol = "B-SOL_USDT",
+            evaluations = listOf(lowRrCandidate),
+            currentMarketPrice = 140.0
+        )
+        assertNull("Candidate with Net R:R (0.45) < 0.55 must be rejected", rejectedCandidate)
     }
 
     @Test
@@ -190,12 +211,13 @@ class StrategyAggregatorTest {
 
         assertEquals(30.0, candidate.reconciledEntry, 0.001)
         assertEquals(29.1, candidate.reconciledStopLoss, 0.001)
-        assertEquals(32.0, candidate.reconciledTakeProfit, 0.001)
+        // Scalping TP clamped to 2.2% ceiling: 30.0 + (30.0 * 0.022) = 30.66
+        assertEquals(30.66, candidate.reconciledTakeProfit, 0.01)
 
         // Invariant check: SL < Entry < TP
         assertTrue(candidate.reconciledStopLoss < candidate.reconciledEntry)
         assertTrue(candidate.reconciledEntry < candidate.reconciledTakeProfit)
-        assertTrue(candidate.netRiskReward >= 1.50)
+        assertTrue(candidate.netRiskReward >= 0.55)
     }
 
     @Test

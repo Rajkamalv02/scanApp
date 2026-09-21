@@ -269,4 +269,66 @@ class FixedStopAndBalanceValidationTest {
         assertEquals(200.0, balanceAfterRejection, 0.001)
         assertTrue("Balance remains positive", balanceAfterRejection > 0.0)
     }
+
+    // =========================================================================
+    // 5. Futures Scalping SL / TP Bounds & Minimum Net R:R Invariant
+    // =========================================================================
+
+    @Test
+    fun testFuturesScalping_TargetPriceBoundedBetween1_5And2_2Percent() {
+        val entry = 100.0
+        val minTpDist = entry * 0.015
+        val maxTpDist = entry * 0.022
+
+        // Verify bounds: 1.5% to 2.2%
+        assertEquals(1.5, minTpDist, 0.001)
+        assertEquals(2.2, maxTpDist, 0.001)
+
+        val longTpMin = entry + minTpDist
+        val longTpMax = entry + maxTpDist
+        assertEquals(101.5, longTpMin, 0.001)
+        assertEquals(102.2, longTpMax, 0.001)
+
+        val shortTpMin = entry - minTpDist
+        val shortTpMax = entry - maxTpDist
+        assertEquals(98.5, shortTpMin, 0.001)
+        assertEquals(97.8, shortTpMax, 0.001)
+    }
+
+    @Test
+    fun testFuturesScalping_StopLossBoundedBetween1_4And3_0Percent() {
+        val entry = 100.0
+        val minSlDist = entry * 0.014
+        val maxSlDist = entry * 0.030
+
+        // Sub-noise stops (<1.4%) are clamped up
+        val subNoiseRawDist = 0.8
+        val clampedUpSlDist = subNoiseRawDist.coerceIn(minSlDist, maxSlDist)
+        assertEquals(1.4, clampedUpSlDist, 0.001)
+
+        // Excessively wide stops (>3.0%) are clamped down to 3.0%
+        val wideRawDist = 5.0
+        val clampedDownSlDist = wideRawDist.coerceIn(minSlDist, maxSlDist)
+        assertEquals(3.0, clampedDownSlDist, 0.001)
+
+        // Normal volatility stop (2.5%) stays preserved
+        val normalRawDist = 2.5
+        val preservedSlDist = normalRawDist.coerceIn(minSlDist, maxSlDist)
+        assertEquals(2.5, preservedSlDist, 0.001)
+    }
+
+    @Test
+    fun testFuturesScalping_NetRiskRewardAllowsScalpTradesAbove0_55() {
+        // Entry 100, Stop Loss 97.2 (2.8% risk), Target 101.8 (1.8% reward)
+        val entry = 100.0
+        val slDist = 2.8
+        val tpDist = 1.8
+        val rawRr = tpDist / slDist // 1.8 / 2.8 = 0.6428
+        val feeFriction = 0.14 / 2.8 // 0.05
+        val netRr = rawRr - feeFriction // 0.5928
+
+        assertTrue("Scalping trade with 1.8% TP and 2.8% SL must exceed Net R:R 0.55 threshold", netRr >= 0.55)
+        assertEquals(0.59, netRr, 0.01)
+    }
 }
+

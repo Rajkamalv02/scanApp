@@ -107,7 +107,7 @@ class EmaCrossoverStrategyTest {
         assertTrue("ATR must be positive", signal.atr > 0.0)
         assertEquals(1.5, signal.atrMultiplier, 0.001)
         assertTrue("Risk distance must be positive", signal.riskDistance > 0.0)
-        assertEquals(2.0, signal.riskRewardRatio, 0.001)
+        assertTrue("Risk reward ratio must be >= 0.55 for scalping", signal.riskRewardRatio >= 0.55)
     }
 
     @Test

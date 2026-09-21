@@ -27,7 +27,7 @@ class SormStrategy(
     val minBreakVolumeMultiplier: Double = 1.20,
     val minAtrPct: Double = 0.25,
     val maxAtrPct: Double = 6.0,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -38,7 +38,7 @@ class SormStrategy(
     override val primaryInterval: Interval = Interval.M15
     override val requiredIntervals: Set<Interval> = setOf(Interval.M15)
     override val preferredRegime: MarketRegimePreference = MarketRegimePreference.TRENDING_MOMENTUM
-    override val parametersSummary: String = "OR: 1h (${orBarsCount}x15m), VolBreak: ${minBreakVolumeMultiplier}x, Height: [${minOrHeightAtr}..${maxOrHeightAtr}] ATR, RR: 1:${plannedRR.toInt()}"
+    override val parametersSummary: String = "OR: 1h (${orBarsCount}x15m), VolBreak: ${minBreakVolumeMultiplier}x, Height: [${minOrHeightAtr}..${maxOrHeightAtr}] ATR, RR: 1:${"%.2f".format(plannedRR)}"
 
     private data class SessionWindow(
         val sessionId: String,
@@ -188,9 +188,13 @@ class SormStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = midOr
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
-                val takeProfit = currClose + (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose + clampedTpDist
 
                 val strengths = mapOf(
                     "breakoutDecisiveness" to ((currClose - orHigh) / atr).coerceIn(0.0, 1.0),
@@ -245,9 +249,13 @@ class SormStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = midOr
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
-                val takeProfit = currClose - (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose - clampedTpDist
 
                 val strengths = mapOf(
                     "breakoutDecisiveness" to ((orLow - currClose) / atr).coerceIn(0.0, 1.0),

@@ -30,7 +30,7 @@ class IrcStrategy(
     val minAtrPct: Double = 0.45,
     val maxAtrPct: Double = 8.0,
     val maxRetestBars: Int = 6,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -207,9 +207,13 @@ class IrcStrategy(
                     impulse.impulseLow - 0.2 * atr
                 }
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 3.0 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
-                val takeProfit = currClose + (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose + clampedTpDist
                 val riskPct = (clampedDist / currClose) * 100.0
 
                 val strengths = mapOf(
@@ -285,9 +289,13 @@ class IrcStrategy(
                     impulse.impulseHigh + 0.2 * atr
                 }
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 3.0 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
-                val takeProfit = currClose - (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose - clampedTpDist
                 val riskPct = (clampedDist / currClose) * 100.0
 
                 val strengths = mapOf(

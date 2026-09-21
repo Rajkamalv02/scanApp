@@ -377,8 +377,8 @@ class MarketScannerEngine(
                                 direction = if (rawSignal.action == SignalAction.ENTER_LONG) SignalDirection.LONG else SignalDirection.SHORT,
                                 confidence = rawSignal.confidenceScore,
                                 entryPrice = if (rawSignal.entryPrice > 0.0) rawSignal.entryPrice else currentPrice,
-                                stopLossPrice = rawSignal.stopLossPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 0.98 else currentPrice * 1.02),
-                                takeProfitPrice = rawSignal.takeProfitPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 1.04 else currentPrice * 0.96),
+                                stopLossPrice = rawSignal.stopLossPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 0.975 else currentPrice * 1.025),
+                                takeProfitPrice = rawSignal.takeProfitPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * 1.018 else currentPrice * 0.982),
                                 qualityScore = rawSignal.confidenceScore.toInt(),
                                 reason = rawSignal.reason
                             )

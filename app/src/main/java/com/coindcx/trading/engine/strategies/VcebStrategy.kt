@@ -26,7 +26,7 @@ class VcebStrategy(
     val expansionVolMultiplier: Double = 1.4,
     val minAtrPct: Double = 0.45,
     val maxAtrPct: Double = 6.0,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -165,9 +165,13 @@ class VcebStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = min(bb0.basis, series.low(0) - 0.2 * atr)
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
-                val takeProfit = currClose + (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose + clampedTpDist
 
                 val strengths = mapOf(
                     "compressionDepth" to (1.0 - (bbwPercentile / percentileThreshold)).coerceIn(0.0, 1.0),
@@ -208,9 +212,13 @@ class VcebStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = max(bb0.basis, series.high(0) + 0.2 * atr)
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
-                val takeProfit = currClose - (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose - clampedTpDist
 
                 val strengths = mapOf(
                     "compressionDepth" to (1.0 - (bbwPercentile / percentileThreshold)).coerceIn(0.0, 1.0),

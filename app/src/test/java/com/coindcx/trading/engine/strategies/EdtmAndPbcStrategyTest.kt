@@ -183,9 +183,9 @@ class EdtmAndPbcStrategyTest {
 
         assertEquals(SignalDirection.LONG, sig.direction)
         assertEquals(RegimeTag.TREND_UP, sig.regimeTag)
-        assertTrue("Target must be Target.OpenEnded", sig.target is Target.OpenEnded)
-        val trailTarget = sig.target as Target.OpenEnded
-        assertEquals(2.5, trailTarget.trailSpec.atrMultiplier, 0.001)
+        assertTrue("Target must be Target.Fixed", sig.target is Target.Fixed)
+        val fixedTarget = sig.target as Target.Fixed
+        assertEquals(0.75, fixedTarget.plannedRR, 0.001)
 
         assertTrue("All strengths must be non-empty", sig.strengths.isNotEmpty())
         for ((key, value) in sig.strengths) {
@@ -214,7 +214,9 @@ class EdtmAndPbcStrategyTest {
 
         assertEquals(SignalDirection.SHORT, sig.direction)
         assertEquals(RegimeTag.TREND_DOWN, sig.regimeTag)
-        assertTrue("Target must be Target.OpenEnded", sig.target is Target.OpenEnded)
+        assertTrue("Target must be Target.Fixed", sig.target is Target.Fixed)
+        val shortTarget = sig.target as Target.Fixed
+        assertEquals(0.75, shortTarget.plannedRR, 0.001)
         assertTrue("Stop loss must be above entry price", sig.stopLoss > sig.entryRef)
 
         for ((key, value) in sig.strengths) {
@@ -288,7 +290,7 @@ class EdtmAndPbcStrategyTest {
         assertEquals(RegimeTag.TREND_UP, sig.regimeTag)
         assertTrue("Target must be Target.Fixed", sig.target is Target.Fixed)
         val fixedTarget = sig.target as Target.Fixed
-        assertEquals(2.0, fixedTarget.plannedRR, 0.001)
+        assertEquals(0.75, fixedTarget.plannedRR, 0.001)
         assertTrue("Take profit must be higher than entry", fixedTarget.tp1 > sig.entryRef)
         assertTrue("Stop loss must be lower than entry", sig.stopLoss < sig.entryRef)
 

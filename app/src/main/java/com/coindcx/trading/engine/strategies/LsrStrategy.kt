@@ -30,7 +30,7 @@ class LsrStrategy(
     val minVolumeMultiplier: Double = 1.15,
     val minAtrPct: Double = 0.25,
     val maxAtrPct: Double = 6.0,
-    val plannedRR: Double = 2.0,
+    val plannedRR: Double = 0.75,
     val expiryBars: Int = 12
 ) : Strategy {
 
@@ -41,7 +41,7 @@ class LsrStrategy(
     override val primaryInterval: Interval = Interval.M15
     override val requiredIntervals: Set<Interval> = setOf(Interval.M15)
     override val preferredRegime: MarketRegimePreference = MarketRegimePreference.MEAN_REVERTING_RANGE
-    override val parametersSummary: String = "Depth: ${lookbackDepth}b, Age: [${minLevelAgeBars}..${maxLevelAgeBars}], WickRatio: ${(minWickRatio * 100).toInt()}%, VolMult: ${minVolumeMultiplier}x, RR: 1:${plannedRR.toInt()}"
+    override val parametersSummary: String = "Depth: ${lookbackDepth}b, Age: [${minLevelAgeBars}..${maxLevelAgeBars}], WickRatio: ${(minWickRatio * 100).toInt()}%, VolMult: ${minVolumeMultiplier}x, RR: 1:${"%.2f".format(plannedRR)}"
 
     override fun evaluate(ctx: SymbolContext, state: StrategyState?): StrategyResult {
         val series = ctx.primarySeries
@@ -172,9 +172,13 @@ class LsrStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = currLow - 0.2 * atr
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
-                val takeProfit = currClose + (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose + clampedTpDist
 
                 val strengths = mapOf(
                     "wickRatio" to wickRatio.coerceIn(0.0, 1.0),
@@ -242,9 +246,13 @@ class LsrStrategy(
             if (rejections.isEmpty()) {
                 val rawStop = currHigh + 0.2 * atr
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
-                val takeProfit = currClose - (clampedDist * plannedRR)
+                val rawTpDist = clampedDist * plannedRR
+                val clampedTpDist = rawTpDist.coerceIn(currClose * 0.015, currClose * 0.022)
+                val takeProfit = currClose - clampedTpDist
 
                 val strengths = mapOf(
                     "wickRatio" to wickRatio.coerceIn(0.0, 1.0),

@@ -36,7 +36,7 @@ class ConfluenceStrategy(
     val impulseThresh: Double = 1.0,
     val decayRate: Double = 0.9,
     val freshThresh: Double = 0.5,
-    val riskRewardRatio: Double = 2.0,
+    val riskRewardRatio: Double = 0.75,
     val atrMultiplier: Double = 1.5
 ) : Strategy {
 
@@ -573,13 +573,19 @@ class ConfluenceStrategy(
         // --- New Entry Signal Generation on Fresh Confirmed Reversal ---
         if (latestConfluenceEvent == 2) {
             val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "SMC" })
-            // Invalidation anchored below Demand Zone bottom with small buffer, bounded by ATR
+            // Invalidation anchored below Demand Zone bottom with small buffer, clamped to scalping bounds [1.4%..3.0%]
             val rawSl = (demandZoneBottom ?: (currentPrice - (atr * atrMultiplier))) - (atr * 0.2)
-            val riskDistance = (currentPrice - rawSl).coerceIn(atr * 0.5, currentPrice * 0.08)
+            val rawDist = currentPrice - rawSl
+            val minSlDist = currentPrice * 0.014
+            val maxSlDist = currentPrice * 0.030
+            val riskDistance = rawDist.coerceIn(minSlDist, maxSlDist)
             val stopLossPrice = currentPrice - riskDistance
-            val takeProfitPrice = currentPrice + (riskDistance * riskRewardRatio)
+            val rawTpDist = riskDistance * riskRewardRatio
+            val clampedTpDist = rawTpDist.coerceIn(currentPrice * 0.015, currentPrice * 0.022)
+            val takeProfitPrice = currentPrice + clampedTpDist
             val slDistPct = (riskDistance / currentPrice) * 100.0
-            val tpDistPct = ((takeProfitPrice - currentPrice) / currentPrice) * 100.0
+            val tpDistPct = (clampedTpDist / currentPrice) * 100.0
+            val actualRR = clampedTpDist / riskDistance
 
             var confidence = 80.0
             if (lastSignalImpulseAligned) confidence += 10.0
@@ -611,7 +617,7 @@ class ConfluenceStrategy(
                     "target" to "%.4f".format(takeProfitPrice),
                     "sl_dist_pct" to "%.2f%%".format(slDistPct),
                     "tp_dist_pct" to "%.2f%%".format(tpDistPct),
-                    "rr_ratio" to "1:%.1f".format(riskRewardRatio),
+                    "rr_ratio" to "1:%.2f".format(actualRR),
                     "confidence" to confidence
                 ),
                 narrative = "Bullish Confluence SIGNAL confirmed: Sweep into Demand Zone (%.4f-%.4f) followed by %s break after %d bars | Impulse Aligned: %s (Freshness: %.2f) -> Entry=%.4f, SL=%.4f (dist: %.4f), TP=%.4f (dist: %.4f)"
@@ -625,7 +631,7 @@ class ConfluenceStrategy(
                 atr = atr,
                 atrMultiplier = atrMultiplier,
                 riskDistance = riskDistance,
-                riskRewardRatio = riskRewardRatio,
+                riskRewardRatio = actualRR,
                 stopLossPrice = stopLossPrice,
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = confidence,
@@ -638,13 +644,19 @@ class ConfluenceStrategy(
 
         if (latestConfluenceEvent == -2) {
             val tradeId = AppLogManager.TradeIdGenerator.generate(pair.ifEmpty { "SMC" })
-            // Invalidation anchored above Supply Zone top with small buffer, bounded by ATR
+            // Invalidation anchored above Supply Zone top with small buffer, clamped to scalping bounds [1.4%..3.0%]
             val rawSl = (supplyZoneTop ?: (currentPrice + (atr * atrMultiplier))) + (atr * 0.2)
-            val riskDistance = (rawSl - currentPrice).coerceIn(atr * 0.5, currentPrice * 0.08)
+            val rawDist = rawSl - currentPrice
+            val minSlDist = currentPrice * 0.014
+            val maxSlDist = currentPrice * 0.030
+            val riskDistance = rawDist.coerceIn(minSlDist, maxSlDist)
             val stopLossPrice = currentPrice + riskDistance
-            val takeProfitPrice = currentPrice - (riskDistance * riskRewardRatio)
+            val rawTpDist = riskDistance * riskRewardRatio
+            val clampedTpDist = rawTpDist.coerceIn(currentPrice * 0.015, currentPrice * 0.022)
+            val takeProfitPrice = currentPrice - clampedTpDist
             val slDistPct = (riskDistance / currentPrice) * 100.0
-            val tpDistPct = ((currentPrice - takeProfitPrice) / currentPrice) * 100.0
+            val tpDistPct = (clampedTpDist / currentPrice) * 100.0
+            val actualRR = clampedTpDist / riskDistance
 
             var confidence = 80.0
             if (lastSignalImpulseAligned) confidence += 10.0
@@ -676,7 +688,7 @@ class ConfluenceStrategy(
                     "target" to "%.4f".format(takeProfitPrice),
                     "sl_dist_pct" to "%.2f%%".format(slDistPct),
                     "tp_dist_pct" to "%.2f%%".format(tpDistPct),
-                    "rr_ratio" to "1:%.1f".format(riskRewardRatio),
+                    "rr_ratio" to "1:%.2f".format(actualRR),
                     "confidence" to confidence
                 ),
                 narrative = "Bearish Confluence SIGNAL confirmed: Sweep into Supply Zone (%.4f-%.4f) followed by %s break after %d bars | Impulse Aligned: %s (Freshness: %.2f) -> Entry=%.4f, SL=%.4f (dist: %.4f), TP=%.4f (dist: %.4f)"
@@ -690,7 +702,7 @@ class ConfluenceStrategy(
                 atr = atr,
                 atrMultiplier = atrMultiplier,
                 riskDistance = riskDistance,
-                riskRewardRatio = riskRewardRatio,
+                riskRewardRatio = actualRR,
                 stopLossPrice = stopLossPrice,
                 takeProfitPrice = takeProfitPrice,
                 confidenceScore = confidence,

@@ -27,8 +27,8 @@ class RzmrStrategy(
     val maxAdx: Double = 25.0,
     val minChop: Double = 52.0,
     val minRangeMaturityBars: Int = 15,
-    val plannedRR: Double = 1.5,
-    val minNetRR: Double = 1.2,
+    val plannedRR: Double = 0.75,
+    val minNetRR: Double = 0.55,
     val expiryBars: Int = 12
 ) : Strategy {
 
@@ -200,15 +200,18 @@ class RzmrStrategy(
                 val lowestRecent = min(series.low(0), min(series.low(1), series.low(2)))
                 val rawStop = lowestRecent - 0.5 * atr
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
 
-                // Target: 50-period SMA (the mean)
-                val targetPrice = sma0
-                val netDistToMean = targetPrice - currClose
-                val netRR = if (clampedDist > 0.0) netDistToMean / clampedDist else 0.0
+                // Target: 50-period SMA (the mean) clamped to scalping band [1.5%..2.2%]
+                val rawDistToMean = sma0 - currClose
+                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val targetPrice = currClose + clampedTpDist
+                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
 
-                if (netRR < 1.3) {
+                if (netRR < minNetRR) {
                     return StrategyResult(null, newState, listOf(RejectionCode.S7_RR_GATE))
                 }
 
@@ -262,12 +265,16 @@ class RzmrStrategy(
                 val highestRecent = max(series.high(0), max(series.high(1), series.high(2)))
                 val rawStop = highestRecent + 0.5 * atr
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(1.0 * atr, 2.5 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
 
-                val targetPrice = sma0
-                val netDistToMean = currClose - targetPrice
-                val netRR = if (clampedDist > 0.0) netDistToMean / clampedDist else 0.0
+                // Target: 50-period SMA (the mean) clamped to scalping band [1.5%..2.2%]
+                val rawDistToMean = currClose - sma0
+                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val targetPrice = currClose - clampedTpDist
+                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
 
                 if (netRR < minNetRR) {
                     return StrategyResult(null, newState, listOf(RejectionCode.S7_RR_GATE))

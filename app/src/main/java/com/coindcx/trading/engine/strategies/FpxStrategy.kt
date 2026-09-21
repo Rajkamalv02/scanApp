@@ -26,7 +26,7 @@ class FpxStrategy(
     val minDistanceAtr: Double = 2.5,
     val minConsecutiveDirectionalBars: Int = 6,
     val maxHtfAdx: Double = 35.0,
-    val minNetRR: Double = 1.3,
+    val minNetRR: Double = 0.55,
     val expiryBars: Int = 16
 ) : Strategy {
 
@@ -147,12 +147,15 @@ class FpxStrategy(
                 }
                 val rawStop = lowestLow - 0.5 * atr
                 val rawDist = currClose - rawStop
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 2.0 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose - clampedDist
 
-                val targetPrice = ema20
-                val netDistToMean = targetPrice - currClose
-                val netRR = if (clampedDist > 0.0) netDistToMean / clampedDist else 0.0
+                val rawDistToMean = ema20 - currClose
+                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val targetPrice = currClose + clampedTpDist
+                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
 
                 if (netRR < minNetRR) {
                     return StrategyResult(null, state, listOf(RejectionCode.S6_RR_GATE))
@@ -214,12 +217,15 @@ class FpxStrategy(
                 }
                 val rawStop = highestHigh + 0.5 * atr
                 val rawDist = rawStop - currClose
-                val clampedDist = rawDist.coerceIn(0.8 * atr, 2.0 * atr)
+                val minSlDist = currClose * 0.014
+                val maxSlDist = currClose * 0.030
+                val clampedDist = rawDist.coerceIn(minSlDist, maxSlDist)
                 val stopLoss = currClose + clampedDist
 
-                val targetPrice = ema20
-                val netDistToMean = currClose - targetPrice
-                val netRR = if (clampedDist > 0.0) netDistToMean / clampedDist else 0.0
+                val rawDistToMean = currClose - ema20
+                val clampedTpDist = rawDistToMean.coerceIn(currClose * 0.015, currClose * 0.022)
+                val targetPrice = currClose - clampedTpDist
+                val netRR = if (clampedDist > 0.0) clampedTpDist / clampedDist else 0.0
 
                 if (netRR < minNetRR) {
                     return StrategyResult(null, state, listOf(RejectionCode.S6_RR_GATE))

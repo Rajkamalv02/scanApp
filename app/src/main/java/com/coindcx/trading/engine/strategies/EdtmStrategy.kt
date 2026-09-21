@@ -129,8 +129,11 @@ class EdtmStrategy(
                 return StrategyResult(null, state, listOf(RejectionCode.S10_C6_CLOSE_LOCATION))
             }
 
-            val stopLoss = currClose - (trailAtrMultiplier * atr)
-            val riskDistance = currClose - stopLoss
+            val minSlDist = currClose * 0.014
+            val maxSlDist = currClose * 0.030
+            val riskDistance = (trailAtrMultiplier * atr).coerceIn(minSlDist, maxSlDist)
+            val stopLoss = currClose - riskDistance
+            val takeProfit = currClose + (riskDistance * 0.75).coerceIn(currClose * 0.015, currClose * 0.022)
             val riskPct = (riskDistance / currClose) * 100.0
 
             val strengths = mapOf(
@@ -147,7 +150,7 @@ class EdtmStrategy(
                 barOpenTimeUtc = series.openTime(0),
                 entryRef = currClose,
                 stopLoss = stopLoss,
-                target = Target.OpenEnded(TrailSpec(atrMultiplier = trailAtrMultiplier, atrPeriod = atrPeriod)),
+                target = Target.Fixed(tp1 = takeProfit, plannedRR = 0.75),
                 riskDistance = riskDistance,
                 riskPct = riskPct,
                 regimeTag = RegimeTag.TREND_UP,
@@ -181,8 +184,11 @@ class EdtmStrategy(
                 return StrategyResult(null, state, listOf(RejectionCode.S10_C6_CLOSE_LOCATION))
             }
 
-            val stopLoss = currClose + (trailAtrMultiplier * atr)
-            val riskDistance = stopLoss - currClose
+            val minSlDist = currClose * 0.014
+            val maxSlDist = currClose * 0.030
+            val riskDistance = (trailAtrMultiplier * atr).coerceIn(minSlDist, maxSlDist)
+            val stopLoss = currClose + riskDistance
+            val takeProfit = currClose - (riskDistance * 0.75).coerceIn(currClose * 0.015, currClose * 0.022)
             val riskPct = (riskDistance / currClose) * 100.0
 
             val strengths = mapOf(
@@ -199,7 +205,7 @@ class EdtmStrategy(
                 barOpenTimeUtc = series.openTime(0),
                 entryRef = currClose,
                 stopLoss = stopLoss,
-                target = Target.OpenEnded(TrailSpec(atrMultiplier = trailAtrMultiplier, atrPeriod = atrPeriod)),
+                target = Target.Fixed(tp1 = takeProfit, plannedRR = 0.75),
                 riskDistance = riskDistance,
                 riskPct = riskPct,
                 regimeTag = RegimeTag.TREND_DOWN,
