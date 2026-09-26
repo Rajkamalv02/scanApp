@@ -90,7 +90,14 @@ class TradingForegroundService : Service() {
         liveEngine = LiveExecutionEngine(orderManager, ApiClient.apiService, currencyConverter, scannerEngine.universeManager)
         tradeCandidateSelector = TradeCandidateSelector()
         allocator = AllocationEngine()
-        riskManager = RiskManager(context = applicationContext)
+        val initConfig = configRepo.configFlow.value
+        riskManager = RiskManager(
+            settings = RiskSettings(
+                enableDailyLossLimit = initConfig.enableDailyLossLimit,
+                maxDailyLossInr = initConfig.maxDailyLossInr
+            ),
+            context = applicationContext
+        )
         val isLive = configRepo.isLiveMode()
         executionEngine = if (isLive) liveEngine else paperEngine
 
@@ -111,6 +118,15 @@ class TradingForegroundService : Service() {
                 reconciliationEngine.reconcile(executionEngine.isPaperTrading)
             } catch (e: Exception) {
                 AppLogManager.e("SERVICE", "Failed running startup reconciliation: ${e.message}", e)
+            }
+        }
+
+        serviceScope.launch {
+            configRepo.configFlow.collect { cfg ->
+                riskManager.settings = riskManager.settings.copy(
+                    enableDailyLossLimit = cfg.enableDailyLossLimit,
+                    maxDailyLossInr = cfg.maxDailyLossInr
+                )
             }
         }
 
@@ -302,15 +318,19 @@ class TradingForegroundService : Service() {
             scanCycleCounter++
             val cycle = scanCycleCounter
             val config = configRepo.configFlow.value
+            riskManager.settings = riskManager.settings.copy(
+                enableDailyLossLimit = config.enableDailyLossLimit,
+                maxDailyLossInr = config.maxDailyLossInr
+            )
             val scanningStrategies = StrategyRegistry.getScanningStrategies()
             val scanningUniverseStrategies = StrategyRegistry.getScanningUniverseStrategies()
             val stratNames = (scanningStrategies.map { it.name } + scanningUniverseStrategies.map { it.name }).joinToString(", ")
             val modeLabel = if (executionEngine.isPaperTrading) "PAPER" else "LIVE"
             AppLogManager.scanner("Scan Cycle #$cycle started: Scanning ${if (config.isMarketWideScan) "market-wide" else "${config.selectedPairs.size} pairs"} (${config.timeframe}) with $stratNames...")
 
-            // Circuit Breaker Check: Daily drawdown cap (4% loss limit)
-            if (riskManager.isCircuitBreakerTripped()) {
-                AppLogManager.w("RISK", "Scan #$cycle skipped: Daily drawdown circuit breaker tripped (4% loss limit reached).")
+            // Circuit Breaker Check: Daily drawdown cap (loss limit)
+            if (riskManager.settings.enableDailyLossLimit && riskManager.isCircuitBreakerTripped()) {
+                AppLogManager.w("RISK", "Scan #$cycle skipped: Daily drawdown circuit breaker tripped (loss limit reached).")
                 return
             }
 

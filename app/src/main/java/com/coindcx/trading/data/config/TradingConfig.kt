@@ -37,5 +37,7 @@ data class TradingConfig(
     val rsiOversold: Double = 30.0,
     val rsiOverbought: Double = 70.0,
     // Canary guardrail toggle
-    val allowTier2AltcoinsLive: Boolean = true
+    val allowTier2AltcoinsLive: Boolean = true,
+    // Risk & Circuit breaker toggle
+    val enableDailyLossLimit: Boolean = false
 )

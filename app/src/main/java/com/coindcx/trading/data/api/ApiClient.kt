@@ -38,4 +38,22 @@ object ApiClient {
             .build()
             .create(CoinDCXApiService::class.java)
     }
+
+    private const val BINANCE_FUTURES_BASE_URL = "https://fapi.binance.com"
+
+    val binanceFuturesApiService: BinanceFuturesApiService by lazy {
+        val publicOkHttpClient = OkHttpClient.Builder()
+            .addInterceptor(loggingInterceptor)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+
+        Retrofit.Builder()
+            .baseUrl(BINANCE_FUTURES_BASE_URL)
+            .client(publicOkHttpClient)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(BinanceFuturesApiService::class.java)
+    }
 }
+

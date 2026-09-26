@@ -190,14 +190,14 @@ class RiskManagerTest {
     }
 
     @Test
-    fun testBtcCorrelation_BlockTwoAltLongsWithoutBtc() {
+    fun testBtcCorrelation_TwoAltLongsWithoutBtc_RuleDisabled_ApprovesTrade() {
         val openPositions = listOf(
             createPosition("B-SOL_USDT", true)
         )
 
+        // BTC correlation rule for 2 altcoins disabled: B-ETH_USDT is now Approved even without BTC
         val ethResult = riskManager.checkPortfolioAndCorrelation("B-ETH_USDT", true, openPositions)
-        assertTrue(ethResult is RiskCheckResult.Rejected)
-        assertTrue((ethResult as RiskCheckResult.Rejected).reason.contains("BTC correlation rule"))
+        assertTrue(ethResult is RiskCheckResult.Approved)
 
         val btcResult = riskManager.checkPortfolioAndCorrelation("B-BTC_USDT", true, openPositions)
         assertTrue(btcResult is RiskCheckResult.Approved)
@@ -240,7 +240,7 @@ class RiskManagerTest {
     @Test
     fun testPersistence_SavesAndRestoresRiskState() {
         val prefs = FakeSharedPreferences()
-        val manager1 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+        val manager1 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0, enableDailyLossLimit = true))
 
         manager1.recordTradeResult(-200.0, 10000.0)
         manager1.recordTradeResult(-200.0, 10000.0)
@@ -254,7 +254,7 @@ class RiskManagerTest {
         manager1.saveToPreferences(prefs)
 
         // Restore into fresh manager
-        val manager2 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+        val manager2 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0, enableDailyLossLimit = true))
         manager2.loadFromPreferences(prefs)
 
         assertTrue(manager2.isCircuitBreakerTripped())
@@ -266,7 +266,7 @@ class RiskManagerTest {
     @Test
     fun testPersistence_DayRolloverResetsDailyLossAndCircuitBreaker() {
         val prefs = FakeSharedPreferences()
-        val manager1 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+        val manager1 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0, enableDailyLossLimit = true))
 
         manager1.recordTradeResult(-600.0, 10000.0) // Trips daily limit
         assertTrue(manager1.isCircuitBreakerTripped())
@@ -277,7 +277,7 @@ class RiskManagerTest {
         prefs.edit().putLong(RiskManager.KEY_LAST_EPOCH_DAY, currentEpochDay - 1).apply()
 
         // Load into manager2 on the "new" day
-        val manager2 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0))
+        val manager2 = RiskManager(settings = RiskSettings(maxDailyLossPercent = 4.0, maxDailyLossInr = 500.0, enableDailyLossLimit = true))
         manager2.loadFromPreferences(prefs)
 
         // Daily loss and circuit breaker must be automatically reset!
@@ -361,6 +361,34 @@ class RiskManagerTest {
         manager.resetCooldown()
         assertFalse(manager.isSymbolInCooldown("B-SOL_USDT"))
         assertEquals(0, manager.getConsecutiveLossCount())
+    }
+
+    @Test
+    fun testDailyLossLimit_DisabledByDefault_NeverTripsCircuitBreaker() {
+        val manager = RiskManager() // enableDailyLossLimit = false by default
+        assertFalse(manager.settings.enableDailyLossLimit)
+
+        // Record a massive loss that would ordinarily exceed 4% and ₹2000 limit
+        manager.recordTradeResult(-5000.0, 10000.0)
+
+        // Loss limit reached check must be disabled
+        assertFalse(manager.isCircuitBreakerTripped())
+
+        // Candidate check must be approved rather than rejected for daily loss limit
+        val check = manager.checkPortfolioAndCorrelation("B-BTC_USDT", true, emptyList())
+        assertTrue(check is RiskCheckResult.Approved)
+    }
+
+    @Test
+    fun testDailyLossLimit_WhenDisabled_OverridesPersistedTrippedState() {
+        val prefs = FakeSharedPreferences()
+        prefs.edit().putBoolean(RiskManager.KEY_CIRCUIT_BREAKER, true).apply()
+
+        // When enableDailyLossLimit is false, circuit breaker must be cleared even if previously saved in prefs
+        val manager = RiskManager(settings = RiskSettings(enableDailyLossLimit = false))
+        manager.loadFromPreferences(prefs)
+
+        assertFalse(manager.isCircuitBreakerTripped())
     }
 
     private class FakeSharedPreferences : android.content.SharedPreferences {

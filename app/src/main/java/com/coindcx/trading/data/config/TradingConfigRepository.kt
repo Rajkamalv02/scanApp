@@ -37,6 +37,7 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_LIVE_MODE = "is_live_mode"
         private const val KEY_STOP_LOSS_PERCENT = "stop_loss_percent"
         private const val KEY_TARGET_PRICE_PERCENT = "target_price_percent"
+        private const val KEY_ENABLE_DAILY_LOSS_LIMIT = "enable_daily_loss_limit"
 
         @Volatile
         private var INSTANCE: TradingConfigRepository? = null
@@ -68,7 +69,8 @@ class TradingConfigRepository(context: Context) {
             rsiPeriod = prefs.getInt(KEY_RSI_PERIOD, 14),
             rsiOversold = prefs.getFloat(KEY_RSI_OVERSOLD, 30.0f).toDouble(),
             rsiOverbought = prefs.getFloat(KEY_RSI_OVERBOUGHT, 70.0f).toDouble(),
-            allowTier2AltcoinsLive = prefs.getBoolean(KEY_ALLOW_TIER2_LIVE, true)
+            allowTier2AltcoinsLive = prefs.getBoolean(KEY_ALLOW_TIER2_LIVE, true),
+            enableDailyLossLimit = prefs.getBoolean(KEY_ENABLE_DAILY_LOSS_LIMIT, false)
         )
     }
 
@@ -142,6 +144,11 @@ class TradingConfigRepository(context: Context) {
     fun updateAllowTier2Live(allow: Boolean) {
         prefs.edit().putBoolean(KEY_ALLOW_TIER2_LIVE, allow).apply()
         _configFlow.value = _configFlow.value.copy(allowTier2AltcoinsLive = allow)
+    }
+
+    fun updateDailyLossLimit(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ENABLE_DAILY_LOSS_LIMIT, enabled).apply()
+        _configFlow.value = _configFlow.value.copy(enableDailyLossLimit = enabled)
     }
 
     fun updateStrategyTuning(

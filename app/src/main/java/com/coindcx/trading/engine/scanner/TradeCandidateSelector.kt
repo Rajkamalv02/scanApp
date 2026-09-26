@@ -36,18 +36,23 @@ class TradeCandidateSelector {
 
         /**
          * Multi-factor Execution Priority Score (§E.4).
+         * Prioritizes setups based on confidence, net R:R, strategy consensus, spread bps,
+         * and dynamic 24h momentum/volatility so active movers receive higher priority over stagnant assets.
          */
         fun calculatePriorityScore(
             confidence: Double,
             netRiskReward: Double,
             consensusCount: Int,
-            spreadBps: Double = 2.0
+            spreadBps: Double = 2.0,
+            change24hPercent: Double = 0.0
         ): Double {
-            val cTerm = confidence.coerceIn(0.0, 100.0) * 0.40
-            val rrTerm = (netRiskReward * 20.0).coerceIn(0.0, 100.0) * 0.30
+            val cTerm = confidence.coerceIn(0.0, 100.0) * 0.35
+            val rrTerm = (netRiskReward * 20.0).coerceIn(0.0, 100.0) * 0.25
             val consensusTerm = calculateConsensusBonus(consensusCount) * 0.20
             val spreadTerm = (100.0 - spreadBps.coerceIn(0.0, 100.0)) * 0.10
-            return cTerm + rrTerm + consensusTerm + spreadTerm
+            // Dynamic mover bonus: up to 10 points bonus for assets with strong 24h price action/volatility
+            val moverBonus = (kotlin.math.abs(change24hPercent) * 1.5).coerceIn(0.0, 10.0)
+            return cTerm + rrTerm + consensusTerm + spreadTerm + moverBonus
         }
     }
 
@@ -105,7 +110,8 @@ class TradeCandidateSelector {
             val priorityScore = calculatePriorityScore(
                 confidence = opp.confidenceScore,
                 netRiskReward = opp.netRiskRewardRatio,
-                consensusCount = opp.contributingStrategies.size.coerceAtLeast(1)
+                consensusCount = opp.contributingStrategies.size.coerceAtLeast(1),
+                change24hPercent = opp.change24hPercent
             )
             opp to priorityScore
         }.sortedByDescending { it.second }
@@ -120,7 +126,7 @@ class TradeCandidateSelector {
                     opp.copy(
                         rank = rankNumber,
                         lifecycleState = OpportunityLifecycle.RANKED,
-                        statusMessage = "Approved for execution (Priority Score: ${"%.1f".format(score)}, Conf: ${"%.1f".format(opp.confidenceScore)}%, Net R:R: ${"%.2f".format(opp.netRiskRewardRatio)})"
+                        statusMessage = "Approved for execution (Priority Score: ${"%.1f".format(score)}, Conf: ${"%.1f".format(opp.confidenceScore)}%, Net R:R: ${"%.2f".format(opp.netRiskRewardRatio)}, 24h: ${"%.2f".format(opp.change24hPercent)}%)"
                     )
                 )
             } else {
@@ -128,7 +134,7 @@ class TradeCandidateSelector {
                     opp.copy(
                         rank = rankNumber,
                         lifecycleState = OpportunityLifecycle.UNFUNDED,
-                        statusMessage = "Deferred: Exceeds dynamic capacity K=$capacityK (Ranked #$rankNumber, Priority Score: ${"%.1f".format(score)})"
+                        statusMessage = "Deferred: Exceeds dynamic capacity K=$capacityK (Ranked #$rankNumber, Priority Score: ${"%.1f".format(score)}, 24h: ${"%.2f".format(opp.change24hPercent)}%)"
                     )
                 )
             }

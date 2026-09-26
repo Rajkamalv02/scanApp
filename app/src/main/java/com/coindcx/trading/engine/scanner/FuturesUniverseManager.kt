@@ -1,6 +1,8 @@
 package com.coindcx.trading.engine.scanner
 
 import com.coindcx.trading.data.api.CoinDCXApiService
+import com.coindcx.trading.data.api.BinanceFuturesApiService
+import com.coindcx.trading.data.api.ApiClient
 import com.coindcx.trading.engine.MarketRegimePreference
 import com.coindcx.trading.engine.Strategy
 import com.coindcx.trading.engine.UniverseStrategy
@@ -12,6 +14,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
+import kotlin.math.min
 
 /**
  * Dynamic Futures Universe Engine (v3).
@@ -31,7 +34,8 @@ import kotlin.math.abs
  * - Stage 4 Soft Regime Routing: Provides strategy-specific candidate prioritization.
  */
 class FuturesUniverseManager(
-    private val apiService: CoinDCXApiService
+    private val apiService: CoinDCXApiService,
+    private val futuresApiService: BinanceFuturesApiService? = null
 ) {
     companion object {
         const val PRIMARY_MIN_QUOTE_VOLUME_USDT = 400_000.0 // $400k daily turnover primary floor
@@ -45,8 +49,8 @@ class FuturesUniverseManager(
         const val EXIT_MIN_MAS_SCORE = 40.0
         const val MIN_DWELL_CYCLES = 2
         const val HARD_CEILING_TOTAL_POOL = 50
-        const val DAILY_CACHE_TTL_MS = 24 * 60 * 60 * 1000L // 24 Hours daily market recalculation
-        const val CACHE_TTL_MS = DAILY_CACHE_TTL_MS
+        const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 Minutes dynamic market recalculation
+        const val DAILY_CACHE_TTL_MS = CACHE_TTL_MS
 
         val CORE_ANCHORS = listOf("B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT")
 
@@ -86,6 +90,17 @@ class FuturesUniverseManager(
         val quoteVolumeUsdt: Double,
         val lastPrice: Double,
         val spreadPct: Double
+    )
+
+    data class FuturesTickerData(
+        val symbol: String,
+        val lastPrice: Double,
+        val change24hPercent: Double,
+        val quoteVolumeUsdt: Double,
+        val high24h: Double,
+        val low24h: Double,
+        val bid: Double,
+        val ask: Double
     )
 
     data class InstrumentSpec(
@@ -178,7 +193,7 @@ class FuturesUniverseManager(
     }
 
     /**
-     * Lock-free read of universe with transparent background daily refresh if expired.
+     * Lock-free read of universe with transparent background 5-minute refresh if expired.
      */
     suspend fun getOrRefreshUniverse(
         forceRefresh: Boolean = false,
@@ -186,8 +201,7 @@ class FuturesUniverseManager(
         accountConstraints: AccountConstraints? = null
     ): List<String> {
         val now = System.currentTimeMillis()
-        val currentUtcDay = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).get(java.util.Calendar.DAY_OF_YEAR)
-        val isExpired = (now - lastRefreshTimestamp) >= DAILY_CACHE_TTL_MS || (lastDailyRefreshUtcDay != -1 && currentUtcDay != lastDailyRefreshUtcDay)
+        val isExpired = (now - lastRefreshTimestamp) >= CACHE_TTL_MS
         val currentList = universeRef.get()
 
         if ((isExpired || forceRefresh || currentList.isEmpty()) && refreshMutex.tryLock()) {
@@ -316,17 +330,71 @@ class FuturesUniverseManager(
                 specsRef.set(specsMap)
             }
 
-            // 3. Fetch 24h Ticker data (volume, last_price, bid, ask, high, low, change_24_hour)
-            val tickerResp = apiService.getTicker()
-            if (!tickerResp.isSuccessful || tickerResp.body().isNullOrEmpty()) {
-                AppLogManager.w("SCANNER", "Failed fetching ticker data: HTTP ${tickerResp.code()}. Keeping cached universe.")
+            // 3. Fetch 24h Crypto Futures Ticker data (price, change24h, quoteVolume, high, low, BBO)
+            val futuresApi = futuresApiService
+            val futuresTickersMap: Map<String, FuturesTickerData>? = if (futuresApi != null) {
+                try {
+                    val resp24h = kotlinx.coroutines.withTimeoutOrNull(6000L) { futuresApi.get24hTickers() }
+                    if (resp24h != null && resp24h.isSuccessful && !resp24h.body().isNullOrEmpty()) {
+                        val bookMap = try {
+                            val respBook = kotlinx.coroutines.withTimeoutOrNull(4000L) { futuresApi.getBookTickers() }
+                            if (respBook != null && respBook.isSuccessful && respBook.body() != null) {
+                                respBook.body()!!.associateBy { it.symbol }
+                            } else emptyMap()
+                        } catch (_: Exception) {
+                            emptyMap()
+                        }
+
+                        val map = mutableMapOf<String, FuturesTickerData>()
+                        for (t in resp24h.body()!!) {
+                            val lastPrice = t.lastPrice.toDoubleOrNull() ?: continue
+                            val change24h = t.priceChangePercent.toDoubleOrNull() ?: 0.0
+                            val quoteVol = t.quoteVolume.toDoubleOrNull() ?: 0.0
+                            val high = t.highPrice.toDoubleOrNull() ?: lastPrice
+                            val low = t.lowPrice.toDoubleOrNull() ?: lastPrice
+                            val book = bookMap[t.symbol]
+                            val bid = book?.bidPrice?.toDoubleOrNull() ?: (lastPrice * 0.9998)
+                            val ask = book?.askPrice?.toDoubleOrNull() ?: (lastPrice * 1.0002)
+
+                            map[t.symbol] = FuturesTickerData(
+                                symbol = t.symbol,
+                                lastPrice = lastPrice,
+                                change24hPercent = change24h,
+                                quoteVolumeUsdt = quoteVol,
+                                high24h = high,
+                                low24h = low,
+                                bid = bid,
+                                ask = ask
+                            )
+                        }
+                        map
+                    } else null
+                } catch (e: Exception) {
+                    AppLogManager.w("SCANNER", "Failed fetching Crypto Futures 24h tickers: ${e.message}")
+                    null
+                }
+            } else null
+
+            // Fallback: Fetch CoinDCX ticker if futures API did not return data
+            val spotTickerMap = if (futuresTickersMap == null || futuresTickersMap.isEmpty()) {
+                val tickerResp = apiService.getTicker()
+                if (tickerResp.isSuccessful && !tickerResp.body().isNullOrEmpty()) {
+                    val m = mutableMapOf<String, Map<String, Any>>()
+                    for (t in tickerResp.body()!!) {
+                        val market = t["market"]?.toString() ?: continue
+                        m[market] = t
+                    }
+                    m
+                } else emptyMap()
+            } else emptyMap()
+
+            if (futuresTickersMap.isNullOrEmpty() && spotTickerMap.isEmpty()) {
+                AppLogManager.w("SCANNER", "Failed fetching market ticker data. Keeping cached universe.")
                 return
             }
 
-            val tickerMap = mutableMapOf<String, Map<String, Any>>()
-            for (t in tickerResp.body()!!) {
-                val market = t["market"]?.toString() ?: continue
-                tickerMap[market] = t
+            if (!futuresTickersMap.isNullOrEmpty()) {
+                AppLogManager.scanner("Loaded real-time Crypto Futures 24h statistics (${futuresTickersMap.size} contracts from Binance Futures venue).")
             }
 
             val nowMs = System.currentTimeMillis()
@@ -345,52 +413,61 @@ class FuturesUniverseManager(
 
             val candidateList = mutableListOf<RawMarketData>()
 
-            for ((coindcxName, pair) in nameToPair) {
-                // Must be in CoinDCX active derivatives instruments
-                if (!activeSet.contains(pair)) continue
+            for (pair in activeSet) {
+                if (!pair.startsWith("B-")) continue
 
-                // Market details status must be active
-                val details = pairToDetails[pair] ?: continue
-                if (!details.first.equals("active", ignoreCase = true)) continue
+                // Check active status if present in pairToDetails
+                val details = pairToDetails[pair]
+                if (details != null && !details.first.equals("active", ignoreCase = true)) continue
 
                 // Exclude pegged stablecoins
-                if (PEGGED_STABLECOINS.contains(details.second)) continue
+                val targetCurrency = details?.second?.ifBlank { null }
+                    ?: pair.removePrefix("B-").split("_").firstOrNull()?.uppercase(Locale.US)
+                    ?: ""
+                if (PEGGED_STABLECOINS.contains(targetCurrency)) continue
 
-                val t = tickerMap[coindcxName] ?: continue
-                val lastPrice = (t["last_price"]?.toString()?.toDoubleOrNull()) ?: continue
-                val baseVolume = (t["volume"]?.toString()?.toDoubleOrNull()) ?: continue
-                if (lastPrice <= 0.0 || baseVolume <= 0.0) continue
+                val futuresSymbol = pair.removePrefix("B-").replace("_", "")
 
-                val quoteVolumeUsdt = baseVolume * lastPrice
-                val high24h = (t["high"]?.toString()?.toDoubleOrNull()) ?: lastPrice
-                val low24h = (t["low"]?.toString()?.toDoubleOrNull()) ?: lastPrice
-                val bid = (t["bid"]?.toString()?.toDoubleOrNull()) ?: 0.0
-                val ask = (t["ask"]?.toString()?.toDoubleOrNull()) ?: 0.0
-                val change24h = (t["change_24_hour"]?.toString()?.toDoubleOrNull()) ?: 0.0
+                val rawData: RawMarketData? = if (!futuresTickersMap.isNullOrEmpty()) {
+                    val ft = futuresTickersMap[futuresSymbol]
+                    if (ft != null && ft.lastPrice > 0.0) {
+                        val spread = if (ft.ask >= ft.bid && ft.bid > 0) {
+                            ((ft.ask - ft.bid) / ft.lastPrice) * 100.0
+                        } else {
+                            0.05 // Default tight spread for liquid crypto futures contracts
+                        }
+                        RawMarketData(
+                            pair = pair,
+                            quoteVolumeUsdt = ft.quoteVolumeUsdt,
+                            lastPrice = ft.lastPrice,
+                            high24h = ft.high24h,
+                            low24h = ft.low24h,
+                            bid = ft.bid,
+                            ask = ft.ask,
+                            change24h = ft.change24hPercent,
+                            spreadPct = spread
+                        )
+                    } else null
+                } else null
 
-                val spreadPct = if (lastPrice > 0 && ask >= bid && bid > 0) {
-                    ((ask - bid) / lastPrice) * 100.0
-                } else {
-                    999.0 // Invalid book
-                }
+                val finalMarketData = rawData ?: run {
+                    val coindcxName = nameToPair.entries.find { it.value == pair }?.key ?: futuresSymbol
+                    val t = spotTickerMap[coindcxName] ?: return@run null
+                    val lastPrice = (t["last_price"]?.toString()?.toDoubleOrNull()) ?: return@run null
+                    val baseVolume = (t["volume"]?.toString()?.toDoubleOrNull()) ?: return@run null
+                    if (lastPrice <= 0.0 || baseVolume <= 0.0) return@run null
 
-                // Ingest into RollingMarketDataStore for rolling RVOL and velocity calculations
-                rollingStore.addSnapshot(
-                    pair,
-                    RollingMarketDataStore.TickerSnapshot(
-                        timestampMs = nowMs,
-                        lastPrice = lastPrice,
-                        baseVolume = baseVolume,
-                        quoteVolumeUsdt = quoteVolumeUsdt,
-                        high24h = high24h,
-                        low24h = low24h,
-                        bid = bid,
-                        ask = ask,
-                        change24h = change24h
-                    )
-                )
-
-                candidateList.add(
+                    val quoteVolumeUsdt = baseVolume * lastPrice
+                    val high24h = (t["high"]?.toString()?.toDoubleOrNull()) ?: lastPrice
+                    val low24h = (t["low"]?.toString()?.toDoubleOrNull()) ?: lastPrice
+                    val bid = (t["bid"]?.toString()?.toDoubleOrNull()) ?: 0.0
+                    val ask = (t["ask"]?.toString()?.toDoubleOrNull()) ?: 0.0
+                    val change24h = (t["change_24_hour"]?.toString()?.toDoubleOrNull()) ?: 0.0
+                    val spreadPct = if (lastPrice > 0 && ask >= bid && bid > 0) {
+                        ((ask - bid) / lastPrice) * 100.0
+                    } else {
+                        999.0
+                    }
                     RawMarketData(
                         pair = pair,
                         quoteVolumeUsdt = quoteVolumeUsdt,
@@ -402,7 +479,26 @@ class FuturesUniverseManager(
                         change24h = change24h,
                         spreadPct = spreadPct
                     )
+                } ?: continue
+
+                // Ingest into RollingMarketDataStore for rolling RVOL and velocity calculations
+                val baseVol = if (finalMarketData.lastPrice > 0) finalMarketData.quoteVolumeUsdt / finalMarketData.lastPrice else 0.0
+                rollingStore.addSnapshot(
+                    pair,
+                    RollingMarketDataStore.TickerSnapshot(
+                        timestampMs = nowMs,
+                        lastPrice = finalMarketData.lastPrice,
+                        baseVolume = baseVol,
+                        quoteVolumeUsdt = finalMarketData.quoteVolumeUsdt,
+                        high24h = finalMarketData.high24h,
+                        low24h = finalMarketData.low24h,
+                        bid = finalMarketData.bid,
+                        ask = finalMarketData.ask,
+                        change24h = finalMarketData.change24h
+                    )
                 )
+
+                candidateList.add(finalMarketData)
             }
 
             // 4. Stage 1: Adaptive Pre-Filter (Daily Market Evaluation independent of strategy timeframe)
@@ -458,81 +554,44 @@ class FuturesUniverseManager(
                 masScoresMap[cand.pair] = mas
             }
 
-            // Rank Stage 1 passing pairs by MAS score descending
-            val rankedByMas = affordableCandidates.mapNotNull { masScoresMap[it.pair] }
-                .sortedByDescending { it.totalScore }
-            val pairToMasRank = rankedByMas.mapIndexed { index, score -> score.pair to (index + 1) }.toMap()
-
-            // 6. Stage 3: Dynamic 50 Movers with Schmitt-Trigger Hysteresis
+            // 6. Stage 3: Dynamic 50 Selection Prioritizing Top CoinDCX 24h Movers
             val pinnedSet = openPositionPairs.filter { activeSet.contains(it) }.toSet()
-
-            // Dynamic mover capacity up to TARGET_DYNAMIC_MOVERS (50)
             val maxDynamicMovers = (HARD_CEILING_TOTAL_POOL - pinnedSet.size).coerceAtLeast(0)
 
-            val qualifiedDynamicCandidates = mutableListOf<String>()
-            val passingPairSet = affordableCandidates.map { it.pair }.toSet()
+            // A. Rank candidates by absolute 24h change magnitude (Top Gainers & Losers on CoinDCX)
+            val top24hMovers = affordableCandidates
+                .sortedByDescending { abs(it.change24h) }
+                .map { it.pair }
 
-            // A. Existing pool members evaluated against exit criteria
-            val existingCandidates = activePoolHistory.keys.toList()
-            for (pair in existingCandidates) {
-                if (pinnedSet.contains(pair)) continue
-                val record = activePoolHistory[pair] ?: continue
-                val rank = pairToMasRank[pair] ?: 999
-                val score = masScoresMap[pair]?.totalScore ?: 0.0
-                val dwellCycles = currentCycleCount - record.entryCycle
+            // B. Also rank by MAS score (liquidity, spread, technical strength)
+            val rankedByMas = affordableCandidates.sortedByDescending { masScoresMap[it.pair]?.totalScore ?: 0.0 }
+            val rankedByMasPairs: List<String> = rankedByMas.map { it.pair }
 
-                // Exit Condition: Drops if not in Stage 1, OR (rank > EXIT_RANK_FLOOR OR score < EXIT_MIN_MAS_SCORE) AFTER dwell cycles
-                val shouldEvict = !passingPairSet.contains(pair) || (dwellCycles >= MIN_DWELL_CYCLES && (rank > EXIT_RANK_FLOOR || score < EXIT_MIN_MAS_SCORE))
+            // Reserve up to 35 slots for top 24h movers from CoinDCX
+            val moverSlots = min(35, maxDynamicMovers)
+            val selected24hMovers = top24hMovers.filter { !pinnedSet.contains(it) }.take(moverSlots)
 
-                if (!shouldEvict) {
-                    record.lastSeenCycle = currentCycleCount
-                    record.lastMasScore = score
-                    qualifiedDynamicCandidates.add(pair)
-                } else {
-                    activePoolHistory.remove(pair)
-                }
-            }
+            // Fill remaining dynamic slots with highest MAS / volume leaders (e.g. BTC, ETH, SOL, etc.)
+            val remainingSlots = maxDynamicMovers - selected24hMovers.size
+            val backfillLeaders: List<String> = (rankedByMasPairs + CORE_ANCHORS)
+                .filter { candidatePair -> !pinnedSet.contains(candidatePair) && !selected24hMovers.contains(candidatePair) }
+                .take(remainingSlots)
 
-            // B. Newly qualifying pairs: Rank <= ENTRY_RANK_CEILING (50)
-            for (ranked in rankedByMas) {
-                val pair = ranked.pair
-                if (pinnedSet.contains(pair)) continue
-                val rank = pairToMasRank[pair] ?: 999
-                if (rank <= ENTRY_RANK_CEILING && !qualifiedDynamicCandidates.contains(pair)) {
-                    qualifiedDynamicCandidates.add(pair)
-                    activePoolHistory[pair] = ActiveCandidateRecord(
+            val selectedDynamicMovers: List<String> = (selected24hMovers + backfillLeaders).take(maxDynamicMovers)
+
+            // Record in activePoolHistory for telemetry & tracking
+            selectedDynamicMovers.forEach { pair: String ->
+                activePoolHistory.compute(pair) { _, existing ->
+                    existing?.apply {
+                        lastSeenCycle = currentCycleCount
+                        lastMasScore = masScoresMap[pair]?.totalScore ?: 0.0
+                    } ?: ActiveCandidateRecord(
                         pair = pair,
                         entryCycle = currentCycleCount,
                         lastSeenCycle = currentCycleCount,
-                        lastMasScore = ranked.totalScore
+                        lastMasScore = masScoresMap[pair]?.totalScore ?: 0.0
                     )
                 }
-            }
-
-            // C. Enforce Strict Hard Ceiling on dynamic movers
-            val selectedDynamicMovers = if (qualifiedDynamicCandidates.size > maxDynamicMovers) {
-                qualifiedDynamicCandidates.sortedWith(
-                    compareByDescending<String> { masScoresMap[it]?.totalScore ?: 0.0 }
-                        .thenBy { activePoolHistory[it]?.entryCycle ?: Long.MAX_VALUE }
-                ).take(maxDynamicMovers)
-            } else if (qualifiedDynamicCandidates.size < maxDynamicMovers) {
-                val backfilled = qualifiedDynamicCandidates.toMutableList()
-                for (ranked in rankedByMas) {
-                    if (backfilled.size >= maxDynamicMovers) break
-                    val pair = ranked.pair
-                    if (!pinnedSet.contains(pair) && !backfilled.contains(pair)) {
-                        backfilled.add(pair)
-                        activePoolHistory[pair] = ActiveCandidateRecord(
-                            pair = pair,
-                            entryCycle = currentCycleCount,
-                            lastSeenCycle = currentCycleCount,
-                            lastMasScore = ranked.totalScore
-                        )
-                    }
-                }
-                backfilled
-            } else {
-                qualifiedDynamicCandidates
             }
 
             // Clean up evicted pairs from history
@@ -544,7 +603,7 @@ class FuturesUniverseManager(
             }
 
             // D. Assemble final universe: Pinned Positions + Dynamic Movers (strictly data-driven)
-            val finalUniverse = (pinnedSet + selectedDynamicMovers).distinct().take(HARD_CEILING_TOTAL_POOL + pinnedSet.size)
+            val finalUniverse: List<String> = (pinnedSet.toList() + selectedDynamicMovers).distinct().take(HARD_CEILING_TOTAL_POOL + pinnedSet.size)
 
             universeRef.set(finalUniverse)
             majorsRef.set(finalUniverse.take(10).ifEmpty { CORE_ANCHORS })
@@ -552,12 +611,13 @@ class FuturesUniverseManager(
             lastRefreshTimestamp = System.currentTimeMillis()
             lastDailyRefreshUtcDay = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).get(java.util.Calendar.DAY_OF_YEAR)
 
-            val avgMas = finalUniverse.mapNotNull { masScoresMap[it]?.totalScore }.average().let { if (it.isNaN()) 0.0 else it }
-            val topMas = finalUniverse.mapNotNull { masScoresMap[it]?.totalScore }.maxOrNull() ?: 0.0
+            val masScoresList = finalUniverse.mapNotNull { masScoresMap[it]?.totalScore }
+            val avgMas = if (masScoresList.isNotEmpty()) masScoresList.average() else 0.0
+            val topMas = masScoresList.maxOrNull() ?: 0.0
 
             AppLogManager.scanner(
-                "Dynamic Universe Updated: %d pairs (%d Dynamic Movers, %d Pinned | Top MAS: %.1f, Avg MAS: %.1f | Daily Ceiling: %d)."
-                    .format(finalUniverse.size, selectedDynamicMovers.size, pinnedSet.size, topMas, avgMas, HARD_CEILING_TOTAL_POOL)
+                "Dynamic Universe Updated: %d pairs (%d 24h Movers / Dynamic Leaders, %d Pinned | Top MAS: %.1f, Avg MAS: %.1f | TTL: 5 min)."
+                    .format(finalUniverse.size, selectedDynamicMovers.size, pinnedSet.size, topMas, avgMas)
             )
 
             MarketScanState.updateUniverseSummary(

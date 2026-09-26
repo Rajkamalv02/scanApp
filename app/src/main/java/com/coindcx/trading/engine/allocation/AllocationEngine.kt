@@ -23,8 +23,8 @@ class AllocationEngine {
      *    and portfolio economic viability floor (2% of equity).
      * 4. Constrained Sequential Slicing: Prevents Rank #1 from monopolizing available cash
      *    (capped at 45% of start capital) while allowing downstream candidates to absorb remainder.
-     * 5. Gated Decision Tree: Evaluates solvency, 1.5% max risk cap, and liquidation safety buffer
-     *    before bumping to floor. Never forces a trade into excess risk.
+     * 5. Gated Decision Tree: Evaluates solvency and liquidation safety buffer
+     *    before bumping to floor.
      */
     fun allocateCapital(
         accountEquityInr: Double,
@@ -107,11 +107,12 @@ class AllocationEngine {
         var remainingSlots = dynamicMaxTrades
         val maxSingleTradeCap = max(minExchangeMarginFloor, availableCashForTrading * 0.45) // No single trade can take > 45% of start cash (floor-guaranteed)
 
+        // Floor order risk check disabled/commented out so that micro-accounts and floor-bumped orders are not rejected by risk capping
+        // val maxTolerableRiskInr = equity * (maxFloorRiskPercent / 100.0)
+
         val funded = mutableListOf<MarketOpportunity>()
         val unfunded = mutableListOf<MarketOpportunity>()
         val allProcessed = mutableListOf<MarketOpportunity>()
-
-        val maxTolerableRiskInr = equity * (maxFloorRiskPercent / 100.0) // Tunable max risk cap on floor bump (default 2.5% for micro-accounts)
 
         for (opp in rankedOpportunities) {
             // Signal Action Check
@@ -168,7 +169,7 @@ class AllocationEngine {
 
             if (idealMargin < governingFloorMargin) {
                 // Position is small: evaluate bump gates
-                val floorRiskInr = governingFloorMargin * effectiveLev * slDistPercent
+                // val floorRiskInr = governingFloorMargin * effectiveLev * slDistPercent
                 val liqDist = MaintenanceMarginSchedule.getEstimatedLiquidationDistancePct(effectiveLev)
                 val isLiqSafe = liqDist >= (slDistPercent * riskSettings.liquidationBufferMultiplier)
 
@@ -177,16 +178,17 @@ class AllocationEngine {
                         rejectionReason = "Floor margin (₹%.0f) exceeds slot budget ceiling (₹%.0f)"
                             .format(governingFloorMargin, slotCeilingMargin)
                     }
-                    floorRiskInr > maxTolerableRiskInr -> {
-                        rejectionReason = "Floor order forces ₹%.2f risk (%.2f%% of equity), exceeding %.1f%% cap"
-                            .format(floorRiskInr, (floorRiskInr / equity) * 100.0, maxFloorRiskPercent)
-                    }
+                    // Floor order risk check disabled/commented out:
+                    // floorRiskInr > maxTolerableRiskInr -> {
+                    //     rejectionReason = "Floor order forces ₹%.2f risk (%.2f%% of equity), exceeding %.1f%% cap"
+                    //         .format(floorRiskInr, (floorRiskInr / equity) * 100.0, maxFloorRiskPercent)
+                    // }
                     !isLiqSafe -> {
                         rejectionReason = "Liquidation distance (%.2f%%) at %dx leverage is within safety buffer (SL: %.2f%%)"
                             .format(liqDist * 100.0, effectiveLev, slDistPercent * 100.0)
                     }
                     else -> {
-                        // Passed all 3 bump gates
+                        // Passed bump gates
                         isApprovedForFunding = true
                         allocatedMargin = governingFloorMargin
                     }

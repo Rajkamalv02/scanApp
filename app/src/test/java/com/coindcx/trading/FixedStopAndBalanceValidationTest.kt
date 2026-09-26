@@ -4,6 +4,7 @@ import com.coindcx.trading.data.api.models.FuturesPosition
 import com.coindcx.trading.data.api.models.FuturesWallet
 import com.coindcx.trading.engine.RiskManager
 import com.coindcx.trading.engine.RiskSettings
+import com.coindcx.trading.engine.allocation.AllocationEngine
 import com.coindcx.trading.engine.scanner.MarketOpportunity
 import com.coindcx.trading.engine.scanner.OpportunityLifecycle
 import com.coindcx.trading.engine.scanner.TradeCandidateSelector
@@ -360,6 +361,57 @@ class FixedStopAndBalanceValidationTest {
         val slDist20x = (currentPrice * (slPercent / 100.0)) / currentPrice * 100.0
         assertEquals(3.0, slDist1x, 0.001)
         assertEquals(3.0, slDist20x, 0.001)
+    }
+
+    // =========================================================================
+    // 7. Risk Factor Check Removal Validation (Stop-Loss Not Blocked)
+    // =========================================================================
+
+    @Test
+    fun testUIConfiguredStopLoss_HighPercentagesNeverBlockedByRiskFactorCheck() {
+        val allocator = AllocationEngine()
+        val entryPrice = 50000.0
+
+        // Test high stop loss percentages selectable in UI: 4.0%, 5.0%, 7.0%, 10.0%
+        val testStopLosses = listOf(4.0, 5.0, 7.0, 10.0)
+
+        for (slPct in testStopLosses) {
+            val slPrice = entryPrice * (1.0 - slPct / 100.0)
+            val candidate = MarketOpportunity(
+                pair = "B-BTC_USDT",
+                signal = com.coindcx.trading.engine.Signal(
+                    symbol = "B-BTC_USDT",
+                    direction = com.coindcx.trading.engine.SignalDirection.LONG,
+                    entryRef = entryPrice,
+                    stopLoss = slPrice,
+                    stopLossPrice = slPrice,
+                    takeProfitPrice = entryPrice * 1.015,
+                    strategyId = "CONFLUENCE",
+                    reason = "UI SL test $slPct%",
+                    confidenceScore = 85.0
+                ),
+                currentPrice = entryPrice,
+                confidenceScore = 85.0,
+                rank = 1,
+                isApproved = true,
+                lifecycleState = OpportunityLifecycle.RANKED
+            )
+
+            // Even on a 1000 INR account at 2x leverage where floor risk would previously exceed 2.5% cap:
+            val result = allocator.allocateCapital(
+                accountEquityInr = 1000.0,
+                availableCashInr = 1000.0,
+                activePositionsCount = 0,
+                leverage = 2,
+                rankedOpportunities = listOf(candidate),
+                minExchangeNotionalInr = 620.0
+            )
+
+            assertEquals("Candidate with $slPct% SL must be funded and not blocked by risk cap", 1, result.fundedOpportunities.size)
+            assertEquals("No candidate should be unfunded due to stop loss risk factor check", 0, result.unfundedOpportunities.size)
+            assertEquals(OpportunityLifecycle.SELECTED_FOR_TRADE, result.fundedOpportunities[0].lifecycleState)
+            assertTrue("Allocated margin should meet or exceed floor margin", result.fundedOpportunities[0].allocatedMarginInr >= 310.0)
+        }
     }
 }
 

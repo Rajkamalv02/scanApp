@@ -223,12 +223,9 @@ class AllocationEngineTest {
     }
 
     @Test
-    fun testDynamicRiskParity_SmallAccount500_FloorExceedsRiskCap_Rejects() {
-        // Equity = 500, Cash = 500, Reserve = max(25, 100) = 100. Cash for trading = 400.
-        // Floor at 2x = 310.
-        // With 2% SL, floor risk = 310 * 2 * 0.02 = 12.40.
-        // 1.5% max risk cap on 500 equity = 7.50.
-        // 12.40 > 7.50 -> Must be rejected by Stage 4 risk cap gate!
+    fun testDynamicRiskParity_SmallAccount500_FloorRiskCheckRemoved_ApprovesTrade() {
+        // Equity = 500, Cash = 500. Floor at 2x = 310.
+        // With floor risk check removed, candidate with user-configured stoploss is successfully approved.
         val candidates = listOf(
             createDummyOpportunityWithSl("B-BTC_USDT", 1, 100.0, 98.0)
         )
@@ -242,12 +239,13 @@ class AllocationEngineTest {
             riskSettings = RiskSettings(maxConcurrentPositions = 5, maxFloorRiskPercent = 1.5),
             minExchangeNotionalInr = 620.0,
             riskPerTradePercent = 1.0,
-            safetyReservePercent = 5.0
+            safetyReservePercent = 0.0
         )
 
-        assertEquals(0, result.fundedOpportunities.size)
-        assertEquals(1, result.unfundedOpportunities.size)
-        assertTrue(result.unfundedOpportunities[0].statusMessage.contains("exceeding 1.5% cap"))
+        assertEquals(1, result.fundedOpportunities.size)
+        assertEquals(0, result.unfundedOpportunities.size)
+        assertEquals(310.0, result.fundedOpportunities[0].allocatedMarginInr, 0.01)
+        assertEquals(OpportunityLifecycle.SELECTED_FOR_TRADE, result.fundedOpportunities[0].lifecycleState)
     }
 
     @Test

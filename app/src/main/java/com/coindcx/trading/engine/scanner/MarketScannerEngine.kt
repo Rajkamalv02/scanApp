@@ -1,5 +1,6 @@
 package com.coindcx.trading.engine.scanner
 
+import com.coindcx.trading.data.api.ApiClient
 import com.coindcx.trading.data.api.CoinDCXApiService
 import com.coindcx.trading.data.api.models.MarketCandle
 import com.coindcx.trading.data.config.TradingConfig
@@ -100,7 +101,7 @@ class CycleCandleCache(
 
 class MarketScannerEngine(
     private val apiService: CoinDCXApiService,
-    val universeManager: FuturesUniverseManager = FuturesUniverseManager(apiService)
+    val universeManager: FuturesUniverseManager = FuturesUniverseManager(apiService, ApiClient.binanceFuturesApiService)
 ) {
     private val lastProcessedEntryCandleTime = ConcurrentHashMap<String, Long>()
 
@@ -431,6 +432,7 @@ class MarketScannerEngine(
                     SignalDedupRegistry.default.recordSignal(signal, clock)
 
                     val masScore = universeManager.getMasScore(pair)?.totalScore ?: 0.0
+                    val chg24 = ticker?.change24h ?: 0.0
                     val opp = MarketOpportunity(
                         pair = pair,
                         signal = signal,
@@ -444,6 +446,7 @@ class MarketScannerEngine(
                         strategyId = candidate.anchorStrategy.strategyId,
                         strategyName = candidate.anchorStrategy.strategyName,
                         marketActivityScore = masScore,
+                        change24hPercent = chg24,
                         contributingStrategies = candidate.contributingStrategies,
                         selectionReason = candidate.selectionReason,
                         statusMessage = candidate.detectedConflicts

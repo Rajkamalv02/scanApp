@@ -66,6 +66,7 @@ data class MarketOpportunity(
     val strategyId: String = "",
     val strategyName: String = "",
     val marketActivityScore: Double = 0.0,
+    val change24hPercent: Double = 0.0,
     val contributingStrategies: List<StrategyContribution> = emptyList(),
     val selectionReason: String = ""
 ) {

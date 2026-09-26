@@ -1,6 +1,7 @@
 package com.coindcx.trading
 
 import com.coindcx.trading.data.api.CoinDCXApiService
+import com.coindcx.trading.data.api.BinanceFuturesApiService
 import com.coindcx.trading.data.api.models.*
 import com.coindcx.trading.engine.MarketRegimePreference
 import com.coindcx.trading.engine.Signal
@@ -298,5 +299,90 @@ class FuturesUniverseManagerTest {
         assertNotNull(universe)
         assertTrue(universe.isNotEmpty())
         assertTrue(universe.contains("B-BTC_USDT"))
+    }
+
+    private class FakeBinanceFuturesApiService : BinanceFuturesApiService {
+        var tickers24h: List<BinanceFutures24hTicker> = emptyList()
+        var bookTickers: List<BinanceFuturesBookTicker> = emptyList()
+
+        override suspend fun get24hTickers(): Response<List<BinanceFutures24hTicker>> =
+            Response.success(tickers24h)
+
+        override suspend fun getBookTickers(): Response<List<BinanceFuturesBookTicker>> =
+            Response.success(bookTickers)
+    }
+
+    @Test
+    fun testCryptoFutures24hChangesUsedWhenFuturesApiProvided() = runTest {
+        val fakeApi = FakeApiService()
+        fakeApi.activeInstruments = listOf("B-BTC_USDT", "B-SOL_USDT", "B-1000PEPE_USDT")
+        fakeApi.marketsDetails = listOf(
+            buildMarketDetail("B-BTC_USDT", "BTCUSDT", "BTC"),
+            buildMarketDetail("B-SOL_USDT", "SOLUSDT", "SOL")
+        )
+        // Spot ticker has outdated / different values
+        fakeApi.ticker = listOf(
+            buildTicker("BTCUSDT", 60000.0, 100.0, 59990.0, 60010.0, change24h = 1.0),
+            buildTicker("SOLUSDT", 100.0, 5000.0, 99.95, 100.05, change24h = 2.0)
+        )
+
+        // Real Crypto Futures API provides true futures 24h change & quotes
+        val fakeFuturesApi = FakeBinanceFuturesApiService()
+        fakeFuturesApi.tickers24h = listOf(
+            BinanceFutures24hTicker(
+                symbol = "BTCUSDT",
+                lastPrice = "61000.0",
+                priceChangePercent = "8.5", // Futures 24h change is 8.5% (different from spot 1.0%)
+                highPrice = "62000.0",
+                lowPrice = "59000.0",
+                volume = "1000.0",
+                quoteVolume = "61000000.0"
+            ),
+            BinanceFutures24hTicker(
+                symbol = "SOLUSDT",
+                lastPrice = "120.0",
+                priceChangePercent = "25.0", // Futures 24h change is 25.0%
+                highPrice = "125.0",
+                lowPrice = "95.0",
+                volume = "50000.0",
+                quoteVolume = "6000000.0"
+            ),
+            BinanceFutures24hTicker(
+                symbol = "1000PEPEUSDT",
+                lastPrice = "0.01",
+                priceChangePercent = "-15.0", // Futures meme coin with high volatility
+                highPrice = "0.012",
+                lowPrice = "0.009",
+                volume = "100000000.0",
+                quoteVolume = "1000000.0"
+            )
+        )
+        fakeFuturesApi.bookTickers = listOf(
+            BinanceFuturesBookTicker(symbol = "BTCUSDT", bidPrice = "60995.0", askPrice = "61005.0"),
+            BinanceFuturesBookTicker(symbol = "SOLUSDT", bidPrice = "119.95", askPrice = "120.05"),
+            BinanceFuturesBookTicker(symbol = "1000PEPEUSDT", bidPrice = "0.00999", askPrice = "0.01001")
+        )
+
+        val manager = FuturesUniverseManager(fakeApi, fakeFuturesApi)
+        val universe = manager.getOrRefreshUniverse(forceRefresh = true)
+
+        // Verifies universe contains the crypto futures pairs and picked based on futures data
+        assertTrue(universe.contains("B-BTC_USDT"))
+        assertTrue(universe.contains("B-SOL_USDT"))
+        assertTrue(universe.contains("B-1000PEPE_USDT"))
+
+        val btcSnapshot = manager.getLatestTicker("B-BTC_USDT")
+        assertNotNull(btcSnapshot)
+        assertEquals(8.5, btcSnapshot!!.change24h, 0.01) // Real crypto futures 24h change
+        assertEquals(61000.0, btcSnapshot.lastPrice, 0.01)
+
+        val solSnapshot = manager.getLatestTicker("B-SOL_USDT")
+        assertNotNull(solSnapshot)
+        assertEquals(25.0, solSnapshot!!.change24h, 0.01) // Real crypto futures 24h change
+        assertEquals(120.0, solSnapshot.lastPrice, 0.01)
+
+        val pepeSnapshot = manager.getLatestTicker("B-1000PEPE_USDT")
+        assertNotNull(pepeSnapshot)
+        assertEquals(-15.0, pepeSnapshot!!.change24h, 0.01)
     }
 }

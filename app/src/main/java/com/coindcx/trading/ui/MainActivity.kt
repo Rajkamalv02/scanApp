@@ -281,6 +281,14 @@ class MainActivity : AppCompatActivity() {
             val modeText = if (isChecked) "Tier-2 Altcoins Allowed in Live Trading" else "Live Trading Restricted to Tier-1 Majors Only"
             Toast.makeText(this, modeText, Toast.LENGTH_SHORT).show()
         }
+
+        // 6. Daily Loss Limit Check Toggle
+        binding.switchDailyLossLimit.isChecked = config.enableDailyLossLimit
+        binding.switchDailyLossLimit.setOnCheckedChangeListener { _, isChecked ->
+            configRepo.updateDailyLossLimit(isChecked)
+            val modeText = if (isChecked) "Daily Loss Limit Check Enabled" else "Daily Loss Limit Check Disabled"
+            Toast.makeText(this, modeText, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun updateLeverageUi(leverage: Int) {

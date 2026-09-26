@@ -8,6 +8,7 @@ import kotlin.math.abs
 data class RiskSettings(
     val riskPerTradePercent: Double = 1.0,          // 1% fixed dollar risk of available balance
     val maxLeverage: Int = 5,
+    val enableDailyLossLimit: Boolean = false,       // Daily loss limit check disabled per user request
     val maxDailyLossPercent: Double = 4.0,           // 4% daily drawdown circuit breaker
     val maxDailyLossInr: Double = 2000.0,            // Fallback absolute limit
     val maxConcurrentPositions: Int = 3,             // Max 3 total concurrent positions
@@ -74,6 +75,7 @@ class RiskManager(
     fun getTodayRealizedLossInr(): Double = todayRealizedLossInr
 
     fun isCircuitBreakerTripped(): Boolean {
+        if (!settings.enableDailyLossLimit) return false
         checkAndResetIfNewDay()
         return circuitBreakerTripped
     }
@@ -156,6 +158,9 @@ class RiskManager(
             circuitBreakerTripped = prefs.getBoolean(KEY_CIRCUIT_BREAKER, false)
             cooldownUntilTimestampMs = prefs.getLong(KEY_COOLDOWN_UNTIL, 0L)
             lastEpochDay = savedEpochDay
+        }
+        if (!settings.enableDailyLossLimit) {
+            circuitBreakerTripped = false
         }
     }
 
@@ -274,7 +279,7 @@ class RiskManager(
         btcMacroTrendIsBullish: Boolean? = null
     ): RiskCheckResult {
         checkAndResetIfNewDay()
-        if (circuitBreakerTripped) {
+        if (settings.enableDailyLossLimit && circuitBreakerTripped) {
             return RiskCheckResult.Rejected("Daily circuit breaker tripped (4% loss limit reached).")
         }
 
@@ -298,44 +303,42 @@ class RiskManager(
 
         val openLongs = openPositions.filter { it.isLong }
         val openShorts = openPositions.filter { it.isShort }
-        val isCandidateBtc = candidatePair.contains("BTC", ignoreCase = true)
+        // val isCandidateBtc = candidatePair.contains("BTC", ignoreCase = true)
 
         if (isBuy) {
             if (openLongs.size >= settings.maxDirectionalPositions) {
                 return RiskCheckResult.Rejected("Max Long positions reached (${openLongs.size}/${settings.maxDirectionalPositions}).")
             }
 
-            val altLongsCount = openLongs.count { !it.pair.contains("BTC", ignoreCase = true) }
-
-            // If candidate is an altcoin Long and we already hold an altcoin Long:
-            if (!isCandidateBtc && altLongsCount >= 1) {
-                if (btcMacroTrendIsBullish == false) {
-                    return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs while BTC 1h trend is bearish.")
-                } else if (btcMacroTrendIsBullish == null) {
-                    val hasBtcLong = openLongs.any { it.pair.contains("BTC", ignoreCase = true) }
-                    if (!hasBtcLong) {
-                        return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs simultaneously without B-BTC_USDT.")
-                    }
-                }
-            }
+            // BTC correlation rule for 2 altcoins disabled/commented out:
+            // val altLongsCount = openLongs.count { !it.pair.contains("BTC", ignoreCase = true) }
+            // if (!isCandidateBtc && altLongsCount >= 1) {
+            //     if (btcMacroTrendIsBullish == false) {
+            //         return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs while BTC 1h trend is bearish.")
+            //     } else if (btcMacroTrendIsBullish == null) {
+            //         val hasBtcLong = openLongs.any { it.pair.contains("BTC", ignoreCase = true) }
+            //         if (!hasBtcLong) {
+            //             return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Longs simultaneously without B-BTC_USDT.")
+            //         }
+            //     }
+            // }
         } else {
             if (openShorts.size >= settings.maxDirectionalPositions) {
                 return RiskCheckResult.Rejected("Max Short positions reached (${openShorts.size}/${settings.maxDirectionalPositions}).")
             }
 
-            val altShortsCount = openShorts.count { !it.pair.contains("BTC", ignoreCase = true) }
-
-            // Symmetric check for Shorts:
-            if (!isCandidateBtc && altShortsCount >= 1) {
-                if (btcMacroTrendIsBullish == true) {
-                    return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Shorts while BTC 1h trend is bullish.")
-                } else if (btcMacroTrendIsBullish == null) {
-                    val hasBtcShort = openShorts.any { it.pair.contains("BTC", ignoreCase = true) }
-                    if (!hasBtcShort) {
-                        return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Shorts simultaneously without B-BTC_USDT.")
-                    }
-                }
-            }
+            // BTC correlation rule for 2 altcoins disabled/commented out:
+            // val altShortsCount = openShorts.count { !it.pair.contains("BTC", ignoreCase = true) }
+            // if (!isCandidateBtc && altShortsCount >= 1) {
+            //     if (btcMacroTrendIsBullish == true) {
+            //         return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Shorts while BTC 1h trend is bullish.")
+            //     } else if (btcMacroTrendIsBullish == null) {
+            //         val hasBtcShort = openShorts.any { it.pair.contains("BTC", ignoreCase = true) }
+            //         if (!hasBtcShort) {
+            //             return RiskCheckResult.Rejected("BTC correlation rule: Cannot hold 2 altcoin Shorts simultaneously without B-BTC_USDT.")
+            //         }
+            //     }
+            // }
         }
 
         return RiskCheckResult.Approved(0.0, settings.maxLeverage)
@@ -363,13 +366,15 @@ class RiskManager(
             if (consecutiveLossCount >= settings.consecutiveLossLimit) {
                 cooldownUntilTimestampMs = System.currentTimeMillis() + (settings.consecutiveLossCooldownMinutes * 60 * 1000L)
             }
-            if (currentBalanceInr > 0) {
-                val lossPercent = (todayRealizedLossInr / (currentBalanceInr + todayRealizedLossInr)) * 100.0
-                if (lossPercent >= settings.maxDailyLossPercent) {
+            if (settings.enableDailyLossLimit) {
+                if (currentBalanceInr > 0) {
+                    val lossPercent = (todayRealizedLossInr / (currentBalanceInr + todayRealizedLossInr)) * 100.0
+                    if (lossPercent >= settings.maxDailyLossPercent) {
+                        circuitBreakerTripped = true
+                    }
+                } else if (todayRealizedLossInr >= settings.maxDailyLossInr) {
                     circuitBreakerTripped = true
                 }
-            } else if (todayRealizedLossInr >= settings.maxDailyLossInr) {
-                circuitBreakerTripped = true
             }
         } else if (realizedPnlInr > 0) {
             consecutiveLossCount = 0
