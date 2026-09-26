@@ -18,6 +18,8 @@ import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -208,10 +210,11 @@ class MarketScannerEngine(
         val rawCandlesMap = mutableMapOf<String, List<MarketCandle>>()
         val validPrimarySeriesMap = mutableMapOf<String, CandleSeries>()
 
+        val minRequiredCandles = strategies.maxOfOrNull { it.requiredCandleCount }?.coerceAtLeast(50) ?: 50
         for (pair in allPairsToFetch) {
             val rawCandles = primaryCandlesDeferred[pair]?.await()
-            if (rawCandles.isNullOrEmpty() || rawCandles.size < 30) {
-                AppLogManager.d("SCANNER", "[$pair] Missing or insufficient candles (${rawCandles?.size ?: 0} < 30) on $primaryTf")
+            if (rawCandles.isNullOrEmpty() || rawCandles.size < minRequiredCandles) {
+                AppLogManager.d("SCANNER", "[$pair] Missing or insufficient candles (${rawCandles?.size ?: 0} < $minRequiredCandles) on $primaryTf")
                 continue
             }
             val series = CandleSeries.fromApi(rawCandles, primaryInterval, clock, pair)
@@ -368,18 +371,45 @@ class MarketScannerEngine(
                             selectionReason = "Position Exit Signal from ${strategy.name}: ${rawSignal.reason}"
                         )
                     } else if (rawSignal.action == SignalAction.ENTER_LONG || rawSignal.action == SignalAction.ENTER_SHORT) {
+                        // Section 4 & 6: Reject stale strategy signals triggered on past candles (> 1 bar ago)
+                        val rawSignalBar = rawSignal.barOpenTimeUtc
+                        val latestClosedBar = primarySeries.openTime(0)
+                        val prevClosedBar = if (primarySeries.size > 1) primarySeries.openTime(1) else 0L
+                        if (rawSignalBar > 0L && rawSignalBar < prevClosedBar) {
+                            AppLogManager.d("SCANNER", "[$pair] [${strategy.id}] Stale strategy setup discarded (signal bar $rawSignalBar < $prevClosedBar)")
+                            continue
+                        }
+
                         strategyActionableCounts.compute(strategy.id) { _, cur -> (cur ?: 0) + 1 }
+                        val isLongAction = rawSignal.action == SignalAction.ENTER_LONG
+                        val evalEntry = if (rawSignal.entryPrice > 0.0) rawSignal.entryPrice else currentPrice
+
+                        // Exact user formulas:
+                        // Final Target % = UI Target % + Total Fees % (Buy + Sell: 0.10%) + 0.50% (unscaled by leverage)
+                        // Stop-Loss % = (UI Stop-Loss % * Leverage) - Total Fees % (0.10%)
+                        val evalSl = com.coindcx.trading.engine.TradingFeeSchedule.calculateStopLossPrice(
+                            entryPrice = evalEntry,
+                            isBuy = isLongAction,
+                            uiStopLossPercent = config.stopLossPercent,
+                            leverage = config.leverage
+                        )
+                        val evalTp = com.coindcx.trading.engine.TradingFeeSchedule.calculateTakeProfitPrice(
+                            entryPrice = evalEntry,
+                            isBuy = isLongAction,
+                            uiTargetPercent = config.targetPricePercent
+                        )
+
                         pairEvaluations.add(
                             StrategyEvaluation(
                                 strategyId = strategy.id,
                                 strategyName = strategy.name,
                                 family = SignalDedupRegistry.getFamilyForStrategy(strategy.id),
                                 action = rawSignal.action,
-                                direction = if (rawSignal.action == SignalAction.ENTER_LONG) SignalDirection.LONG else SignalDirection.SHORT,
+                                direction = if (isLongAction) SignalDirection.LONG else SignalDirection.SHORT,
                                 confidence = rawSignal.confidenceScore,
-                                entryPrice = if (rawSignal.entryPrice > 0.0) rawSignal.entryPrice else currentPrice,
-                                stopLossPrice = rawSignal.stopLossPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * (1.0 - config.stopLossPercent / 100.0) else currentPrice * (1.0 + config.stopLossPercent / 100.0)),
-                                takeProfitPrice = rawSignal.takeProfitPrice ?: (if (rawSignal.action == SignalAction.ENTER_LONG) currentPrice * (1.0 + config.targetPricePercent / 100.0) else currentPrice * (1.0 - config.targetPricePercent / 100.0)),
+                                entryPrice = evalEntry,
+                                stopLossPrice = evalSl,
+                                takeProfitPrice = evalTp,
                                 qualityScore = rawSignal.confidenceScore.toInt(),
                                 reason = rawSignal.reason
                             )
@@ -403,7 +433,8 @@ class MarketScannerEngine(
                     evaluations = pairEvaluations,
                     currentMarketPrice = currentPrice,
                     stopLossPercent = config.stopLossPercent,
-                    targetPricePercent = config.targetPricePercent
+                    targetPricePercent = config.targetPricePercent,
+                    leverage = config.leverage
                 )
                 if (candidate != null) {
                     // Suppress duplicate bar entries
@@ -414,20 +445,129 @@ class MarketScannerEngine(
                         AppLogManager.d("SCANNER", "[$pair] Duplicate entry signal suppressed for bar timestamp $currentBarTime")
                         continue
                     }
+
+                    // Section 8: Structured Timeframe Integrity Debug Logging
+                    val signalAgeSec = (clock.nowUtcMillis() - primarySeries.openTime(0)) / 1000
+                    val rawLatestTime = rawCandles.maxOfOrNull { it.time } ?: 0L
+                    val tfIntegrityLog = buildString {
+                        appendLine("Selected Timeframe: ${config.timeframe}")
+                        appendLine("Requested Timeframe: $primaryTf")
+                        appendLine("Returned Candle Timeframe: ${primarySeries.interval.label}")
+                        appendLine("Number of Candles: ${rawCandles.size} (raw), ${primarySeries.size} (closed)")
+                        appendLine("Latest Candle Timestamp: $rawLatestTime")
+                        appendLine("Latest Closed Candle Timestamp: ${primarySeries.openTime(0)}")
+                        appendLine("Strategy Evaluation Candle: ${primarySeries.openTime(0)} (bar[0])")
+                        appendLine("Signal Timestamp: ${primarySeries.openTime(0)}")
+                        appendLine("Signal Age: ${signalAgeSec}s")
+                    }
+                    AppLogManager.d("TIMEFRAME_INTEGRITY", "[$pair]\n$tfIntegrityLog")
+
+                    // Section 6: Candle Data Freshness Gate (Candle age <= 2.5 * interval duration)
+                    val candleAgeMs = clock.nowUtcMillis() - primarySeries.openTime(0)
+                    val maxAllowedAgeMs = (primaryInterval.durationMs * 2.5).toLong()
+                    if (candleAgeMs > maxAllowedAgeMs) {
+                        AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Stale market data (${candleAgeMs / 1000}s > ${maxAllowedAgeMs / 1000}s max)")
+                        continue
+                    }
+
+                    // Section 4 & 6: Passed Opportunity & Price Drift Rejection
+                    val isCandidateLong = candidate.direction == SignalDirection.LONG
+                    if (isCandidateLong) {
+                        if (currentPrice >= candidate.reconciledTakeProfit) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Target already reached ($currentPrice >= ${candidate.reconciledTakeProfit})")
+                            continue
+                        }
+                        if (currentPrice <= candidate.reconciledStopLoss) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Stop-Loss already hit ($currentPrice <= ${candidate.reconciledStopLoss})")
+                            continue
+                        }
+                        val targetDist = candidate.reconciledTakeProfit - candidate.reconciledEntry
+                        val stopDist = candidate.reconciledEntry - candidate.reconciledStopLoss
+                        if (targetDist > 0 && (currentPrice - candidate.reconciledEntry) > 0.40 * targetDist) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Price moved >40% towards target already. Opportunity passed.")
+                            continue
+                        }
+                        if (stopDist > 0 && (candidate.reconciledEntry - currentPrice) > 0.50 * stopDist) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Adverse price drift >50% towards stop-loss. Setup invalidated.")
+                            continue
+                        }
+                    } else {
+                        if (currentPrice <= candidate.reconciledTakeProfit) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Target already reached ($currentPrice <= ${candidate.reconciledTakeProfit})")
+                            continue
+                        }
+                        if (currentPrice >= candidate.reconciledStopLoss) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Stop-Loss already hit ($currentPrice >= ${candidate.reconciledStopLoss})")
+                            continue
+                        }
+                        val targetDist = candidate.reconciledEntry - candidate.reconciledTakeProfit
+                        val stopDist = candidate.reconciledStopLoss - candidate.reconciledEntry
+                        if (targetDist > 0 && (candidate.reconciledEntry - currentPrice) > 0.40 * targetDist) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Price moved >40% towards target already. Opportunity passed.")
+                            continue
+                        }
+                        if (stopDist > 0 && (currentPrice - candidate.reconciledEntry) > 0.50 * stopDist) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Adverse price drift >50% towards stop-loss. Setup invalidated.")
+                            continue
+                        }
+                    }
+
+                    // Section 5: Latest Candle Contradiction Rejection
+                    val bar0Open = primarySeries.open(0)
+                    val bar0Close = primarySeries.close(0)
+                    val bar0High = primarySeries.high(0)
+                    val bar0Low = primarySeries.low(0)
+                    val bar0Range = (bar0High - bar0Low).coerceAtLeast(0.0001)
+
+                    if (isCandidateLong) {
+                        if (bar0Close < bar0Open && (bar0Open - bar0Close) > 1.2 * atr14) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Latest closed candle is heavy bearish dump bar (${"%.4f".format(bar0Open - bar0Close)} > 1.2*ATR)")
+                            continue
+                        }
+                        if ((bar0Close - bar0Low) / bar0Range < 0.20) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Latest candle closed near dead bottom (<20% range). Buyers failed.")
+                            continue
+                        }
+                    } else {
+                        if (bar0Close > bar0Open && (bar0Close - bar0Open) > 1.2 * atr14) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Latest closed candle is heavy bullish pump bar (${"%.4f".format(bar0Close - bar0Open)} > 1.2*ATR)")
+                            continue
+                        }
+                        if ((bar0High - bar0Close) / bar0Range < 0.20) {
+                            AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Latest candle closed near top (<20% range). Sellers failed.")
+                            continue
+                        }
+                    }
+
+                    // Section 5: Calculate Dynamic Actionable Setup Confidence
+                    val dynamicConfidence = computeActionableConfidence(
+                        candidate = candidate,
+                        series = primarySeries,
+                        currentPrice = currentPrice,
+                        htfMap = htfMap
+                    )
+
+                    if (dynamicConfidence < 65.0) {
+                        AppLogManager.d("SCANNER", "[$pair] Candidate rejected: Dynamic confidence ${"%.1f".format(dynamicConfidence)}% < 65.0% threshold (lacks current setup strength)")
+                        continue
+                    }
+
                     lastProcessedEntryCandleTime[signalKey] = currentBarTime
 
                     val signalAction = if (candidate.direction == SignalDirection.LONG) SignalAction.ENTER_LONG else SignalAction.ENTER_SHORT
                     val signal = Signal(
                         symbol = pair,
                         action = signalAction,
-                        confidenceScore = candidate.aggregatedConfidence,
+                        confidenceScore = dynamicConfidence,
                         entryPrice = candidate.reconciledEntry,
                         stopLossPrice = candidate.reconciledStopLoss,
                         takeProfitPrice = candidate.reconciledTakeProfit,
                         riskRewardRatio = candidate.netRiskReward,
                         strategyId = candidate.anchorStrategy.strategyId,
                         strategyName = candidate.anchorStrategy.strategyName,
-                        reason = candidate.selectionReason
+                        reason = "${candidate.selectionReason} | Dynamic Conf: ${"%.1f".format(dynamicConfidence)}%",
+                        primaryInterval = primaryInterval,
+                        barOpenTimeUtc = primarySeries.openTime(0)
                     )
                     SignalDedupRegistry.default.recordSignal(signal, clock)
 
@@ -437,10 +577,10 @@ class MarketScannerEngine(
                         pair = pair,
                         signal = signal,
                         currentPrice = currentPrice,
-                        confidenceScore = candidate.aggregatedConfidence,
+                        confidenceScore = dynamicConfidence,
                         lifecycleState = OpportunityLifecycle.SCANNED,
-                        qualityScore = candidate.aggregatedConfidence.toInt(),
-                        qualityCategory = if (candidate.aggregatedConfidence >= 80.0) QualityCategory.PRIME else if (candidate.aggregatedConfidence >= 65.0) QualityCategory.ACCEPTABLE else QualityCategory.WATCH,
+                        qualityScore = dynamicConfidence.toInt(),
+                        qualityCategory = if (dynamicConfidence >= 80.0) QualityCategory.PRIME else if (dynamicConfidence >= 65.0) QualityCategory.ACCEPTABLE else QualityCategory.WATCH,
                         netRiskRewardRatio = candidate.netRiskReward,
                         isApproved = true,
                         strategyId = candidate.anchorStrategy.strategyId,
@@ -452,7 +592,7 @@ class MarketScannerEngine(
                         statusMessage = candidate.detectedConflicts
                     )
                     aggregatedOpportunities.add(opp)
-                    AppLogManager.trade("SCANNER", "[$pair] Aggregated Candidate Approved: ${signal.action} @ ${candidate.reconciledEntry} | SL: ${candidate.reconciledStopLoss} | TP: ${candidate.reconciledTakeProfit} | Conf: ${"%.1f".format(candidate.aggregatedConfidence)}% | Net R:R: ${"%.2f".format(candidate.netRiskReward)}")
+                    AppLogManager.trade("SCANNER", "[$pair] Aggregated Candidate Approved: ${signal.action} @ ${candidate.reconciledEntry} | SL: ${candidate.reconciledStopLoss} | TP: ${candidate.reconciledTakeProfit} | Conf: ${"%.1f".format(dynamicConfidence)}% | Net R:R: ${"%.2f".format(candidate.netRiskReward)}")
                 } else {
                     AppLogManager.d("SCANNER", "[$pair] Strategies evaluated (${pairEvaluations.size} signals) -> Aggregation rejected -> no trade setup")
                 }
@@ -481,5 +621,98 @@ class MarketScannerEngine(
         )
 
         aggregatedOpportunities
+    }
+
+    /**
+     * Section 5: Dynamic Actionable Setup Confidence Calculation.
+     * Computes genuine probability and trade quality based on:
+     * - Recency (newest closed candle)
+     * - Entry proximity (currentPrice vs reconciledEntry)
+     * - Latest candle momentum & close location
+     * - Volume confirmation (expansion vs anemic)
+     * - Multi-strategy consensus
+     * - Higher timeframe trend alignment
+     */
+    private fun computeActionableConfidence(
+        candidate: AggregatedCandidate,
+        series: CandleSeries,
+        currentPrice: Double,
+        htfMap: Map<Interval, CandleSeries>
+    ): Double {
+        var score = 55.0 // Institutional Base
+
+        // 1. Recency Bonus: Triggered directly at latest closed bar[0]
+        score += 10.0
+
+        // 2. Entry Proximity: Distance between currentPrice and reconciledEntry
+        val entryDiffPct = if (candidate.reconciledEntry > 0.0) {
+            abs(currentPrice - candidate.reconciledEntry) / candidate.reconciledEntry * 100.0
+        } else 0.0
+
+        when {
+            entryDiffPct <= 0.15 -> score += 10.0  // Executable directly at entry price
+            entryDiffPct <= 0.35 -> score += 5.0   // Very close
+            entryDiffPct <= 0.60 -> score += 0.0   // Acceptable
+            else -> score -= 12.0                 // Drifted away
+        }
+
+        // 3. Latest Candle Direction & Structure Alignment
+        if (series.isNotEmpty()) {
+            val bar0Open = series.open(0)
+            val bar0Close = series.close(0)
+            val bar0High = series.high(0)
+            val bar0Low = series.low(0)
+            val bar0Range = (bar0High - bar0Low).coerceAtLeast(0.0001)
+
+            if (candidate.direction == SignalDirection.LONG) {
+                val isGreen = bar0Close >= bar0Open
+                val closeLoc = (bar0Close - bar0Low) / bar0Range
+                if (isGreen && closeLoc >= 0.55) {
+                    score += 8.0 // Bullish close in upper half
+                } else if (!isGreen) {
+                    score -= 10.0 // Counter-trend red bar on a Long
+                }
+            } else {
+                val isRed = bar0Close <= bar0Open
+                val closeLoc = (bar0High - bar0Close) / bar0Range
+                if (isRed && closeLoc >= 0.55) {
+                    score += 8.0 // Bearish close in lower half
+                } else if (!isRed) {
+                    score -= 10.0 // Counter-trend green bar on a Short
+                }
+            }
+
+            // 4. Volume Confirmation (bar[0] vs 20 SMA)
+            val volSma20 = TechnicalIndicators.calculateVolumeSma(series, 20, 0)
+            if (volSma20 > 0.0) {
+                val volRatio = series.volume(0) / volSma20
+                when {
+                    volRatio >= 1.4 -> score += 7.0 // Institutional volume expansion
+                    volRatio >= 1.0 -> score += 4.0 // Above average volume
+                    volRatio < 0.6 -> score -= 8.0  // Low volume / fakeout risk
+                }
+            }
+        }
+
+        // 5. Multi-Strategy Confirmation Consensus
+        if (candidate.consensusCount >= 3) {
+            score += 10.0
+        } else if (candidate.consensusCount == 2) {
+            score += 5.0
+        }
+
+        // 6. Higher Timeframe (4H or 1H) Alignment
+        val htfSeries = htfMap[Interval.H4] ?: htfMap[Interval.H1]
+        if (htfSeries != null && htfSeries.size >= 50) {
+            val htfEma50 = TechnicalIndicators.calculateEmaAt(htfSeries, 50, 0)
+            val htfClose = htfSeries.close(0)
+            if (candidate.direction == SignalDirection.LONG) {
+                if (htfClose >= htfEma50) score += 6.0 else score -= 10.0
+            } else {
+                if (htfClose <= htfEma50) score += 6.0 else score -= 10.0
+            }
+        }
+
+        return score.coerceIn(10.0, 95.0)
     }
 }

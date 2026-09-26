@@ -138,7 +138,8 @@ object StrategyAggregator {
         evaluations: List<StrategyEvaluation>,
         currentMarketPrice: Double,
         stopLossPercent: Double = 3.0,
-        targetPricePercent: Double = 1.5
+        targetPricePercent: Double = 1.5,
+        leverage: Int = 1
     ): AggregatedCandidate? {
         val approved = evaluations.filter { it.isApproved }
         if (approved.isEmpty()) {
@@ -181,7 +182,8 @@ object StrategyAggregator {
                     conflictNote = conflictNote,
                     currentMarketPrice = currentMarketPrice,
                     stopLossPercent = stopLossPercent,
-                    targetPricePercent = targetPricePercent
+                    targetPricePercent = targetPricePercent,
+                    leverage = leverage
                 )
             } else {
                 com.coindcx.trading.util.AppLogManager.scanner(
@@ -203,7 +205,8 @@ object StrategyAggregator {
             conflictNote = "NONE",
             currentMarketPrice = currentMarketPrice,
             stopLossPercent = stopLossPercent,
-            targetPricePercent = targetPricePercent
+            targetPricePercent = targetPricePercent,
+            leverage = leverage
         )
     }
 
@@ -215,8 +218,17 @@ object StrategyAggregator {
         conflictNote: String,
         currentMarketPrice: Double,
         stopLossPercent: Double = 3.0,
-        targetPricePercent: Double = 1.5
+        targetPricePercent: Double = 1.5,
+        leverage: Int = 1
     ): AggregatedCandidate? {
+        if (stopLossPercent <= 0.0 || targetPricePercent <= 0.0) {
+            com.coindcx.trading.util.AppLogManager.w(
+                "AGGREGATOR",
+                "[$symbol] Non-positive SL/TP percent ($stopLossPercent / $targetPricePercent). Candidate rejected."
+            )
+            return null
+        }
+
         val sortedByConf = evaluations.sortedByDescending { it.confidence }
         val anchor = sortedByConf.first()
         val isLong = direction == SignalDirection.LONG
@@ -230,9 +242,14 @@ object StrategyAggregator {
             max(maxEntry, currentMarketPrice)
         }
 
-        // 2. Stop-Loss & Take-Profit: Configured directly from UI percentages (unscaled by leverage)
-        val slDist = reconciledEntry * (stopLossPercent / 100.0)
-        val tpDist = reconciledEntry * (targetPricePercent / 100.0)
+        // 2. Stop-Loss & Take-Profit:
+        // Final Target % = UI Target % + Total Fees % (Buy + Sell: 0.10%) + 0.50% (unscaled by leverage)
+        // Stop-Loss % = (UI Stop-Loss % * Leverage) - Total Fees % (0.10%)
+        val finalTargetPct = com.coindcx.trading.engine.TradingFeeSchedule.calculateFinalTargetPercent(targetPricePercent)
+        val finalSlPct = com.coindcx.trading.engine.TradingFeeSchedule.calculateFinalStopLossPercent(stopLossPercent, leverage)
+
+        val slDist = reconciledEntry * (finalSlPct / 100.0)
+        val tpDist = reconciledEntry * (finalTargetPct / 100.0)
         val reconciledSl = if (isLong) (reconciledEntry - slDist) else (reconciledEntry + slDist)
         val reconciledTp = if (isLong) (reconciledEntry + tpDist) else (reconciledEntry - tpDist)
 
@@ -254,10 +271,10 @@ object StrategyAggregator {
         // 4. Risk-to-Reward Calculation with dynamic FeeFriction (§D.C)
         val stopDist = abs(reconciledEntry - reconciledSl)
         val targetDist = abs(reconciledTp - reconciledEntry)
-        if (stopDist <= 0.0 || reconciledEntry <= 0.0) return null
+        if (stopDist <= 0.0 || targetDist <= 0.0 || reconciledEntry <= 0.0) return null
 
-        val rawRr = targetPricePercent / stopLossPercent
-        val feeFriction = ROUND_TRIP_FEE_SLIPPAGE_PCT / stopLossPercent
+        val rawRr = finalTargetPct / finalSlPct
+        val feeFriction = com.coindcx.trading.engine.TradingFeeSchedule.TOTAL_FEES_PERCENT / finalSlPct
         val netRr = rawRr - feeFriction
 
         if (netRr <= 0.0) {

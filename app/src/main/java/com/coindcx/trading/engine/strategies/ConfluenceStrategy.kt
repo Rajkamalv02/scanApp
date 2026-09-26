@@ -634,7 +634,9 @@ class ConfluenceStrategy(
                 reason = "Bullish Confluence Reversal: Liquidity sweep into Demand Zone confirmed by ${if (lastSignalStructureEvent == 2) "CHOCH" else "BOS"}",
                 diagnostics = diag,
                 strategyId = id,
-                strategyName = name
+                strategyName = name,
+                barOpenTimeUtc = sortedCandles.last().time,
+                primaryInterval = primaryInterval
             )
         }
 
@@ -699,7 +701,9 @@ class ConfluenceStrategy(
                 reason = "Bearish Confluence Reversal: Liquidity sweep into Supply Zone confirmed by ${if (lastSignalStructureEvent == -2) "CHOCH" else "BOS"}",
                 diagnostics = diag,
                 strategyId = id,
-                strategyName = name
+                strategyName = name,
+                barOpenTimeUtc = sortedCandles.last().time,
+                primaryInterval = primaryInterval
             )
         }
 

@@ -117,6 +117,10 @@ class MainActivity : AppCompatActivity() {
         updateStopLossUi(currentCfg.stopLossPercent)
         binding.sliderTargetPrice.value = currentCfg.targetPricePercent.toFloat().coerceIn(0.5f, 15.0f)
         updateTargetPriceUi(currentCfg.targetPricePercent)
+        binding.sliderMaxLongPositions.value = currentCfg.maxLongPositions.toFloat().coerceIn(0.0f, 10.0f)
+        updateMaxLongPositionsUi(currentCfg.maxLongPositions)
+        binding.sliderMaxShortPositions.value = currentCfg.maxShortPositions.toFloat().coerceIn(0.0f, 10.0f)
+        updateMaxShortPositionsUi(currentCfg.maxShortPositions)
     }
 
     override fun onPause() {
@@ -197,7 +201,33 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 4. Timeframe Selection
+        // 4. Max Long Positions Slider
+        val initialMaxLong = config.maxLongPositions.toFloat().coerceIn(0.0f, 10.0f)
+        binding.sliderMaxLongPositions.value = initialMaxLong
+        updateMaxLongPositionsUi(config.maxLongPositions)
+
+        binding.sliderMaxLongPositions.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                val maxLong = value.toInt()
+                updateMaxLongPositionsUi(maxLong)
+                configRepo.updateMaxLongPositions(maxLong)
+            }
+        }
+
+        // 5. Max Short Positions Slider
+        val initialMaxShort = config.maxShortPositions.toFloat().coerceIn(0.0f, 10.0f)
+        binding.sliderMaxShortPositions.value = initialMaxShort
+        updateMaxShortPositionsUi(config.maxShortPositions)
+
+        binding.sliderMaxShortPositions.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                val maxShort = value.toInt()
+                updateMaxShortPositionsUi(maxShort)
+                configRepo.updateMaxShortPositions(maxShort)
+            }
+        }
+
+        // 6. Timeframe Selection
         when (config.timeframe) {
             "1m" -> binding.chipTimeframe1m.isChecked = true
             "15m" -> binding.chipTimeframe15m.isChecked = true
@@ -352,6 +382,30 @@ class MainActivity : AppCompatActivity() {
                 binding.tvTargetPriceBadge.setTextColor(getColor(R.color.accent_amber))
             }
         }
+    }
+
+    private fun updateMaxLongPositionsUi(count: Int) {
+        binding.tvMaxLongPositionsValue.text = if (count == 0) "0 (Disabled)" else "$count"
+        val (badgeText, badgeColor) = when {
+            count == 0 -> Pair("DISABLED", getColor(R.color.text_secondary))
+            count <= 2 -> Pair("$count SLOTS", getColor(R.color.accent_green))
+            count <= 5 -> Pair("$count SLOTS", getColor(R.color.accent_blue))
+            else -> Pair("$count HIGH CAP", getColor(R.color.accent_amber))
+        }
+        binding.tvMaxLongPositionsBadge.text = badgeText
+        binding.tvMaxLongPositionsBadge.setTextColor(badgeColor)
+    }
+
+    private fun updateMaxShortPositionsUi(count: Int) {
+        binding.tvMaxShortPositionsValue.text = if (count == 0) "0 (Disabled)" else "$count"
+        val (badgeText, badgeColor) = when {
+            count == 0 -> Pair("DISABLED", getColor(R.color.text_secondary))
+            count <= 2 -> Pair("$count SLOTS", getColor(R.color.accent_green))
+            count <= 5 -> Pair("$count SLOTS", getColor(R.color.accent_blue))
+            else -> Pair("$count HIGH CAP", getColor(R.color.accent_amber))
+        }
+        binding.tvMaxShortPositionsBadge.text = badgeText
+        binding.tvMaxShortPositionsBadge.setTextColor(badgeColor)
     }
 
     private fun setupStrategySelector() {

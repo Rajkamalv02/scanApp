@@ -38,6 +38,8 @@ class TradingConfigRepository(context: Context) {
         private const val KEY_STOP_LOSS_PERCENT = "stop_loss_percent"
         private const val KEY_TARGET_PRICE_PERCENT = "target_price_percent"
         private const val KEY_ENABLE_DAILY_LOSS_LIMIT = "enable_daily_loss_limit"
+        private const val KEY_MAX_LONG_POSITIONS = "max_long_positions"
+        private const val KEY_MAX_SHORT_POSITIONS = "max_short_positions"
 
         @Volatile
         private var INSTANCE: TradingConfigRepository? = null
@@ -70,7 +72,9 @@ class TradingConfigRepository(context: Context) {
             rsiOversold = prefs.getFloat(KEY_RSI_OVERSOLD, 30.0f).toDouble(),
             rsiOverbought = prefs.getFloat(KEY_RSI_OVERBOUGHT, 70.0f).toDouble(),
             allowTier2AltcoinsLive = prefs.getBoolean(KEY_ALLOW_TIER2_LIVE, true),
-            enableDailyLossLimit = prefs.getBoolean(KEY_ENABLE_DAILY_LOSS_LIMIT, false)
+            enableDailyLossLimit = prefs.getBoolean(KEY_ENABLE_DAILY_LOSS_LIMIT, false),
+            maxLongPositions = prefs.getInt(KEY_MAX_LONG_POSITIONS, 2),
+            maxShortPositions = prefs.getInt(KEY_MAX_SHORT_POSITIONS, 2)
         )
     }
 
@@ -149,6 +153,18 @@ class TradingConfigRepository(context: Context) {
     fun updateDailyLossLimit(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_ENABLE_DAILY_LOSS_LIMIT, enabled).apply()
         _configFlow.value = _configFlow.value.copy(enableDailyLossLimit = enabled)
+    }
+
+    fun updateMaxLongPositions(count: Int) {
+        val clamped = count.coerceIn(0, 10)
+        prefs.edit().putInt(KEY_MAX_LONG_POSITIONS, clamped).apply()
+        _configFlow.value = _configFlow.value.copy(maxLongPositions = clamped)
+    }
+
+    fun updateMaxShortPositions(count: Int) {
+        val clamped = count.coerceIn(0, 10)
+        prefs.edit().putInt(KEY_MAX_SHORT_POSITIONS, clamped).apply()
+        _configFlow.value = _configFlow.value.copy(maxShortPositions = clamped)
     }
 
     fun updateStrategyTuning(

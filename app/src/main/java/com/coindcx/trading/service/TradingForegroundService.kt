@@ -91,13 +91,19 @@ class TradingForegroundService : Service() {
         tradeCandidateSelector = TradeCandidateSelector()
         allocator = AllocationEngine()
         val initConfig = configRepo.configFlow.value
+        val totalSlots = (initConfig.maxLongPositions + initConfig.maxShortPositions).coerceAtLeast(1)
         riskManager = RiskManager(
             settings = RiskSettings(
                 enableDailyLossLimit = initConfig.enableDailyLossLimit,
-                maxDailyLossInr = initConfig.maxDailyLossInr
+                maxDailyLossInr = initConfig.maxDailyLossInr,
+                maxLongPositions = initConfig.maxLongPositions,
+                maxShortPositions = initConfig.maxShortPositions,
+                maxConcurrentPositions = totalSlots
             ),
             context = applicationContext
         )
+        StrategyRegistry.xrsStrategy.maxLongPositions = initConfig.maxLongPositions
+        StrategyRegistry.xrsStrategy.maxShortPositions = initConfig.maxShortPositions
         val isLive = configRepo.isLiveMode()
         executionEngine = if (isLive) liveEngine else paperEngine
 
@@ -123,10 +129,16 @@ class TradingForegroundService : Service() {
 
         serviceScope.launch {
             configRepo.configFlow.collect { cfg ->
+                val slots = (cfg.maxLongPositions + cfg.maxShortPositions).coerceAtLeast(1)
                 riskManager.settings = riskManager.settings.copy(
                     enableDailyLossLimit = cfg.enableDailyLossLimit,
-                    maxDailyLossInr = cfg.maxDailyLossInr
+                    maxDailyLossInr = cfg.maxDailyLossInr,
+                    maxLongPositions = cfg.maxLongPositions,
+                    maxShortPositions = cfg.maxShortPositions,
+                    maxConcurrentPositions = slots
                 )
+                StrategyRegistry.xrsStrategy.maxLongPositions = cfg.maxLongPositions
+                StrategyRegistry.xrsStrategy.maxShortPositions = cfg.maxShortPositions
             }
         }
 
@@ -318,10 +330,16 @@ class TradingForegroundService : Service() {
             scanCycleCounter++
             val cycle = scanCycleCounter
             val config = configRepo.configFlow.value
+            val slots = (config.maxLongPositions + config.maxShortPositions).coerceAtLeast(1)
             riskManager.settings = riskManager.settings.copy(
                 enableDailyLossLimit = config.enableDailyLossLimit,
-                maxDailyLossInr = config.maxDailyLossInr
+                maxDailyLossInr = config.maxDailyLossInr,
+                maxLongPositions = config.maxLongPositions,
+                maxShortPositions = config.maxShortPositions,
+                maxConcurrentPositions = slots
             )
+            StrategyRegistry.xrsStrategy.maxLongPositions = config.maxLongPositions
+            StrategyRegistry.xrsStrategy.maxShortPositions = config.maxShortPositions
             val scanningStrategies = StrategyRegistry.getScanningStrategies()
             val scanningUniverseStrategies = StrategyRegistry.getScanningUniverseStrategies()
             val stratNames = (scanningStrategies.map { it.name } + scanningUniverseStrategies.map { it.name }).joinToString(", ")
@@ -662,22 +680,27 @@ class TradingForegroundService : Service() {
                     continue
                 }
 
-                val hasExplicitSl = (opp.signal.stopLossPrice ?: 0.0) > 0.0
-                val slPrice = if (hasExplicitSl) opp.signal.stopLossPrice!! else (if (opp.isBuy) opp.currentPrice * (1.0 - config.stopLossPercent / 100.0) else opp.currentPrice * (1.0 + config.stopLossPercent / 100.0))
-                val slMethodTag = if (hasExplicitSl) "STRATEGY_SIGNAL" else "CONFIG_SL_${config.stopLossPercent}PCT"
+                val actualLeverage: Int = config.leverage.coerceIn(1, riskManager.settings.maxLeverage)
+                val finalTargetPct = com.coindcx.trading.engine.TradingFeeSchedule.calculateFinalTargetPercent(config.targetPricePercent)
+                val finalSlPct = com.coindcx.trading.engine.TradingFeeSchedule.calculateFinalStopLossPercent(config.stopLossPercent, actualLeverage)
+
+                // Exact user formulas:
+                // Final Target % = UI Target % + Total Fees % (Buy + Sell: 0.10%) + 0.50% (unscaled by leverage)
+                // Stop-Loss % = (UI Stop-Loss % * Leverage) - Total Fees % (0.10%)
+                val slPrice = com.coindcx.trading.engine.TradingFeeSchedule.calculateStopLossPrice(opp.currentPrice, opp.isBuy, config.stopLossPercent, actualLeverage)
+                val slMethodTag = "FORMULA_SL_${config.stopLossPercent}PCT_LEV_${actualLeverage}X_NET_${"%.2f".format(finalSlPct)}PCT"
                 val slDistance = kotlin.math.abs(opp.currentPrice - slPrice)
-                val slDistPct = if (opp.currentPrice > 0) (slDistance / opp.currentPrice) * 100.0 else config.stopLossPercent
+                val slDistPct = finalSlPct
 
                 val marginToAllocate: Double = fundedOpp.allocatedMarginInr
-                val actualLeverage: Int = config.leverage.coerceIn(1, riskManager.settings.maxLeverage)
                 val notionalInr: Double = marginToAllocate * actualLeverage
                 val targetRiskInr: Double = notionalInr * (slDistPct / 100.0)
 
-                val tpPrice = opp.signal.takeProfitPrice ?: (if (opp.isBuy) opp.currentPrice * (1.0 + config.targetPricePercent / 100.0) else opp.currentPrice * (1.0 - config.targetPricePercent / 100.0))
+                val tpPrice = com.coindcx.trading.engine.TradingFeeSchedule.calculateTakeProfitPrice(opp.currentPrice, opp.isBuy, config.targetPricePercent)
                 val targetDistance = kotlin.math.abs(tpPrice - opp.currentPrice)
-                val targetDistPct = if (opp.currentPrice > 0) (targetDistance / opp.currentPrice) * 100.0 else config.targetPricePercent
-                val rrRatio = if (opp.signal.riskRewardRatio > 0) opp.signal.riskRewardRatio else (config.targetPricePercent / config.stopLossPercent)
-                val expectedProfitInr = targetRiskInr * rrRatio
+                val targetDistPct = finalTargetPct
+                val rrRatio = targetDistPct / slDistPct
+                val expectedProfitInr = notionalInr * (targetDistPct / 100.0)
                 val expectedLossInr = targetRiskInr
 
                 // Stop-Loss Calculation Log
@@ -689,18 +712,18 @@ class TradingForegroundService : Service() {
                     attributes = mapOf(
                         "side" to (if (opp.isBuy) "LONG" else "SHORT"),
                         "entry_price" to "%.4f".format(opp.currentPrice),
-                        "sl_method" to slMethodTag,
-                        "atr_14" to "%.4f".format(opp.signal.atr),
-                        "atr_mult" to "%.2fx".format(opp.signal.atrMultiplier),
+                        "ui_sl_pct" to "%.2f%%".format(config.stopLossPercent),
+                        "leverage" to "${actualLeverage}x",
+                        "total_fees_pct" to "%.2f%%".format(com.coindcx.trading.engine.TradingFeeSchedule.TOTAL_FEES_PERCENT),
+                        "final_sl_pct" to "%.2f%%".format(finalSlPct),
                         "sl_dist" to "%.4f".format(slDistance),
-                        "sl_dist_pct" to "%.2f%%".format(slDistPct),
                         "stop_loss" to "%.4f".format(slPrice),
                         "account_balance_inr" to "₹%.2f".format(inMemoryAvailableBalance),
                         "risk_pct" to "%.1f%%".format(config.riskPerTradePercent),
                         "risk_amount_inr" to "₹%.2f".format(targetRiskInr)
                     ),
-                    narrative = "Entry = %.4f -> SL distance = %.4f (%.2f%%) [%s] -> SL = %.4f -> Risk = ₹%.2f (%.1f%% of equity)"
-                        .format(opp.currentPrice, slDistance, slDistPct, slMethodTag, slPrice, targetRiskInr, config.riskPerTradePercent)
+                    narrative = "SL Formula: (UI %.2f%% * %dx) - Fees %.2f%% = %.2f%% -> Entry = %.4f -> SL = %.4f (Risk = ₹%.2f)"
+                        .format(config.stopLossPercent, actualLeverage, com.coindcx.trading.engine.TradingFeeSchedule.TOTAL_FEES_PERCENT, finalSlPct, opp.currentPrice, slPrice, targetRiskInr)
                 )
 
                 // Target Calculation Log
@@ -712,17 +735,19 @@ class TradingForegroundService : Service() {
                     attributes = mapOf(
                         "side" to (if (opp.isBuy) "LONG" else "SHORT"),
                         "entry_price" to "%.4f".format(opp.currentPrice),
-                        "stop_loss" to "%.4f".format(slPrice),
-                        "target_method" to "FIXED_RISK_REWARD",
-                        "rr_ratio" to "1:%.1f".format(rrRatio),
+                        "ui_target_pct" to "%.2f%%".format(config.targetPricePercent),
+                        "buy_fee_pct" to "%.2f%%".format(com.coindcx.trading.engine.TradingFeeSchedule.BUY_FEE_PERCENT),
+                        "sell_fee_pct" to "%.2f%%".format(com.coindcx.trading.engine.TradingFeeSchedule.SELL_FEE_PERCENT),
+                        "buffer_pct" to "%.2f%%".format(com.coindcx.trading.engine.TradingFeeSchedule.ADDITIONAL_BUFFER_PERCENT),
+                        "final_target_pct" to "%.2f%%".format(finalTargetPct),
                         "target_dist" to "%.4f".format(targetDistance),
-                        "target_dist_pct" to "%.2f%%".format(targetDistPct),
                         "target" to "%.4f".format(tpPrice),
                         "expected_profit_inr" to "₹%.2f".format(expectedProfitInr),
-                        "expected_loss_inr" to "₹%.2f".format(expectedLossInr)
+                        "expected_loss_inr" to "₹%.2f".format(expectedLossInr),
+                        "rr_ratio" to "1:%.2f".format(rrRatio)
                     ),
-                    narrative = "Entry = %.4f -> Stop Loss = %.4f -> Risk = ₹%.2f -> R:R 1:%.1f -> Target = %.4f (Exp Profit: ₹%.2f, Exp Loss: ₹%.2f)"
-                        .format(opp.currentPrice, slPrice, targetRiskInr, rrRatio, tpPrice, expectedProfitInr, expectedLossInr)
+                    narrative = "TP Formula: UI %.2f%% + Fees %.2f%% + Buffer %.2f%% = %.2f%% -> Entry = %.4f -> TP = %.4f (Exp Profit: ₹%.2f, Exp Loss: ₹%.2f)"
+                        .format(config.targetPricePercent, com.coindcx.trading.engine.TradingFeeSchedule.TOTAL_FEES_PERCENT, com.coindcx.trading.engine.TradingFeeSchedule.ADDITIONAL_BUFFER_PERCENT, finalTargetPct, opp.currentPrice, tpPrice, expectedProfitInr, expectedLossInr)
                 )
 
                 // Leverage & Sizing Log

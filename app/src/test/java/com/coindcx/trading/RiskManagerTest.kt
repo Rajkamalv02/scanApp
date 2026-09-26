@@ -190,6 +190,71 @@ class RiskManagerTest {
     }
 
     @Test
+    fun testPortfolioLimit_MaxLongPositionsEnforced() {
+        val customManager = RiskManager(
+            RiskSettings(
+                maxConcurrentPositions = 5,
+                maxLongPositions = 2,
+                maxShortPositions = 2
+            )
+        )
+        val openPositions = listOf(
+            createPosition("B-BTC_USDT", true),
+            createPosition("B-ETH_USDT", true)
+        )
+        // 3rd Long should be rejected
+        val longResult = customManager.checkPortfolioAndCorrelation("B-SOL_USDT", true, openPositions)
+        assertTrue(longResult is RiskCheckResult.Rejected)
+        assertEquals("Max Long positions reached (2/2).", (longResult as RiskCheckResult.Rejected).reason)
+
+        // But a Short should be approved (0/2 active shorts, total 2/5 active)
+        val shortResult = customManager.checkPortfolioAndCorrelation("B-SOL_USDT", false, openPositions)
+        assertTrue(shortResult is RiskCheckResult.Approved)
+    }
+
+    @Test
+    fun testPortfolioLimit_MaxShortPositionsEnforced() {
+        val customManager = RiskManager(
+            RiskSettings(
+                maxConcurrentPositions = 5,
+                maxLongPositions = 2,
+                maxShortPositions = 2
+            )
+        )
+        val openPositions = listOf(
+            createPosition("B-BTC_USDT", false),
+            createPosition("B-ETH_USDT", false)
+        )
+        // 3rd Short should be rejected
+        val shortResult = customManager.checkPortfolioAndCorrelation("B-SOL_USDT", false, openPositions)
+        assertTrue(shortResult is RiskCheckResult.Rejected)
+        assertEquals("Max Short positions reached (2/2).", (shortResult as RiskCheckResult.Rejected).reason)
+
+        // But a Long should be approved (0/2 active longs, total 2/5 active)
+        val longResult = customManager.checkPortfolioAndCorrelation("B-SOL_USDT", true, openPositions)
+        assertTrue(longResult is RiskCheckResult.Approved)
+    }
+
+    @Test
+    fun testPortfolioLimit_ZeroPositionsDisabled() {
+        val longDisabledManager = RiskManager(
+            RiskSettings(
+                maxConcurrentPositions = 5,
+                maxLongPositions = 0,
+                maxShortPositions = 2
+            )
+        )
+        // Long is immediately rejected even with 0 open positions
+        val longResult = longDisabledManager.checkPortfolioAndCorrelation("B-BTC_USDT", true, emptyList())
+        assertTrue(longResult is RiskCheckResult.Rejected)
+        assertEquals("Max Long positions reached (0/0).", (longResult as RiskCheckResult.Rejected).reason)
+
+        // Short is allowed
+        val shortResult = longDisabledManager.checkPortfolioAndCorrelation("B-BTC_USDT", false, emptyList())
+        assertTrue(shortResult is RiskCheckResult.Approved)
+    }
+
+    @Test
     fun testBtcCorrelation_TwoAltLongsWithoutBtc_RuleDisabled_ApprovesTrade() {
         val openPositions = listOf(
             createPosition("B-SOL_USDT", true)

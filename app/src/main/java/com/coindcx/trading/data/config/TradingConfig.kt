@@ -39,5 +39,8 @@ data class TradingConfig(
     // Canary guardrail toggle
     val allowTier2AltcoinsLive: Boolean = true,
     // Risk & Circuit breaker toggle
-    val enableDailyLossLimit: Boolean = false
+    val enableDailyLossLimit: Boolean = false,
+    // Position concurrency controls
+    val maxLongPositions: Int = 2,
+    val maxShortPositions: Int = 2
 )

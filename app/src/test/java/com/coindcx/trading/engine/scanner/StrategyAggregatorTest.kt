@@ -54,7 +54,8 @@ class StrategyAggregatorTest {
             evaluations = listOf(pbc, edtm, irc),
             currentMarketPrice = 60000.0,
             stopLossPercent = (59950.0 - 58900.0) / 59950.0 * 100.0,
-            targetPricePercent = 2.2
+            targetPricePercent = 2.2,
+            leverage = 1
         )
 
         assertNotNull("Case A should be approved", candidate)
@@ -66,17 +67,14 @@ class StrategyAggregatorTest {
         // Reconciled Entry = min(60000, 60050, 59950, current 60000) = 59950.0
         assertEquals(59950.0, candidate.reconciledEntry, 0.001)
 
-        // Reconciled SL = min(59100, 59200, 58900) = 58900.0
-        assertEquals(58900.0, candidate.reconciledStopLoss, 0.001)
+        // Reconciled SL with TradingFeeSchedule formula: (UI SL% * 1) - 0.10% = 1.65146%
+        assertEquals(58959.95, candidate.reconciledStopLoss, 0.10)
 
-        // Reconciled TP: raw was 62000.0 (dist 2050.0 = 3.42%), clamped to 2.2% scalping ceiling = 59950.0 * 1.022 = 61268.9
-        assertEquals(61268.9, candidate.reconciledTakeProfit, 0.01)
+        // Reconciled TP with TradingFeeSchedule formula: 2.2% + 0.10% + 0.50% = 2.80%
+        assertEquals(61628.60, candidate.reconciledTakeProfit, 0.10)
 
-        // Net R:R: raw = 1318.9 / 1050 = 1.2561
-        // feeFriction = 0.14 / (1050/59950 * 100) = 0.14 / 1.75146 = 0.07993
-        // netRR = 1.2561 - 0.07993 = ~1.18
         assertTrue(candidate.netRiskReward >= 0.55)
-        assertEquals(1.18, candidate.netRiskReward, 0.05)
+        assertEquals(1.63, candidate.netRiskReward, 0.05)
         assertEquals(3, candidate.consensusCount)
     }
 
@@ -131,8 +129,6 @@ class StrategyAggregatorTest {
 
     @Test
     fun `test Case C - candidate approved under scalping net RR threshold or rejected when below 0_55`() {
-        // VCEB: Entry 140, SL 135 (risk 5.0 -> clamped to 3.0% = 4.2 -> SL 135.8), TP 144 (reward 4.0 -> clamped to 2.2% = 3.08 -> TP 143.08)
-        // Raw RR = 3.08 / 4.2 = 0.733. Fee friction = 0.14 / 3.0 = 0.0467. Net RR = 0.687 >= 0.55 -> Approved!
         val vceb = StrategyEvaluation(
             strategyId = "vceb",
             strategyName = "VCEB Strategy",
@@ -150,11 +146,13 @@ class StrategyAggregatorTest {
             evaluations = listOf(vceb),
             currentMarketPrice = 140.0,
             stopLossPercent = 3.0,
-            targetPricePercent = 2.2
+            targetPricePercent = 2.2,
+            leverage = 1
         )
 
         assertNotNull("Case C qualifies under scalping Net R:R threshold", candidate)
-        assertEquals(0.69, candidate!!.netRiskReward, 0.05)
+        // With TradingFeeSchedule: Final TP = 2.2 + 0.60 = 2.80%, Final SL = 3.0 - 0.10 = 2.90% -> Net RR = (2.80-0.10)/2.90 = 0.931
+        assertEquals(0.93, candidate!!.netRiskReward, 0.05)
 
         // Candidate with Net R:R <= 0 (fee friction exceeds profit target)
         val rejectedCandidate = StrategyAggregator.aggregate(
@@ -162,9 +160,9 @@ class StrategyAggregatorTest {
             evaluations = listOf(vceb),
             currentMarketPrice = 140.0,
             stopLossPercent = 3.0,
-            targetPricePercent = 0.10
+            targetPricePercent = -0.50
         )
-        assertNull("Candidate with Net R:R <= 0 must be rejected", rejectedCandidate)
+        assertNull("Candidate with invalid or non-positive target must be rejected", rejectedCandidate)
     }
 
     @Test
@@ -200,16 +198,18 @@ class StrategyAggregatorTest {
             evaluations = listOf(stratA, stratB),
             currentMarketPrice = 30.1,
             stopLossPercent = 3.0,
-            targetPricePercent = 2.2
+            targetPricePercent = 2.2,
+            leverage = 1
         )
 
         assertNotNull(candidate)
         candidate!!
 
         assertEquals(30.0, candidate.reconciledEntry, 0.001)
-        assertEquals(29.1, candidate.reconciledStopLoss, 0.001)
-        // Scalping TP clamped to 2.2% ceiling: 30.0 + (30.0 * 0.022) = 30.66
-        assertEquals(30.66, candidate.reconciledTakeProfit, 0.01)
+        // Final SL % = (3.0 * 1) - 0.10 = 2.90% -> 30.0 * (1 - 0.029) = 29.13
+        assertEquals(29.13, candidate.reconciledStopLoss, 0.01)
+        // Final TP % = 2.2 + 0.10 + 0.50 = 2.80% -> 30.0 * (1 + 0.028) = 30.84
+        assertEquals(30.84, candidate.reconciledTakeProfit, 0.01)
 
         // Invariant check: SL < Entry < TP
         assertTrue(candidate.reconciledStopLoss < candidate.reconciledEntry)
@@ -382,5 +382,142 @@ class StrategyAggregatorTest {
         assertEquals(0, result.approvedTrades.size)
         assertEquals(0, result.deferredTrades.size)
         assertTrue(result.statusMessage.contains("0 valid actionable setups"))
+    }
+
+    @Test
+    fun `test Target Price formula - UI Target plus Fees plus Buffer, independent of Leverage`() {
+        val strat = StrategyEvaluation(
+            strategyId = "test_strat",
+            strategyName = "Test Strategy",
+            family = StrategyFamily.TREND,
+            action = SignalAction.ENTER_LONG,
+            direction = SignalDirection.LONG,
+            confidence = 80.0,
+            entryPrice = 100.0,
+            stopLossPrice = 97.0,
+            takeProfitPrice = 103.0
+        )
+
+        // Scenario 1: UI Target = 1.0%, Leverage = 1x
+        // Expected Final Target % = 1.0% + 0.05% + 0.05% + 0.5% = 1.60%
+        val candidate1x = StrategyAggregator.aggregate(
+            symbol = "B-TEST_USDT",
+            evaluations = listOf(strat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 2.0,
+            targetPricePercent = 1.0,
+            leverage = 1
+        )
+        assertNotNull(candidate1x)
+        assertEquals(101.60, candidate1x!!.reconciledTakeProfit, 0.001)
+
+        // Scenario 2: UI Target = 1.0%, Leverage = 10x
+        // CRITICAL REQUIREMENT: Leverage MUST NOT multiply target %! Target must still be 1.60%!
+        val candidate10x = StrategyAggregator.aggregate(
+            symbol = "B-TEST_USDT",
+            evaluations = listOf(strat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 1.0,
+            targetPricePercent = 1.0,
+            leverage = 10
+        )
+        assertNotNull(candidate10x)
+        assertEquals("Target price must NOT scale with 10x leverage", 101.60, candidate10x!!.reconciledTakeProfit, 0.001)
+
+        // Scenario 3: UI Target = 2.0%, Leverage = 5x
+        // Expected Final Target % = 2.0% + 0.10% + 0.5% = 2.60%
+        val candidate2pct = StrategyAggregator.aggregate(
+            symbol = "B-TEST_USDT",
+            evaluations = listOf(strat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 2.0,
+            targetPricePercent = 2.0,
+            leverage = 5
+        )
+        assertNotNull(candidate2pct)
+        assertEquals(102.60, candidate2pct!!.reconciledTakeProfit, 0.001)
+    }
+
+    @Test
+    fun `test Stop-Loss formula - UI SL multiplied by Leverage minus Total Fees`() {
+        val strat = StrategyEvaluation(
+            strategyId = "test_strat",
+            strategyName = "Test Strategy",
+            family = StrategyFamily.TREND,
+            action = SignalAction.ENTER_LONG,
+            direction = SignalDirection.LONG,
+            confidence = 80.0,
+            entryPrice = 100.0,
+            stopLossPrice = 95.0,
+            takeProfitPrice = 105.0
+        )
+
+        // Scenario 1: UI SL = 1.0%, Leverage = 5x, Total Fees = 0.10%
+        // Stop-Loss % = (1% * 5) - 0.10% = 4.90% -> SL Price = 100.0 * (1 - 0.049) = 95.10
+        val candidate5x = StrategyAggregator.aggregate(
+            symbol = "B-TEST_USDT",
+            evaluations = listOf(strat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 1.0,
+            targetPricePercent = 2.0,
+            leverage = 5
+        )
+        assertNotNull(candidate5x)
+        assertEquals(95.10, candidate5x!!.reconciledStopLoss, 0.001)
+
+        // Scenario 2: UI SL = 1.0%, Leverage = 1x, Total Fees = 0.10%
+        // Stop-Loss % = (1% * 1) - 0.10% = 0.90% -> SL Price = 100.0 * (1 - 0.009) = 99.10
+        val candidate1x = StrategyAggregator.aggregate(
+            symbol = "B-TEST_USDT",
+            evaluations = listOf(strat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 1.0,
+            targetPricePercent = 2.0,
+            leverage = 1
+        )
+        assertNotNull(candidate1x)
+        assertEquals(99.10, candidate1x!!.reconciledStopLoss, 0.001)
+
+        // Scenario 3: UI SL = 2.0%, Leverage = 3x, Total Fees = 0.10%
+        // Stop-Loss % = (2% * 3) - 0.10% = 5.90% -> SL Price = 100.0 * (1 - 0.059) = 94.10
+        val candidate3x = StrategyAggregator.aggregate(
+            symbol = "B-TEST_USDT",
+            evaluations = listOf(strat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 2.0,
+            targetPricePercent = 3.0,
+            leverage = 3
+        )
+        assertNotNull(candidate3x)
+        assertEquals(94.10, candidate3x!!.reconciledStopLoss, 0.001)
+    }
+
+    @Test
+    fun `test Short side Target Price and Stop Loss formula accuracy`() {
+        val shortStrat = StrategyEvaluation(
+            strategyId = "test_short",
+            strategyName = "Test Short Strategy",
+            family = StrategyFamily.TREND,
+            action = SignalAction.ENTER_SHORT,
+            direction = SignalDirection.SHORT,
+            confidence = 80.0,
+            entryPrice = 100.0,
+            stopLossPrice = 105.0,
+            takeProfitPrice = 95.0
+        )
+
+        // Short: UI Target = 1.0% -> Final Target % = 1.60% -> TP = 100 * (1 - 0.016) = 98.40
+        // UI SL = 1.0%, Leverage = 5x -> Final SL % = 4.90% -> SL = 100 * (1 + 0.049) = 104.90
+        val shortCand = StrategyAggregator.aggregate(
+            symbol = "B-SHORT_USDT",
+            evaluations = listOf(shortStrat),
+            currentMarketPrice = 100.0,
+            stopLossPercent = 1.0,
+            targetPricePercent = 1.0,
+            leverage = 5
+        )
+        assertNotNull(shortCand)
+        assertEquals(98.40, shortCand!!.reconciledTakeProfit, 0.001)
+        assertEquals(104.90, shortCand.reconciledStopLoss, 0.001)
     }
 }

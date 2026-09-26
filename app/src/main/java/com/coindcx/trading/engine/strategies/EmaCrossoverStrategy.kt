@@ -106,18 +106,21 @@ class EmaCrossoverStrategy(
         }
 
         // Aligned EMA indexing:
-        // Index size - 1 = Forming live candle (t)
-        // Index size - 2 = Most recently completed candle (t-1)
-        // Index size - 3 = Prior completed candle (t-2)
-        val currFast = fastEmas[fastEmas.size - 2]
-        val currSlow = slowEmas[slowEmas.size - 2]
-        val prevFast = fastEmas[fastEmas.size - 3]
-        val prevSlow = slowEmas[slowEmas.size - 3]
+        // Evaluates fresh crossover at the newest completed candle (last or size-2 depending on forming candle presence)
+        val crossAtLastBullish = fastEmas.size >= 2 && (fastEmas[fastEmas.size - 2] <= slowEmas[slowEmas.size - 2]) && (fastEmas.last() > slowEmas.last())
+        val crossAtPrevBullish = fastEmas.size >= 3 && (fastEmas[fastEmas.size - 3] <= slowEmas[slowEmas.size - 3]) && (fastEmas[fastEmas.size - 2] > slowEmas[slowEmas.size - 2])
+        val isBullishCrossover = crossAtLastBullish || crossAtPrevBullish
+
+        val crossAtLastBearish = fastEmas.size >= 2 && (fastEmas[fastEmas.size - 2] >= slowEmas[slowEmas.size - 2]) && (fastEmas.last() < slowEmas.last())
+        val crossAtPrevBearish = fastEmas.size >= 3 && (fastEmas[fastEmas.size - 3] >= slowEmas[slowEmas.size - 3]) && (fastEmas[fastEmas.size - 2] < slowEmas[slowEmas.size - 2])
+        val isBearishCrossover = crossAtLastBearish || crossAtPrevBearish
+
+        val currFast = if (crossAtLastBullish || crossAtLastBearish) fastEmas.last() else fastEmas[fastEmas.size - 2]
+        val currSlow = if (crossAtLastBullish || crossAtLastBearish) slowEmas.last() else slowEmas[slowEmas.size - 2]
+        val prevFast = if (crossAtLastBullish || crossAtLastBearish) fastEmas[fastEmas.size - 2] else fastEmas[fastEmas.size - 3]
+        val prevSlow = if (crossAtLastBullish || crossAtLastBearish) slowEmas[slowEmas.size - 2] else slowEmas[slowEmas.size - 3]
         val liveFast = fastEmas.last()
         val liveSlow = slowEmas.last()
-
-        val isBullishCrossover = (prevFast <= prevSlow) && (currFast > currSlow)
-        val isBearishCrossover = (prevFast >= prevSlow) && (currFast < currSlow)
 
         val emaSpreadPct = if (currSlow > 0) ((currFast - currSlow) / currSlow) * 100.0 else 0.0
 
@@ -280,7 +283,9 @@ class EmaCrossoverStrategy(
                 reason = "Bullish EMA Crossover: Fast ($fastPeriod) crossed above Slow ($slowPeriod) on confirmed bar",
                 diagnostics = diag,
                 strategyId = id,
-                strategyName = name
+                strategyName = name,
+                barOpenTimeUtc = sortedCandles.last().time,
+                primaryInterval = primaryInterval
             )
         }
 
@@ -339,7 +344,9 @@ class EmaCrossoverStrategy(
                 reason = "Bearish EMA Crossover: Fast ($fastPeriod) crossed below Slow ($slowPeriod) on confirmed bar",
                 diagnostics = diag,
                 strategyId = id,
-                strategyName = name
+                strategyName = name,
+                barOpenTimeUtc = sortedCandles.last().time,
+                primaryInterval = primaryInterval
             )
         }
 

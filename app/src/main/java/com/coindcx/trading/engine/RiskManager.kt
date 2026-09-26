@@ -11,8 +11,10 @@ data class RiskSettings(
     val enableDailyLossLimit: Boolean = false,       // Daily loss limit check disabled per user request
     val maxDailyLossPercent: Double = 4.0,           // 4% daily drawdown circuit breaker
     val maxDailyLossInr: Double = 2000.0,            // Fallback absolute limit
-    val maxConcurrentPositions: Int = 3,             // Max 3 total concurrent positions
-    val maxDirectionalPositions: Int = 2,            // Max 2 Longs or 2 Shorts
+    val maxConcurrentPositions: Int = 4,             // Max total concurrent positions across portfolio
+    val maxDirectionalPositions: Int = 2,            // Backwards compatibility
+    val maxLongPositions: Int = maxDirectionalPositions,
+    val maxShortPositions: Int = maxDirectionalPositions,
     val consecutiveLossLimit: Int = 3,               // 3 consecutive losses triggers cooldown
     val consecutiveLossCooldownMinutes: Long = 90L,  // 90-minute cooldown duration
     val liquidationBufferMultiplier: Double = 1.25,  // Tunable: Minimum 25% clearance between SL and Liquidation
@@ -306,8 +308,8 @@ class RiskManager(
         // val isCandidateBtc = candidatePair.contains("BTC", ignoreCase = true)
 
         if (isBuy) {
-            if (openLongs.size >= settings.maxDirectionalPositions) {
-                return RiskCheckResult.Rejected("Max Long positions reached (${openLongs.size}/${settings.maxDirectionalPositions}).")
+            if (openLongs.size >= settings.maxLongPositions) {
+                return RiskCheckResult.Rejected("Max Long positions reached (${openLongs.size}/${settings.maxLongPositions}).")
             }
 
             // BTC correlation rule for 2 altcoins disabled/commented out:
@@ -323,8 +325,8 @@ class RiskManager(
             //     }
             // }
         } else {
-            if (openShorts.size >= settings.maxDirectionalPositions) {
-                return RiskCheckResult.Rejected("Max Short positions reached (${openShorts.size}/${settings.maxDirectionalPositions}).")
+            if (openShorts.size >= settings.maxShortPositions) {
+                return RiskCheckResult.Rejected("Max Short positions reached (${openShorts.size}/${settings.maxShortPositions}).")
             }
 
             // BTC correlation rule for 2 altcoins disabled/commented out:
